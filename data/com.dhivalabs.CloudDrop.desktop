@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=CloudDrop
+GenericName=Google Drive Uploader
+Comment=Keep a folder uploaded to Google Drive
+Exec=clouddrop-gui
+Icon=com.dhivalabs.CloudDrop
+Terminal=false
+Categories=Network;FileTransfer;GTK;GNOME;
+Keywords=Google Drive;Upload;Backup;Cloud;Sync;
+StartupNotify=true
+DBusActivatable=false
+SingleMainWindow=true

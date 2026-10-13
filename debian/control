@@ -1,0 +1,34 @@
+Source: clouddrop
+Section: net
+Priority: optional
+Maintainer: Dhiva Labs <dhivakar1010@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               gcc,
+               libc6-dev,
+               pkg-config,
+               libgtk-4-dev (>= 4.12),
+               libadwaita-1-dev (>= 1.6),
+               xz-utils
+Standards-Version: 4.6.2
+Homepage: https://github.com/Dhiva-Labs/CloudDrop
+Vcs-Browser: https://github.com/Dhiva-Labs/CloudDrop
+Vcs-Git: https://github.com/Dhiva-Labs/CloudDrop.git
+Rules-Requires-Root: no
+
+Package: clouddrop
+Architecture: amd64
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         xdg-utils
+Recommends: python3-nautilus,
+            gnome-shell-extension-appindicator
+Description: Upload-only Google Drive folder
+ CloudDrop uploads everything you put in ~/CloudDrop to Google Drive, with the
+ same folder structure. Deleting a file on your computer never deletes it in
+ Drive: it becomes cloud-only and can be downloaded back at any time, so you
+ can free up space without losing anything. Space can also be freed
+ automatically some days after upload.
+ .
+ It includes a desktop app with a setup assistant, a file browser and an
+ activity history, a top-bar status icon, status icons and actions in GNOME
+ Files, and a background service that resumes interrupted uploads.

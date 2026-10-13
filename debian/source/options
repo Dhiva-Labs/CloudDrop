@@ -1,0 +1,9 @@
+# Keep build output and VCS data out of the source package;
+# packaging/vendor/ (toolchain + crates) must stay in.
+tar-ignore = "target"
+tar-ignore = ".git"
+tar-ignore = ".github"
+tar-ignore = "debian/.rust"
+tar-ignore = "debian/.cargo"
+tar-ignore = "debian/.home"
+tar-ignore = "__pycache__"

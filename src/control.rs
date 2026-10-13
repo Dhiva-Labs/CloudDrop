@@ -1,0 +1,345 @@
+//! Shared by the CLI and the desktop app: setup, daemon status, pause/resume,
+//! and the systemd service / autostart plumbing.
+
+use crate::config::{self, Config};
+use crate::db::Db;
+use crate::util::now_ms;
+use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+pub const SERVICE: &str = "clouddrop";
+pub const APP_ID: &str = "com.dhivalabs.CloudDrop";
+
+// ---------- daemon status ----------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Starting,
+    /// Everything uploaded.
+    Idle,
+    /// Files queued, waiting for their turn or for a retry.
+    Waiting,
+    Uploading,
+    /// Paused by the user.
+    Paused,
+    /// Recent network/server failures; retrying with backoff.
+    Offline,
+    NeedsSignIn,
+    /// The top folder in Drive was trashed or deleted.
+    DriveFolderMissing,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Upload {
+    pub path: String,
+    pub sent: u64,
+    pub total: u64,
+}
+
+/// Google Drive storage of the signed-in account, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Quota {
+    /// None = unlimited.
+    pub limit: Option<u64>,
+    /// Everything counted against the limit (Drive, Gmail, Photos).
+    pub usage: u64,
+    pub usage_in_drive: u64,
+}
+
+/// What the daemon is doing, written to `status.json` every couple of seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    pub pid: u32,
+    pub updated_ms: i64,
+    pub phase: Phase,
+    pub message: Option<String>,
+    pub uploads: Vec<Upload>,
+    pub waiting: u64,
+    /// Refreshed every few minutes; absent until first fetched.
+    #[serde(default)]
+    pub quota: Option<Quota>,
+}
+
+impl DaemonStatus {
+    /// Written recently by a process that still exists.
+    pub fn is_live(&self) -> bool {
+        now_ms() - self.updated_ms < 10_000 && Path::new(&format!("/proc/{}", self.pid)).exists()
+    }
+}
+
+pub fn status_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("status.json")
+}
+
+pub fn read_status(data_dir: &Path) -> Option<DaemonStatus> {
+    let text = std::fs::read_to_string(status_path(data_dir)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+pub fn write_status(data_dir: &Path, status: &DaemonStatus) -> Result<()> {
+    let path = status_path(data_dir);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(status)?)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
+}
+
+pub fn is_paused(db: &Db) -> bool {
+    db.meta_get("paused").ok().flatten().as_deref() == Some("1")
+}
+
+/// Pauses or resumes uploads; the daemon picks it up within a second.
+pub fn set_paused(db: &Db, paused: bool) -> Result<()> {
+    db.meta_set("paused", if paused { "1" } else { "0" })
+}
+
+// ---------- setup ----------
+
+/// OAuth client compiled into release builds (CLOUDDROP_CLIENT_ID/SECRET at build time).
+pub fn builtin_client() -> Option<(&'static str, &'static str)> {
+    match (option_env!("CLOUDDROP_CLIENT_ID"), option_env!("CLOUDDROP_CLIENT_SECRET")) {
+        (Some(id), Some(secret)) if !id.is_empty() && !secret.is_empty() => Some((id, secret)),
+        _ => None,
+    }
+}
+
+/// Reads the client id/secret from the JSON file Google Cloud offers for download.
+pub fn parse_client_json(text: &str) -> Result<(String, String)> {
+    let v: serde_json::Value =
+        serde_json::from_str(text.trim()).context("this is not a Google client JSON file")?;
+    let inner = ["installed", "web"]
+        .iter()
+        .find_map(|k| v.get(*k))
+        .unwrap_or(&v);
+    let id = inner["client_id"].as_str().unwrap_or_default().trim();
+    let secret = inner["client_secret"].as_str().unwrap_or_default().trim();
+    if id.is_empty() || secret.is_empty() {
+        bail!("the file has no client_id/client_secret — download the JSON of a \"Desktop app\" client");
+    }
+    Ok((id.to_string(), secret.to_string()))
+}
+
+pub fn looks_like_client_id(id: &str) -> bool {
+    let id = id.trim();
+    id.ends_with(".apps.googleusercontent.com") && id.len() > ".apps.googleusercontent.com".len()
+}
+
+pub struct SetupParams {
+    /// None = use the built-in client.
+    pub client: Option<(String, String)>,
+    pub sync_dir: PathBuf,
+    pub drive_folder: String,
+}
+
+/// Writes the config (keeping other settings) and creates the folder.
+pub fn apply_setup(p: &SetupParams) -> Result<Config> {
+    let path = config::config_path();
+    let mut cfg = Config::load_from(&path).unwrap_or_default();
+    let (id, secret) = match &p.client {
+        Some((id, secret)) => (id.trim().to_string(), secret.trim().to_string()),
+        None => builtin_client()
+            .map(|(i, s)| (i.to_string(), s.to_string()))
+            .or_else(|| {
+                (!cfg.client_id.is_empty()).then(|| (cfg.client_id.clone(), cfg.client_secret.clone()))
+            })
+            .ok_or_else(|| anyhow!("a Google client ID and secret are needed"))?,
+    };
+    if !looks_like_client_id(&id) {
+        bail!("the client ID should end with .apps.googleusercontent.com");
+    }
+    if let Ok(db_root) = Db::open_default().and_then(|db| db.meta_get("sync_root"))
+        && let Some(root) = db_root
+        && Path::new(&root) != std::path::absolute(&p.sync_dir)?
+    {
+        bail!("CloudDrop already uses {root}; the folder can't be changed after setup");
+    }
+    cfg.client_id = id;
+    cfg.client_secret = secret;
+    cfg.sync_dir = std::path::absolute(&p.sync_dir)?;
+    cfg.drive_folder = p.drive_folder.trim().to_string();
+    cfg.validate()?;
+    std::fs::create_dir_all(&cfg.sync_dir)
+        .with_context(|| format!("cannot create {}", cfg.sync_dir.display()))?;
+    cfg.save_to(&path)?;
+    Ok(cfg)
+}
+
+pub fn is_configured() -> bool {
+    Config::load().is_ok_and(|c| !c.client_id.is_empty() && !c.client_secret.is_empty())
+}
+
+pub fn is_signed_in() -> bool {
+    crate::auth::token_path().exists()
+}
+
+pub fn sign_out() -> Result<()> {
+    match std::fs::remove_file(crate::auth::token_path()) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+// ---------- systemd service ----------
+
+fn systemctl(args: &[&str]) -> Result<bool> {
+    let out = Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .context("systemctl is not available")?;
+    Ok(out.status.success())
+}
+
+pub fn service_installed() -> bool {
+    let user = dirs::config_dir().map(|d| d.join("systemd/user/clouddrop.service"));
+    let candidates = [
+        user,
+        Some(PathBuf::from("/usr/lib/systemd/user/clouddrop.service")),
+        Some(PathBuf::from("/etc/systemd/user/clouddrop.service")),
+    ];
+    candidates.into_iter().flatten().any(|p| p.exists())
+}
+
+pub fn service_active() -> bool {
+    systemctl(&["is-active", "--quiet", SERVICE]).unwrap_or(false)
+}
+
+pub fn service_enabled() -> bool {
+    systemctl(&["is-enabled", "--quiet", SERVICE]).unwrap_or(false)
+}
+
+/// Enables the daemon at login and (re)starts it so it picks up a new config.
+pub fn enable_service() -> Result<()> {
+    if !service_installed() {
+        bail!("the clouddrop service is not installed — run install.sh");
+    }
+    systemctl(&["daemon-reload"])?;
+    if !systemctl(&["enable", SERVICE])? {
+        bail!("could not enable the clouddrop service");
+    }
+    if !systemctl(&["restart", SERVICE])? {
+        bail!("could not start the clouddrop service — see `journalctl --user -u clouddrop`");
+    }
+    Ok(())
+}
+
+pub fn restart_service() -> Result<()> {
+    if !systemctl(&["restart", SERVICE])? {
+        bail!("could not restart the clouddrop service — see `journalctl --user -u clouddrop`");
+    }
+    Ok(())
+}
+
+// ---------- desktop integration ----------
+
+fn autostart_file() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join(format!("autostart/{APP_ID}.desktop")))
+}
+
+pub fn autostart_enabled() -> bool {
+    autostart_file().is_some_and(|p| {
+        std::fs::read_to_string(p).is_ok_and(|t| !t.contains("X-GNOME-Autostart-enabled=false"))
+    })
+}
+
+/// Starts the top-bar icon at login (`exec` = the desktop app binary).
+pub fn set_autostart(enabled: bool, exec: &Path) -> Result<()> {
+    let file = autostart_file().ok_or_else(|| anyhow!("no config dir"))?;
+    if !enabled {
+        return match std::fs::remove_file(&file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        };
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(
+        &file,
+        format!(
+            "[Desktop Entry]\nType=Application\nName=CloudDrop\n\
+             Comment=Google Drive upload status in the top bar\n\
+             Exec=\"{}\" --tray\nIcon={APP_ID}\nTerminal=false\nNoDisplay=true\n\
+             X-GNOME-Autostart-enabled=true\n",
+            exec.display()
+        ),
+    )?;
+    Ok(())
+}
+
+pub fn files_extension_installed() -> bool {
+    let user = dirs::data_dir().map(|d| d.join("nautilus-python/extensions/clouddrop_nautilus.py"));
+    [user, Some(PathBuf::from("/usr/share/nautilus-python/extensions/clouddrop_nautilus.py"))]
+        .into_iter()
+        .flatten()
+        .any(|p| p.exists())
+}
+
+/// Quits Files so it reloads extensions next time it opens (open windows close).
+pub fn restart_files() -> Result<()> {
+    Command::new("nautilus")
+        .arg("-q")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("cannot run nautilus")?;
+    Ok(())
+}
+
+pub fn open_uri(uri: &str) {
+    let _ = Command::new("xdg-open")
+        .arg(uri)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_google_client_json() {
+        let installed = r#"{"installed":{"client_id":"123-abc.apps.googleusercontent.com","project_id":"p","client_secret":"test-secret","redirect_uris":["http://localhost"]}}"#;
+        assert_eq!(
+            parse_client_json(installed).unwrap(),
+            ("123-abc.apps.googleusercontent.com".into(), "test-secret".into())
+        );
+        let bare = r#"{"client_id":"1.apps.googleusercontent.com","client_secret":"s"}"#;
+        assert!(parse_client_json(bare).is_ok());
+        assert!(parse_client_json(r#"{"installed":{}}"#).is_err());
+        assert!(parse_client_json("not json").is_err());
+    }
+
+    #[test]
+    fn client_id_shape() {
+        assert!(looks_like_client_id("12-ab.apps.googleusercontent.com"));
+        assert!(!looks_like_client_id(".apps.googleusercontent.com"));
+        assert!(!looks_like_client_id("not-a-client-id"));
+    }
+
+    #[test]
+    fn status_liveness() {
+        let mut s = DaemonStatus {
+            pid: std::process::id(),
+            updated_ms: now_ms(),
+            phase: Phase::Idle,
+            message: None,
+            uploads: vec![],
+            waiting: 0,
+            quota: None,
+        };
+        assert!(s.is_live());
+        s.updated_ms -= 60_000;
+        assert!(!s.is_live());
+        let dir = tempfile::tempdir().unwrap();
+        write_status(dir.path(), &s).unwrap();
+        assert_eq!(read_status(dir.path()), Some(s));
+    }
+}

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.dhivalabs.CloudDrop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>CloudDrop</name>
+  <summary>Keep a folder uploaded to Google Drive</summary>
+  <developer id="com.dhivalabs">
+    <name>Dhiva Labs</name>
+  </developer>
+  <description>
+    <p>
+      CloudDrop uploads everything you put in a folder to Google Drive, keeping
+      the same folder structure. It only ever uploads: deleting a file on your
+      computer never deletes it from Drive, so you can free up disk space and
+      still download any file back later.
+    </p>
+    <ul>
+      <li>New and edited files are uploaded automatically, edits become new versions</li>
+      <li>Renames and moves are applied in Drive without uploading again</li>
+      <li>Large uploads resume after a network drop, a reboot or a crash</li>
+      <li>Free up space only after checking that the Drive copy is identical</li>
+      <li>A top-bar icon shows progress and lets you pause uploads</li>
+    </ul>
+    <p>
+      CloudDrop talks to Google Drive with your own OAuth client, so your files
+      never pass through a third-party server.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.dhivalabs.CloudDrop.desktop</launchable>
+  <url type="homepage">https://github.com/Dhiva-Labs</url>
+  <provides>
+    <binary>clouddrop-gui</binary>
+  </provides>
+  <keywords>
+    <keyword>Google Drive</keyword>
+    <keyword>Upload</keyword>
+    <keyword>Backup</keyword>
+    <keyword>Cloud</keyword>
+  </keywords>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-13"/>
+  </releases>
+</component>

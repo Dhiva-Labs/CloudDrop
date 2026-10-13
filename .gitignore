@@ -1,0 +1,14 @@
+/target
+/vendor
+/packaging/vendor/*.tar.xz
+/packaging/vendor/SHA256SUMS
+/debian/.rust
+/debian/.cargo
+/debian/.home
+/debian/clouddrop
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper*
+/debian/debhelper-build-stamp
+__pycache__/
+/packaging/oauth-client.env

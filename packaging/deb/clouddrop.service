@@ -1,0 +1,12 @@
+[Unit]
+Description=CloudDrop — upload-only Google Drive folder
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/clouddrop run
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

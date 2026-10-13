@@ -1,0 +1,17 @@
+Vendored build inputs for the Ubuntu PPA source package
+========================================================
+
+Launchpad's PPA builders have no network access, so the source package carries:
+
+rustc / cargo / rust-std 1.97.1 (x86_64-unknown-linux-gnu)
+    The official standalone component tarballs from
+    https://static.rust-lang.org/dist/, unmodified. debian/rules runs each
+    one's install.sh into debian/.rust.
+
+crates-<version>.tar.xz
+    Produced by ./packaging/vendor/make-crates.sh: `cargo vendor` of the whole
+    workspace, with crates the Linux build doesn't compile replaced by stubs.
+    Regenerate whenever Cargo.lock changes.
+
+SHA256SUMS lists all four files; debian/rules verifies it before building.
+The tarballs are gitignored but included in the source package.

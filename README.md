@@ -1,0 +1,180 @@
+# CloudDrop
+
+An upload-only Google Drive folder for Linux.
+
+Anything you put in `~/CloudDrop` is uploaded to Google Drive with the same
+folder structure, under a `CloudDrop` folder in My Drive. Deleting a file
+locally **never** deletes it from Drive: it becomes *cloud-only*, stays listed in
+CloudDrop and in Files, and can be downloaded back at any time. So you can free up
+space on your computer without losing anything — by hand, or automatically.
+
+- **Uploads** new and edited files; edits become new versions of the same Drive file.
+- **Keeps your folders**: the same structure in Drive; renames and moves are applied
+  there without re-uploading.
+- **Never deletes in Drive**: a local delete makes the file cloud-only.
+- **Free Up Space** by hand, or **automatically** right after upload or after 7, 30 or
+  90 days — with folders you mark *Always keep on this computer* left alone. Local
+  copies are removed only after checking Google Drive holds an identical copy.
+- **Resumable**: large uploads continue where they stopped after a network drop,
+  a reboot or a crash.
+- **Desktop app** with a setup assistant, a **Home** overview (what's happening,
+  Google Drive storage, space freed), a **Files** browser of everything in CloudDrop
+  (cloud-only included) with search, filters, multi-select and drag & drop, an
+  **Activity** history, and **Settings**.
+- **Top-bar icon**: status at a glance, pause/resume, quick links.
+- **Files integration**: status emblems and a "Google Drive" column in Nautilus;
+  right-click *Free Up Space*, *Open in Google Drive*, *Retry Upload*,
+  *Always Keep on This Computer*, and a *Cloud-only Files* menu to download things back.
+
+CloudDrop only asks Google for access to the files it creates itself
+(`drive.file`) — it cannot see anything else in your Drive. Files go straight
+between your computer and Google; see the [privacy policy](https://dhivalabs.com/privacy.html#clouddrop).
+
+## Install (Ubuntu 26.04)
+
+```bash
+sudo add-apt-repository ppa:dhiva-labs/apps
+sudo apt install clouddrop
+```
+
+Open **CloudDrop** from your app grid, click **Sign In with Google**, and you're
+done: the assistant creates `~/CloudDrop`, starts the background service, adds the
+folder to the Files sidebar, turns on the top-bar icon, and can restart Files so
+the status icons appear.
+
+### From source
+
+Needs Rust, `pkg-config`, `libgtk-4-dev`, `libadwaita-1-dev` (GTK 4.12+, libadwaita
+1.6+) and, for the Files integration, `python3-nautilus`.
+
+```bash
+./install.sh            # builds and installs into ~/.local for your user
+```
+
+Source builds don't include the CloudDrop Google client, so the assistant walks you
+through creating your own free one first (about five minutes, once):
+
+1. Create a project at <https://console.cloud.google.com/projectcreate>.
+2. Enable the **Google Drive API** for it.
+3. **Google Auth Platform → Get started**: app name, your email, audience **External**.
+4. **Data Access → Add or remove scopes** → add `https://www.googleapis.com/auth/drive.file`.
+5. **Audience → Publish app** (in *Testing*, Google expires sign-ins after 7 days;
+   `drive.file` is non-sensitive, so no Google review is needed).
+6. **Clients → Create client** → **Desktop app** → **Download JSON**, and choose
+   that file in the assistant.
+
+To build with a client compiled in (as the PPA does), save it with
+`packaging/set-oauth-client.sh client_secret_….json` before building; the file is
+gitignored.
+
+From a terminal instead of the assistant:
+
+```bash
+clouddrop setup --client-json ~/Downloads/client_secret_….json
+systemctl --user enable --now clouddrop
+```
+
+## Using it
+
+Copy or move files into `~/CloudDrop` (or drag them onto CloudDrop's Files tab).
+
+- **Home** shows what's happening, how much of your Google storage is used, how much
+  space CloudDrop has freed here, and big buttons for *Open Folder*, *Add Files…*,
+  *Free Up Space…* and *Pause*.
+- **Files** browses everything in CloudDrop, including cloud-only files. Select items
+  to **Download**, **Free Up Space**, **Open in Google Drive**, **Show in Files** or
+  **Retry**; pin a folder to *Always keep on this computer*. Filter by *On this
+  computer*, *Cloud-only*, *Uploading* or *Failed*.
+- **Activity** lists what was uploaded, moved, freed, downloaded back or failed.
+- **Settings**: automatic space saving, kept folders, Google account, upload speed,
+  notifications, ignored files, top-bar icon.
+
+Closing the window keeps CloudDrop in the top bar.
+
+In Files:
+
+| Emblem | Meaning |
+| --- | --- |
+| green check | uploaded |
+| sync arrows | waiting or uploading |
+| red `!` | upload failed (right-click → *Retry Upload*) |
+
+From a terminal:
+
+```bash
+clouddrop status
+clouddrop free ~/CloudDrop/Videos
+clouddrop ls-cloud ~/CloudDrop/Videos
+clouddrop restore ~/CloudDrop/Videos/holiday.mp4
+clouddrop auto-free 30            # never | now | number of days
+clouddrop keep ~/CloudDrop/Work   # unkeep to undo
+clouddrop pause                   # resume to continue
+```
+
+## How changes are handled
+
+| You do locally | Google Drive |
+| --- | --- |
+| add a file or folder | uploaded into the matching folder |
+| edit a file | new version of the same file |
+| rename or move inside `~/CloudDrop` | renamed or moved (no re-upload) |
+| delete a file or folder | **kept**; shown as cloud-only |
+| put a different file where a cloud-only one was | new version; the old version is kept forever |
+| rename a file over another uploaded file | the overwritten one stays in Drive as `name (2).ext` |
+| move something out of `~/CloudDrop` | kept in Drive, cloud-only |
+
+A file you download back stays on your computer until you free it again or edit it
+(automatic space saving won't immediately remove it). Temporary files (`*.part`,
+`*.crdownload`, `*.tmp`, `*.swp`, `*~`, office lock files, …) are ignored.
+Symlinks are skipped.
+
+## Configuration
+
+Everything is in **Settings**; the file is `~/.config/clouddrop/config.toml`:
+
+```toml
+sync_dir = "/home/you/CloudDrop"
+drive_folder = "CloudDrop"     # top folder in My Drive
+parallel_uploads = 2
+settle_secs = 2                # wait after the last change before uploading
+notifications = true
+auto_free_days = 30            # absent = never, 0 = right after upload
+keep_local = ["Work"]          # folders never freed automatically
+ignore = [".goutputstream-*", "*.part", "*.crdownload", "*.tmp", "~$*", ".~lock.*#", "*.swp", "*~", ".Trash-*"]
+```
+
+After editing by hand: `systemctl --user restart clouddrop`. State lives in
+`~/.local/share/clouddrop/` (`state.db`, and `token.json` readable only by you).
+
+## Troubleshooting
+
+- **Logs**: `journalctl --user -u clouddrop -f`.
+- **"Sign in again"**: click *Sign In* in CloudDrop (or `clouddrop login`); uploads
+  resume by themselves.
+- **The CloudDrop folder was deleted in Drive**: restore it from Drive's trash, or
+  run `clouddrop reset-cloud --yes` to upload everything again into a new folder.
+- **No emblems or menu items in Files**: install `python3-nautilus` and restart Files
+  (Settings → *Restart Files*, or `nautilus -q`).
+- **No top-bar icon**: it needs the AppIndicator extension (built into Ubuntu).
+
+## Uninstall
+
+`sudo apt remove clouddrop` (or `./install.sh --uninstall` for a source install).
+Your files, settings and Drive copies are kept. Revoke access at
+<https://myaccount.google.com/permissions> if you no longer want CloudDrop to reach
+your Drive.
+
+## Development
+
+```bash
+cargo test --workspace                                 # unit + end-to-end tests against a fake Drive
+python3 -m unittest discover -s nautilus/tests -v      # Files extension
+cargo run --example mock_drive -- 127.0.0.1:8099      # fake Google Drive for trying the app offline
+```
+
+See [docs/DESIGN.md](docs/DESIGN.md) for the state model and rules, and
+[packaging/vendor/README](packaging/vendor/README) for the offline PPA build.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -1,0 +1,22 @@
+[package]
+name = "clouddrop-gui"
+version = "0.1.0"
+edition = "2024"
+description = "CloudDrop desktop app: setup, files, activity and top-bar icon"
+
+license = "MIT"
+repository = "https://github.com/Dhiva-Labs/CloudDrop"
+homepage = "https://github.com/Dhiva-Labs/CloudDrop"
+
+[dependencies]
+adw = { version = "0.9.2", package = "libadwaita", features = ["v1_6"] }
+anyhow = "1.0.104"
+async-channel = "2.5.0"
+clouddrop = { path = ".." }
+clouddrop-tray = { path = "../tray" }
+gtk = { version = "0.11.5", package = "gtk4", features = ["v4_12"] }
+rusqlite = "0.40.2"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "time", "macros"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1,0 +1,12 @@
+clouddrop (0.1.0~resolute1) resolute; urgency=medium
+
+  * Initial release.
+  * Upload-only sync of ~/CloudDrop to Google Drive with the same folder
+    structure; local deletes keep the Drive copy (cloud-only).
+  * Resumable uploads; renames and moves mirrored without re-uploading.
+  * Free Up Space by hand or automatically, with folders kept on this
+    computer; frees only after Google Drive's checksum matches.
+  * Desktop app (setup assistant, Home, Files, Activity, Settings), top-bar
+    status icon, and GNOME Files status icons and actions.
+
+ -- Dhiva Labs <dhivakar1010@gmail.com>  Wed, 14 Oct 2026 01:30:00 +0530

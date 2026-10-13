@@ -1,0 +1,21 @@
+[package]
+name = "clouddrop-tray"
+version = "0.1.0"
+edition = "2024"
+description = "CloudDrop top-bar status icon (StatusNotifierItem)"
+
+license = "MIT"
+repository = "https://github.com/Dhiva-Labs/CloudDrop"
+homepage = "https://github.com/Dhiva-Labs/CloudDrop"
+
+[dependencies]
+anyhow = "1.0.104"
+ksni = "0.3.6"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[dev-dependencies]
+futures-util = "0.3.34"
+tempfile = "3.27.0"
+# Same major as ksni's zbus. The integration test plays the shell's
+# StatusNotifierWatcher and inspects the published item, on a private bus.
+zbus = { version = "5", default-features = false, features = ["tokio"] }

@@ -1,0 +1,664 @@
+//! In-process fake of the Google OAuth token endpoint and the Drive v3 subset
+//! CloudDrop uses, plus a harness that runs the engine against it.
+
+#![allow(dead_code)]
+
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::{Path as AxPath, Query, State as AxState};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, patch, post, put};
+use clouddrop::actions::Ctx;
+use clouddrop::auth::{Token, save_token};
+use clouddrop::config::{Config, Endpoints};
+use clouddrop::db::{Db, Entry, State};
+use md5::{Digest, Md5};
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::sync::watch;
+
+pub const FOLDER: &str = "application/vnd.google-apps.folder";
+
+#[derive(Clone, Debug)]
+pub struct Rev {
+    pub id: String,
+    pub md5: String,
+    pub keep_forever: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Item {
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    pub parents: Vec<String>,
+    pub content: Vec<u8>,
+    pub trashed: bool,
+    pub revisions: Vec<Rev>,
+}
+
+impl Item {
+    pub fn md5(&self) -> String {
+        hex::encode(Md5::digest(&self.content))
+    }
+
+    fn json(&self) -> Value {
+        let mut v = json!({
+            "id": self.id, "name": self.name, "mimeType": self.mime,
+            "parents": self.parents, "trashed": self.trashed,
+        });
+        if self.mime != FOLDER {
+            v["md5Checksum"] = json!(self.md5());
+            v["size"] = json!(self.content.len().to_string());
+            if let Some(r) = self.revisions.last() {
+                v["headRevisionId"] = json!(r.id);
+            }
+        }
+        v
+    }
+}
+
+struct Session {
+    file_id: Option<String>,
+    name: String,
+    parents: Vec<String>,
+    move_parents: Option<(String, String)>,
+    total: usize,
+    received: Vec<u8>,
+    result: Option<Value>,
+}
+
+#[derive(Default)]
+pub struct MockState {
+    pub items: HashMap<String, Item>,
+    sessions: HashMap<String, Session>,
+    tokens: Vec<String>,
+    next: u64,
+    pub sessions_created: u64,
+    pub chunk_puts: u64,
+    pub folders_created: u64,
+    pub refreshes: u64,
+    /// Statuses to answer the next chunk PUTs with, before touching the session.
+    pub fail_puts: Vec<u16>,
+    /// Status to answer the Nth chunk PUT with (1-based count of all chunk PUTs).
+    pub fail_at: HashMap<u64, u16>,
+    /// Slows every chunk PUT down (to act while an upload is in flight).
+    pub put_delay_ms: u64,
+    pub base: String,
+}
+
+impl MockState {
+    fn id(&mut self, prefix: &str) -> String {
+        self.next += 1;
+        format!("{prefix}{}", self.next)
+    }
+
+    pub fn children(&self, parent: &str) -> Vec<Item> {
+        let mut v: Vec<Item> = self
+            .items
+            .values()
+            .filter(|i| i.parents.iter().any(|p| p == parent) && !i.trashed)
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
+    }
+
+    /// Resolves "a/b/c" from My Drive root by names; None if missing or ambiguous.
+    pub fn lookup(&self, path: &str) -> Option<Item> {
+        let mut parent = "root".to_string();
+        let mut found = None;
+        for part in path.split('/') {
+            let hits: Vec<Item> = self
+                .children(&parent)
+                .into_iter()
+                .filter(|i| i.name == part)
+                .collect();
+            if hits.len() != 1 {
+                return None;
+            }
+            parent = hits[0].id.clone();
+            found = Some(hits[0].clone());
+        }
+        found
+    }
+
+    /// Every non-folder file below `parent`, as "rel/path" -> content.
+    pub fn tree(&self, parent: &str, prefix: &str, out: &mut Vec<(String, String)>) {
+        for i in self.children(parent) {
+            let p = if prefix.is_empty() { i.name.clone() } else { format!("{prefix}/{}", i.name) };
+            if i.mime == FOLDER {
+                out.push((format!("{p}/"), String::new()));
+                self.tree(&i.id, &p, out);
+            } else {
+                out.push((p, String::from_utf8_lossy(&i.content).to_string()));
+            }
+        }
+    }
+
+    pub fn invalidate_tokens(&mut self) {
+        self.tokens.clear();
+    }
+}
+
+pub type Shared = Arc<Mutex<MockState>>;
+
+fn authed(st: &MockState, h: &HeaderMap) -> bool {
+    h.get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|t| st.tokens.iter().any(|x| x == t))
+}
+
+fn unauthorized() -> Response {
+    (StatusCode::UNAUTHORIZED, axum::Json(json!({"error": {"code": 401, "message": "Invalid Credentials"}}))).into_response()
+}
+
+fn not_found() -> Response {
+    (StatusCode::NOT_FOUND, axum::Json(json!({"error": {"code": 404, "message": "File not found"}}))).into_response()
+}
+
+async fn token(AxState(s): AxState<Shared>, body: String) -> Response {
+    let form: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
+    let mut st = s.lock().unwrap();
+    let tok = st.id("tok");
+    st.tokens.push(tok.clone());
+    match form.get("grant_type").map(String::as_str) {
+        Some("refresh_token") => {
+            st.refreshes += 1;
+            if form.get("refresh_token").map(String::as_str) != Some("good-refresh") {
+                return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": "invalid_grant"}))).into_response();
+            }
+            axum::Json(json!({"access_token": tok, "expires_in": 3600})).into_response()
+        }
+        Some("authorization_code") => axum::Json(json!({
+            "access_token": tok, "expires_in": 3600, "refresh_token": "good-refresh"
+        }))
+        .into_response(),
+        _ => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+/// Pulls the quoted literals out of "name = 'x' and 'p' in parents and …".
+fn quoted(q: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = q.chars();
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            let mut s = String::new();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => s.extend(chars.next()),
+                    '\'' => break,
+                    c => s.push(c),
+                }
+            }
+            out.push(s);
+        }
+    }
+    out
+}
+
+async fn list(AxState(s): AxState<Shared>, h: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    let st = s.lock().unwrap();
+    if !authed(&st, &h) {
+        return unauthorized();
+    }
+    let lits = quoted(q.get("q").map(String::as_str).unwrap_or(""));
+    let (name, parent) = (&lits[0], &lits[1]);
+    let mime = lits.get(2);
+    let files: Vec<Value> = st
+        .children(parent)
+        .into_iter()
+        .filter(|i| &i.name == name && mime.is_none_or(|m| &i.mime == m))
+        .map(|i| i.json())
+        .collect();
+    axum::Json(json!({ "files": files })).into_response()
+}
+
+async fn create(AxState(s): AxState<Shared>, h: HeaderMap, axum::Json(body): axum::Json<Value>) -> Response {
+    let mut st = s.lock().unwrap();
+    if !authed(&st, &h) {
+        return unauthorized();
+    }
+    let id = st.id("F");
+    let item = Item {
+        id: id.clone(),
+        name: body["name"].as_str().unwrap().to_string(),
+        mime: body["mimeType"].as_str().unwrap_or("application/octet-stream").to_string(),
+        parents: body["parents"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()).collect(),
+        content: vec![],
+        trashed: false,
+        revisions: vec![],
+    };
+    st.folders_created += 1;
+    let v = item.json();
+    st.items.insert(id, item);
+    axum::Json(v).into_response()
+}
+
+async fn get_file(
+    AxState(s): AxState<Shared>,
+    h: HeaderMap,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let st = s.lock().unwrap();
+    if !authed(&st, &h) {
+        return unauthorized();
+    }
+    let Some(item) = st.items.get(&id) else {
+        return not_found();
+    };
+    if q.get("alt").map(String::as_str) == Some("media") {
+        return item.content.clone().into_response();
+    }
+    axum::Json(item.json()).into_response()
+}
+
+async fn update_file(
+    AxState(s): AxState<Shared>,
+    h: HeaderMap,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<HashMap<String, String>>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let mut st = s.lock().unwrap();
+    if !authed(&st, &h) {
+        return unauthorized();
+    }
+    let Some(item) = st.items.get_mut(&id) else {
+        return not_found();
+    };
+    if let Some(n) = body["name"].as_str() {
+        item.name = n.to_string();
+    }
+    if let (Some(add), Some(rm)) = (q.get("addParents"), q.get("removeParents")) {
+        item.parents.retain(|p| p != rm);
+        item.parents.push(add.clone());
+    }
+    axum::Json(item.json()).into_response()
+}
+
+async fn update_revision(
+    AxState(s): AxState<Shared>,
+    h: HeaderMap,
+    AxPath((id, rev)): AxPath<(String, String)>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let mut st = s.lock().unwrap();
+    if !authed(&st, &h) {
+        return unauthorized();
+    }
+    let Some(r) = st
+        .items
+        .get_mut(&id)
+        .and_then(|i| i.revisions.iter_mut().find(|r| r.id == rev))
+    else {
+        return not_found();
+    };
+    r.keep_forever = body["keepForever"].as_bool().unwrap_or(false);
+    axum::Json(json!({ "id": rev })).into_response()
+}
+
+fn start_session(st: &mut MockState, h: &HeaderMap, file_id: Option<String>, q: &HashMap<String, String>, body: &Value) -> Response {
+    if !authed(st, h) {
+        return unauthorized();
+    }
+    if let Some(id) = &file_id
+        && !st.items.contains_key(id)
+    {
+        return not_found();
+    }
+    let total: usize = h
+        .get("X-Upload-Content-Length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap();
+    let sid = st.id("S");
+    st.sessions_created += 1;
+    st.sessions.insert(
+        sid.clone(),
+        Session {
+            file_id,
+            name: body["name"].as_str().unwrap_or_default().to_string(),
+            parents: body["parents"]
+                .as_array()
+                .map(|a| a.iter().map(|p| p.as_str().unwrap().to_string()).collect())
+                .unwrap_or_default(),
+            move_parents: q.get("addParents").zip(q.get("removeParents")).map(|(a, r)| (a.clone(), r.clone())),
+            total,
+            received: vec![],
+            result: None,
+        },
+    );
+    let loc = format!("{}/session/{sid}", st.base);
+    (StatusCode::OK, [(header::LOCATION, loc)]).into_response()
+}
+
+async fn upload_create(
+    AxState(s): AxState<Shared>,
+    h: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let mut st = s.lock().unwrap();
+    start_session(&mut st, &h, None, &q, &body)
+}
+
+async fn upload_update(
+    AxState(s): AxState<Shared>,
+    h: HeaderMap,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<HashMap<String, String>>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let mut st = s.lock().unwrap();
+    start_session(&mut st, &h, Some(id), &q, &body)
+}
+
+fn range_reply(received: usize) -> Response {
+    let mut resp = StatusCode::PERMANENT_REDIRECT.into_response();
+    if received > 0 {
+        resp.headers_mut()
+            .insert(header::RANGE, format!("bytes=0-{}", received - 1).parse().unwrap());
+    }
+    resp
+}
+
+async fn session_put(AxState(s): AxState<Shared>, h: HeaderMap, AxPath(sid): AxPath<String>, body: Bytes) -> Response {
+    let delay = s.lock().unwrap().put_delay_ms;
+    if delay > 0 && !body.is_empty() {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+    let mut st = s.lock().unwrap();
+    if !authed(&st, &h) {
+        return unauthorized();
+    }
+    let range = h.get(header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let spec = range.strip_prefix("bytes ").unwrap_or("");
+    let is_query = spec.starts_with("*/") && body.is_empty();
+    if !is_query {
+        st.chunk_puts += 1;
+        let n = st.chunk_puts;
+        let injected = if st.fail_puts.is_empty() { st.fail_at.remove(&n) } else { Some(st.fail_puts.remove(0)) };
+        if let Some(code) = injected {
+            return StatusCode::from_u16(code).unwrap().into_response();
+        }
+    }
+    let next_id = st.next + 1;
+    let Some(sess) = st.sessions.get_mut(&sid) else {
+        return not_found();
+    };
+    if let Some(done) = &sess.result {
+        return axum::Json(done.clone()).into_response();
+    }
+    if !spec.starts_with("*/") {
+        let (span, _) = spec.split_once('/').unwrap();
+        let (a, b) = span.split_once('-').unwrap();
+        let (a, b): (usize, usize) = (a.parse().unwrap(), b.parse().unwrap());
+        if a != sess.received.len() || b + 1 - a != body.len() {
+            return (StatusCode::BAD_REQUEST, "bad range").into_response();
+        }
+        sess.received.extend_from_slice(&body);
+    }
+    if sess.received.len() < sess.total {
+        return range_reply(sess.received.len());
+    }
+    // Complete: create or update the file.
+    let content = std::mem::take(&mut sess.received);
+    let (file_id, name, parents, move_parents) =
+        (sess.file_id.clone(), sess.name.clone(), sess.parents.clone(), sess.move_parents.clone());
+    st.next = next_id;
+    let rev = Rev { id: format!("R{next_id}"), md5: hex::encode(Md5::digest(&content)), keep_forever: false };
+    let item = match file_id {
+        Some(id) => {
+            let item = st.items.get_mut(&id).unwrap();
+            item.content = content;
+            if !name.is_empty() {
+                item.name = name;
+            }
+            if let Some((add, rm)) = move_parents {
+                item.parents.retain(|p| *p != rm);
+                item.parents.push(add);
+            }
+            item.revisions.push(rev);
+            item.clone()
+        }
+        None => {
+            let id = st.id("D");
+            let item = Item {
+                id: id.clone(),
+                name,
+                mime: "application/octet-stream".into(),
+                parents,
+                content,
+                trashed: false,
+                revisions: vec![rev],
+            };
+            st.items.insert(id, item.clone());
+            item
+        }
+    };
+    let v = item.json();
+    st.sessions.get_mut(&sid).unwrap().result = Some(v.clone());
+    (StatusCode::CREATED, axum::Json(v)).into_response()
+}
+
+async fn about(AxState(s): AxState<Shared>, h: HeaderMap) -> Response {
+    let st = s.lock().unwrap();
+    if !authed(&st, &h) {
+        return unauthorized();
+    }
+    let used: usize = st.items.values().map(|i| i.content.len()).sum();
+    axum::Json(json!({ "storageQuota": {
+        "limit": "16106127360", "usage": (used + 1000).to_string(), "usageInDrive": used.to_string()
+    }}))
+    .into_response()
+}
+
+/// Stands in for Google's consent page: approves at once and redirects back.
+async fn auth(Query(q): Query<HashMap<String, String>>) -> Response {
+    let target = format!(
+        "{}/?code=mock-code&state={}",
+        q.get("redirect_uri").cloned().unwrap_or_default(),
+        q.get("state").cloned().unwrap_or_default()
+    );
+    (StatusCode::FOUND, [(header::LOCATION, target)]).into_response()
+}
+
+pub async fn start_mock() -> Shared {
+    start_mock_at("127.0.0.1:0").await
+}
+
+pub async fn start_mock_at(addr: &str) -> Shared {
+    let shared: Shared = Arc::new(Mutex::new(MockState::default()));
+    let app = Router::new()
+        .route("/token", post(token))
+        .route("/auth", get(auth))
+        .route("/drive/v3/about", get(about))
+        .route("/drive/v3/files", get(list).post(create))
+        .route("/drive/v3/files/{id}", get(get_file).patch(update_file))
+        .route("/drive/v3/files/{id}/revisions/{rev}", patch(update_revision))
+        .route("/upload/drive/v3/files", post(upload_create))
+        .route("/upload/drive/v3/files/{id}", patch(upload_update))
+        .route("/session/{sid}", put(session_put))
+        .with_state(shared.clone());
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    shared.lock().unwrap().base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    shared
+}
+
+// ---------------------------------------------------------------------------
+
+pub struct Harness {
+    pub tmp: tempfile::TempDir,
+    pub root: PathBuf,
+    pub data: PathBuf,
+    pub cfg: Config,
+    pub mock: Shared,
+    pub db: Arc<Db>,
+    engine: Option<(watch::Sender<bool>, tokio::task::JoinHandle<anyhow::Result<()>>)>,
+}
+
+impl Harness {
+    pub async fn new() -> Self {
+        Self::with(|_| {}).await
+    }
+
+    pub async fn with(tweak: impl FnOnce(&mut Config)) -> Self {
+        let mock = start_mock().await;
+        let base = mock.lock().unwrap().base.clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("CloudDrop");
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut cfg = Config {
+            sync_dir: root.clone(),
+            client_id: "cid".into(),
+            client_secret: "secret".into(),
+            settle_secs: 1,
+            notifications: false,
+            chunk_size: 256 * 1024,
+            endpoints: Endpoints {
+                auth_url: format!("{base}/auth"),
+                token_url: format!("{base}/token"),
+                api_base: format!("{base}/drive/v3"),
+                upload_base: format!("{base}/upload/drive/v3"),
+            },
+            ..Config::default()
+        };
+        tweak(&mut cfg);
+        save_token(
+            &data.join("token.json"),
+            &Token { access_token: "stale".into(), refresh_token: "good-refresh".into(), expires_at: 0 },
+        )
+        .unwrap();
+        let db = Arc::new(Db::open(&data.join("state.db")).unwrap());
+        Self { tmp, root, data, cfg, mock, db, engine: None }
+    }
+
+    pub fn token_path(&self) -> PathBuf {
+        self.data.join("token.json")
+    }
+
+    pub fn drive(&self) -> Arc<clouddrop::drive::Drive> {
+        clouddrop::drive_for(&self.cfg, self.token_path())
+    }
+
+    /// A second database handle, like a separate `clouddrop` CLI process.
+    pub fn ctx(&self) -> Ctx {
+        Ctx { cfg: self.cfg.clone(), db: Db::open(&self.data.join("state.db")).unwrap() }
+    }
+
+    pub fn start(&mut self) {
+        assert!(self.engine.is_none());
+        let (tx, rx) = watch::channel(false);
+        let handle = tokio::spawn(clouddrop::engine::run(
+            self.cfg.clone(),
+            self.db.clone(),
+            self.drive(),
+            self.data.clone(),
+            rx,
+        ));
+        self.engine = Some((tx, handle));
+    }
+
+    pub async fn stop(&mut self) {
+        if let Some((tx, handle)) = self.engine.take() {
+            tx.send(true).unwrap();
+            handle.await.unwrap().unwrap();
+        }
+    }
+
+    /// Reopens the database (after deleting it, for example).
+    pub fn reopen_db(&mut self) {
+        self.db = Arc::new(Db::open(&self.data.join("state.db")).unwrap());
+    }
+
+    pub fn path(&self, rel: &str) -> PathBuf {
+        self.root.join(rel)
+    }
+
+    pub fn write(&self, rel: &str, content: &str) {
+        let p = self.path(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, content).unwrap();
+    }
+
+    pub fn entry(&self, rel: &str) -> Option<Entry> {
+        self.db.get(rel).unwrap()
+    }
+
+    pub fn state(&self, rel: &str) -> Option<State> {
+        self.entry(rel).map(|e| e.state)
+    }
+
+    pub fn cloud(&self, rel: &str) -> Option<Item> {
+        let st = self.mock.lock().unwrap();
+        let root = st.lookup(&self.cfg.drive_folder)?;
+        if rel.is_empty() {
+            return Some(root);
+        }
+        st.lookup(&format!("{}/{rel}", self.cfg.drive_folder))
+    }
+
+    pub fn cloud_tree(&self) -> Vec<(String, String)> {
+        let st = self.mock.lock().unwrap();
+        let mut out = Vec::new();
+        if let Some(root) = st.lookup(&self.cfg.drive_folder) {
+            st.tree(&root.id, "", &mut out);
+        }
+        out
+    }
+
+    pub fn stats(&self) -> (u64, u64) {
+        let st = self.mock.lock().unwrap();
+        (st.sessions_created, st.folders_created)
+    }
+
+    /// True when nothing is waiting or uploading.
+    pub fn idle(&self) -> bool {
+        self.db
+            .subtree("")
+            .unwrap()
+            .iter()
+            .all(|e| !matches!(e.state, State::Pending | State::Uploading) && !e.move_pending)
+    }
+
+    pub async fn wait(&self, what: &str, cond: impl Fn(&Harness) -> bool) {
+        self.wait_for(what, Duration::from_secs(30), cond).await
+    }
+
+    pub async fn wait_for(&self, what: &str, limit: Duration, cond: impl Fn(&Harness) -> bool) {
+        let start = Instant::now();
+        while !cond(self) {
+            if start.elapsed() > limit {
+                let rows: Vec<String> = self
+                    .db
+                    .subtree("")
+                    .unwrap()
+                    .iter()
+                    .map(|e| format!("{} {:?} {:?}", e.path, e.state, e.error))
+                    .collect();
+                panic!("timed out waiting for {what}\nentries:\n{}\ncloud: {:#?}", rows.join("\n"), self.cloud_tree());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    pub async fn settle(&self) {
+        // Let the watcher deliver events, then wait for the queue to drain.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        self.wait("queue to drain", |h| h.idle()).await;
+    }
+}
+
+pub fn read(p: &Path) -> String {
+    std::fs::read_to_string(p).unwrap()
+}
