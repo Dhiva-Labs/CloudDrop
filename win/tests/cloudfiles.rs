@@ -15,9 +15,6 @@ use clouddrop::store::LocalStore;
 use clouddrop::winstore::WinStore;
 use std::os::windows::fs::MetadataExt;
 
-/// Registering two sync roots at the same moment fails ("Element not found").
-static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 struct Memory(Vec<u8>);
 
 impl SyncFilter for Memory {
@@ -39,7 +36,6 @@ impl SyncFilter for Memory {
 
 #[test]
 fn placeholder_round_trip() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("CloudDropTest");
     std::fs::create_dir_all(&root).unwrap();
@@ -120,93 +116,4 @@ fn placeholder_round_trip() {
     if let Some(Err(panic)) = released {
         std::panic::resume_unwind(panic);
     }
-}
-
-/// Diagnostic: which handle kinds the Cloud Files calls accept. Prints a table;
-/// the assertions live in `placeholder_round_trip`.
-#[test]
-fn probe_handle_kinds() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    macro_rules! guarded {
-        ($e:expr) => {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $e))
-        };
-    }
-    use cloud_filter::placeholder::{ConvertOptions, Placeholder, UpdateOptions};
-    use std::os::windows::fs::OpenOptionsExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("CloudDropProbe");
-    std::fs::create_dir_all(&root).unwrap();
-    let content: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
-    let id = SyncRootIdBuilder::new("CloudDropProbe")
-        .user_security_id(SecurityId::current_user().unwrap())
-        .account_name(format!("probe{}", std::process::id()))
-        .build();
-    let exe = std::env::current_exe().unwrap();
-    id.register(
-        SyncRootInfo::default()
-            .with_display_name("CloudDrop probe")
-            .with_icon(format!("{},0", exe.display()))
-            .with_version("1")
-            .with_hydration_type(HydrationType::Full)
-            .with_population_type(PopulationType::AlwaysFull)
-            .with_allow_pinning(true)
-            .with_protection_mode(ProtectionMode::Personal)
-            .with_path(&root)
-            .unwrap(),
-    )
-    .expect("register probe root");
-    let connection = Session::new().connect(&root, Memory(content.clone())).expect("connect probe root");
-
-    let win32 = |path: &std::path::Path, access: u32, share: u32| -> Result<Placeholder, String> {
-        std::fs::OpenOptions::new()
-            .access_mode(access)
-            .share_mode(share)
-            .custom_flags(0x0200_0000)
-            .open(path)
-            .map(Placeholder::from)
-            .map_err(|e| format!("open: {e}"))
-    };
-    type Opener<'a> = Box<dyn Fn(&std::path::Path) -> Result<Placeholder, String> + 'a>;
-    let variants: Vec<(&str, Opener)> = vec![
-        ("attr+dac share7", Box::new(|p: &std::path::Path| win32(p, 0x80 | 0x100 | 0x4_0000, 7)) as Opener),
-        ("attr+dac share0", Box::new(|p: &std::path::Path| win32(p, 0x80 | 0x100 | 0x4_0000, 0)) as Opener),
-        ("read+write share7", Box::new(|p: &std::path::Path| win32(p, 0x8000_0000 | 0x4000_0000, 7)) as Opener),
-        (
-            "cfapi write+excl",
-            Box::new(|p: &std::path::Path| {
-                Placeholder::options().write_access().exclusive().open(p).map_err(|e| format!("open: {e}"))
-            }) as Opener,
-        ),
-    ];
-    for (i, (name, open)) in variants.iter().enumerate() {
-        let file = root.join(format!("probe{i}.bin"));
-        std::fs::write(&file, &content).unwrap();
-        let mut line = format!("PROBE {name:20}");
-        let mut step = |label: &str, r: std::thread::Result<Result<String, String>>| {
-            let r = r.unwrap_or_else(|_| Err("panicked".into()));
-            line.push_str(&format!(" | {label}={}", r.unwrap_or_else(|e| format!("ERR({e})"))));
-        };
-        step("convert", guarded!(open(&file).and_then(|mut ph| {
-            ph.convert_to_placeholder(ConvertOptions::default().mark_in_sync().blob(b"x".to_vec()), None)
-                .map(|_| "ok".into())
-                .map_err(|e| e.to_string())
-        })));
-        step("placeholder", guarded!(clouddrop::winstore::is_placeholder_path(&file).map(|b| format!("{b}")).map_err(|e| e.to_string())));
-        step("insync", guarded!(open(&file).and_then(|mut ph| {
-            ph.mark_in_sync(false, None).map_err(|e| e.to_string())?;
-            ph.mark_in_sync(true, None).map(|_| "ok".into()).map_err(|e| e.to_string())
-        })));
-        step("dehydrate", guarded!(open(&file).and_then(|mut ph| {
-            ph.update(UpdateOptions::default().dehydrate(), None).map(|_| "ok".into()).map_err(|e| e.to_string())
-        })));
-        step("dehydrated", guarded!(Ok(format!("{}", WinStore.is_dehydrated(&file)))));
-        step("read", guarded!(std::fs::read(&file).map(|b| format!("{}", b == content)).map_err(|e| e.to_string())));
-        step("revert", guarded!(clouddrop::winstore::make_plain(&file).map(|_| "ok".into()).map_err(|e| e.to_string())));
-        step("attrs", guarded!(std::fs::metadata(&file).map(|m| format!("{:#x}", m.file_attributes())).map_err(|e| e.to_string())));
-        println!("{line}");
-    }
-    drop(connection);
-    let _ = id.unregister();
 }
