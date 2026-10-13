@@ -34,11 +34,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Storage_CloudFilters", "Win32_System_Threading"] }
+cloud-filter = "0.0.6"
 
 [dev-dependencies]
 axum = "0.8.9"
 tempfile = "3.27.0"
 
 [workspace]
-members = ["tray", "gui"]
+members = ["tray", "gui", "win"]

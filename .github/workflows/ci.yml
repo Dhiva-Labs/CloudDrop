@@ -41,7 +41,15 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Clippy (core)
-        run: cargo clippy -p clouddrop --all-targets -- -D warnings
+      - name: Clippy (core and agent)
+        run: cargo clippy -p clouddrop -p clouddrop-agent --all-targets -- -D warnings
       - name: Core and end-to-end tests
         run: cargo test -p clouddrop
+      - name: Build the agent
+        run: cargo build --release -p clouddrop -p clouddrop-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clouddrop-windows-x64
+          path: |
+            target/release/clouddrop.exe
+            target/release/clouddrop-agent.exe

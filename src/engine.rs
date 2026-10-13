@@ -12,6 +12,7 @@ use crate::db::{ActivityKind, Db, Entry, Kind, State};
 use crate::drive::{Drive, DriveError};
 use crate::jobs::{self, FreeSkip, JobEvent, JobOutcome, JobSpec};
 use crate::notifier::Notifier;
+use crate::store::LocalStore;
 use crate::util::{self, LocalMeta, now_ms};
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -79,6 +80,7 @@ pub struct Engine {
     quota: Option<control::Quota>,
     last_quota: Option<Instant>,
     last_auto_free: Option<Instant>,
+    store: Arc<dyn LocalStore>,
     config_file: Option<PathBuf>,
     config_mtime: Option<SystemTime>,
     last_config_check: Instant,
@@ -127,6 +129,24 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// Optional parts of a daemon run.
+pub struct RunOptions {
+    /// Apply edits to this config file while running (no restart needed except for
+    /// the folder, Drive folder name, Google client or endpoints).
+    pub config_file: Option<PathBuf>,
+    /// How local copies are represented (plain files, or Windows placeholders).
+    pub store: Arc<dyn LocalStore>,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            config_file: None,
+            store: crate::store::platform(),
+        }
+    }
+}
+
 /// Runs the daemon until `shutdown` flips to true. `data_dir` holds token.json and status.json.
 pub async fn run(
     cfg: Config,
@@ -135,19 +155,18 @@ pub async fn run(
     data_dir: PathBuf,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    run_with_config(cfg, None, db, drive, data_dir, shutdown).await
+    run_with_options(cfg, RunOptions::default(), db, drive, data_dir, shutdown).await
 }
 
-/// Like `run`, also applying edits to `config_file` while running (no restart needed
-/// except for the folder, Drive folder name, Google client or endpoints).
-pub async fn run_with_config(
+pub async fn run_with_options(
     cfg: Config,
-    config_file: Option<PathBuf>,
+    opts: RunOptions,
     db: Arc<Db>,
     drive: Arc<Drive>,
     data_dir: PathBuf,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
+    let RunOptions { config_file, store } = opts;
     let root = cfg.sync_dir.clone();
     std::fs::create_dir_all(&root)
         .with_context(|| format!("cannot create {}", root.display()))?;
@@ -181,6 +200,7 @@ pub async fn run_with_config(
         quota: None,
         last_quota: None,
         last_auto_free: None,
+        store,
         config_mtime: config_file.as_deref().and_then(mtime),
         config_file,
         last_config_check: Instant::now(),
@@ -685,6 +705,9 @@ impl Engine {
     }
 
     fn process_file(&mut self, rel: &str, meta: LocalMeta) {
+        if self.store.is_dehydrated(&self.abs(rel)) {
+            return self.process_placeholder(rel, meta);
+        }
         match self.get(rel) {
             None => {
                 if !self.adopt_moved(rel, Kind::File, meta) {
@@ -696,8 +719,9 @@ impl Engine {
                 self.put(&Entry::new(rel, Kind::File, Some(meta)));
             }
             Some(mut e) if e.state == State::CloudOnly => {
-                // A file reappeared where a cloud-only one was. Same content → nothing to
-                // upload; different → new revision, keeping the old one forever.
+                // A file reappeared where a cloud-only one was (downloaded back, or a new
+                // file). Same content → nothing to upload; different → new revision,
+                // keeping the old one forever.
                 e.requeue();
                 e.pin_prev = e.drive_id.is_some();
                 e.move_pending = false;
@@ -709,9 +733,31 @@ impl Engine {
                     e.requeue();
                     e.set_local(Some(meta));
                     self.put(&e);
+                    self.store.pending(&self.abs(rel));
                 }
             }
         }
+    }
+
+    /// A placeholder without local data (Windows): never read it. If it was a
+    /// local file before, the file manager freed it.
+    fn process_placeholder(&mut self, rel: &str, meta: LocalMeta) {
+        let Some(mut e) = self.get(rel) else {
+            return; // not ours
+        };
+        if e.kind != Kind::File {
+            return;
+        }
+        if e.state != State::CloudOnly && e.in_cloud() {
+            e.state = State::CloudOnly;
+            e.upload_url = None;
+            e.upload_md5 = None;
+            e.error = None;
+            e.retry_at = None;
+            self.activity(ActivityKind::Freed, rel, e.cloud_size, None);
+        }
+        e.set_local(Some(meta));
+        self.put(&e);
     }
 
     /// The local item at `rel` is gone. Drive is never touched: whatever it holds
@@ -890,6 +936,7 @@ impl Engine {
             if self.cfg.keeps_local(&e.path)
                 || self.inflight.contains_key(&e.path)
                 || self.dirty.contains_key(&e.path)
+                || self.store.is_pinned(&self.abs(&e.path))
             {
                 continue;
             }
@@ -1039,6 +1086,11 @@ impl Engine {
                     e.state = State::Synced;
                 }
                 self.put(&e);
+                if e.state == State::Synced
+                    && let Some(id) = &e.drive_id
+                {
+                    self.store.synced(&self.abs(&e.path), id, true);
+                }
                 continue;
             }
             if placement_only && e.drive_id.is_none() {
@@ -1141,6 +1193,7 @@ impl Engine {
             JobOutcome::Done(d) => {
                 let content_changed = e.kind == Kind::File && e.md5 != d.md5;
                 let had_cloud_copy = e.md5.is_some();
+                let came_back_from_cloud = e.pin_prev;
                 e.drive_id = Some(d.drive_id);
                 e.cloud_name = Some(d.cloud_name);
                 e.cloud_parent = Some(d.cloud_parent);
@@ -1161,6 +1214,10 @@ impl Engine {
                 self.last_transient = None;
                 if content_changed {
                     e.uploaded_at = Some(now_ms());
+                } else if came_back_from_cloud {
+                    // Came back from cloud-only unchanged (downloaded back): keep it here
+                    // until it changes, like a restore.
+                    e.uploaded_at = None;
                 }
                 if d.uploaded_bytes > 0 {
                     self.batch.files += 1;
@@ -1201,6 +1258,11 @@ impl Engine {
                     State::Pending
                 };
                 self.put(&e);
+                if e.state == State::Synced
+                    && let Some(id) = &e.drive_id
+                {
+                    self.store.synced(&self.abs(path), id, e.kind == Kind::Dir);
+                }
                 if !local_same {
                     self.mark_dirty(path.to_string());
                 }
@@ -1268,7 +1330,8 @@ impl Engine {
                     self.mark_dirty(path);
                     return;
                 }
-                if let Err(err) = std::fs::remove_file(&abs) {
+                let id = e.drive_id.clone().unwrap_or_default();
+                if let Err(err) = self.store.free(&abs, &id) {
                     tracing::warn!("cannot free {path}: {err}");
                     return;
                 }

@@ -251,8 +251,11 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
                 let _ = tokio::signal::ctrl_c().await;
                 let _ = tx.send(true);
             });
-            engine::run_with_config(cfg, Some(config::config_path()), db, drive, config::data_dir(), rx)
-                .await?;
+            let opts = engine::RunOptions {
+                config_file: Some(config::config_path()),
+                ..Default::default()
+            };
+            engine::run_with_options(cfg, opts, db, drive, config::data_dir(), rx).await?;
             Ok(String::new())
         }
         Cmd::Status { json } => status(json),

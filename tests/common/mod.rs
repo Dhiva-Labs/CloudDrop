@@ -557,10 +557,16 @@ impl Harness {
     }
 
     pub fn start(&mut self) {
+        self.start_with_store(std::sync::Arc::new(clouddrop::store::PlainStore));
+    }
+
+    pub fn start_with_store(&mut self, store: std::sync::Arc<dyn clouddrop::store::LocalStore>) {
         assert!(self.engine.is_none());
         let (tx, rx) = watch::channel(false);
-        let handle = tokio::spawn(clouddrop::engine::run(
+        let opts = clouddrop::engine::RunOptions { config_file: None, store };
+        let handle = tokio::spawn(clouddrop::engine::run_with_options(
             self.cfg.clone(),
+            opts,
             self.db.clone(),
             self.drive(),
             self.data.clone(),
@@ -661,4 +667,47 @@ impl Harness {
 
 pub fn read(p: &Path) -> String {
     std::fs::read_to_string(p).unwrap()
+}
+
+/// Simulates Windows placeholders on Linux: a "dehydrated" file is an empty file the
+/// store remembers; `free` turns a file into one.
+#[derive(Default)]
+pub struct FakeStore {
+    pub dehydrated: Mutex<std::collections::HashSet<PathBuf>>,
+    pub pinned: Mutex<Vec<PathBuf>>,
+    pub synced: Mutex<Vec<(PathBuf, String)>>,
+    pub pending: Mutex<Vec<PathBuf>>,
+}
+
+impl FakeStore {
+    /// What Explorer's "Free up space" does.
+    pub fn dehydrate_externally(&self, abs: &Path) {
+        self.dehydrated.lock().unwrap().insert(abs.to_path_buf());
+        std::fs::write(abs, b"").unwrap();
+    }
+
+    /// What opening a placeholder does (Windows downloads it).
+    pub fn hydrate_externally(&self, abs: &Path, content: &[u8]) {
+        self.dehydrated.lock().unwrap().remove(abs);
+        std::fs::write(abs, content).unwrap();
+    }
+}
+
+impl clouddrop::store::LocalStore for FakeStore {
+    fn is_dehydrated(&self, abs: &Path) -> bool {
+        abs.exists() && self.dehydrated.lock().unwrap().contains(abs)
+    }
+    fn is_pinned(&self, abs: &Path) -> bool {
+        self.pinned.lock().unwrap().iter().any(|p| abs.starts_with(p))
+    }
+    fn free(&self, abs: &Path, _drive_id: &str) -> std::io::Result<()> {
+        self.dehydrated.lock().unwrap().insert(abs.to_path_buf());
+        std::fs::write(abs, b"")
+    }
+    fn synced(&self, abs: &Path, drive_id: &str, _is_dir: bool) {
+        self.synced.lock().unwrap().push((abs.to_path_buf(), drive_id.to_string()));
+    }
+    fn pending(&self, abs: &Path) {
+        self.pending.lock().unwrap().push(abs.to_path_buf());
+    }
 }

@@ -7,6 +7,9 @@ pub mod drive;
 pub mod engine;
 pub mod jobs;
 pub mod notifier;
+pub mod store;
+#[cfg(windows)]
+pub mod winstore;
 pub mod util;
 
 use std::path::PathBuf;

@@ -301,6 +301,26 @@ impl Drive {
         upload_status(resp).await
     }
 
+    /// Bytes `start..end` of a file's content (for downloading placeholders on demand).
+    pub async fn download_range(&self, id: &str, start: u64, end: u64) -> DResult<bytes::Bytes> {
+        if end <= start {
+            return Ok(bytes::Bytes::new());
+        }
+        let url = format!("{}/files/{id}", self.ep.api_base);
+        let range = format!("bytes={start}-{}", end - 1);
+        let resp = self
+            .call(|c| {
+                c.get(&url)
+                    .query(&[("alt", "media")])
+                    .header(reqwest::header::RANGE, range.clone())
+                    .timeout(Duration::from_secs(600))
+            })
+            .await?;
+        resp.bytes()
+            .await
+            .map_err(|e| DriveError::Transient(format!("download interrupted: {e}")))
+    }
+
     /// Streams a file's content into `out`; returns (md5 hex, bytes written).
     pub async fn download(&self, id: &str, out: &mut tokio::fs::File) -> DResult<(String, u64)> {
         let url = format!("{}/files/{id}", self.ep.api_base);

@@ -66,8 +66,36 @@ pub struct DaemonStatus {
 impl DaemonStatus {
     /// Written recently by a process that still exists.
     pub fn is_live(&self) -> bool {
-        now_ms() - self.updated_ms < 10_000 && Path::new(&format!("/proc/{}", self.pid)).exists()
+        now_ms() - self.updated_ms < 10_000 && process_exists(self.pid)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_exists(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0;
+        CloseHandle(h);
+        ok && code == STILL_ACTIVE as u32
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn process_exists(_pid: u32) -> bool {
+    true
 }
 
 pub fn status_path(data_dir: &Path) -> PathBuf {

@@ -186,7 +186,9 @@ pub async fn free(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<FreeRepor
             report.changed += 1;
             continue;
         }
-        std::fs::remove_file(&abs).with_context(|| format!("cannot delete {}", abs.display()))?;
+        crate::store::platform()
+            .free(&abs, &id)
+            .with_context(|| format!("cannot free {}", abs.display()))?;
         e.state = State::CloudOnly;
         ctx.db.put(&e)?;
         let _ = ctx.db.log_activity(ActivityKind::Freed, &e.path, Some(meta.size), None);
@@ -256,7 +258,11 @@ pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<Restor
                     ctx.db.put(&e)?;
                 }
                 Kind::File => {
-                    if std::fs::symlink_metadata(ctx.abs(&e.path)).is_ok() {
+                    let abs = ctx.abs(&e.path);
+                    // A placeholder without data (Windows) is replaced by the download.
+                    if std::fs::symlink_metadata(&abs).is_ok()
+                        && !crate::store::platform().is_dehydrated(&abs)
+                    {
                         report.blocked.push(e.path.clone());
                         continue;
                     }
@@ -321,6 +327,9 @@ async fn restore_file(ctx: &Ctx, drive: &Drive, mut e: Entry) -> Result<u64> {
             return Err(anyhow!("cannot move download into place: {err}"));
         }
         let _ = ctx.db.log_activity(ActivityKind::Restored, &e.path, Some(n as i64), None);
+        if e.state == State::Synced {
+            crate::store::platform().synced(&dest, &id, false);
+        }
         Ok(n)
     }
     .await;

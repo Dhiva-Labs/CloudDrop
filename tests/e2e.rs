@@ -756,3 +756,58 @@ async fn status_reports_drive_storage() {
     assert!(q.usage >= q.usage_in_drive);
     h.stop().await;
 }
+
+// ---- Windows placeholder behaviour, simulated with common::FakeStore ----
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placeholders_stay_visible_when_freed_and_are_never_uploaded() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::with(|c| c.auto_free_days = Some(0)).await;
+    h.write("a.txt", "alpha content");
+    h.start_with_store(store.clone());
+    h.wait("auto-freed", |h| h.state("a.txt") == Some(State::CloudOnly)).await;
+    h.settle().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(h.path("a.txt").exists(), "a freed placeholder stays in the folder");
+    assert_eq!(h.state("a.txt"), Some(State::CloudOnly));
+    assert_eq!(h.cloud("a.txt").unwrap().content, b"alpha content");
+    assert_eq!(h.stats().0, 1, "the empty placeholder is never uploaded");
+    let id = h.entry("a.txt").unwrap().drive_id.unwrap();
+    assert!(store.synced.lock().unwrap().iter().any(|(p, d)| p == &h.path("a.txt") && *d == id));
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explorer_free_and_open_round_trip_without_reupload() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::new().await;
+    h.write("b.txt", "bravo");
+    h.start_with_store(store.clone());
+    h.settle().await;
+    let sessions = h.stats().0;
+
+    store.dehydrate_externally(&h.path("b.txt"));
+    h.wait("freed by Explorer", |h| h.state("b.txt") == Some(State::CloudOnly)).await;
+    assert!(kinds(&h).contains(&(clouddrop::db::ActivityKind::Freed, "b.txt".into())));
+
+    store.hydrate_externally(&h.path("b.txt"), b"bravo");
+    h.wait("hydrated", |h| h.state("b.txt") == Some(State::Synced)).await;
+    assert_eq!(h.stats().0, sessions, "opening a placeholder doesn't upload anything");
+    assert_eq!(h.entry("b.txt").unwrap().uploaded_at, None, "kept until changed");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_items_are_not_freed_automatically() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::with(|c| c.auto_free_days = Some(0)).await;
+    store.pinned.lock().unwrap().push(h.path("Pinned"));
+    h.write("Pinned/keep.txt", "keep");
+    h.write("free.txt", "free");
+    h.start_with_store(store.clone());
+    h.wait("free.txt freed", |h| h.state("free.txt") == Some(State::CloudOnly)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(h.state("Pinned/keep.txt"), Some(State::Synced));
+    assert_eq!(read(&h.path("Pinned/keep.txt")), "keep");
+    h.stop().await;
+}
