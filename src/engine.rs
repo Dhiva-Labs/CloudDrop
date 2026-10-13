@@ -45,13 +45,7 @@ struct Inflight {
     handle: tokio::task::JoinHandle<()>,
 }
 
-type StatusKey = (
-    Phase,
-    Option<String>,
-    Vec<Upload>,
-    u64,
-    Option<control::Quota>,
-);
+type StatusKey = (Phase, Option<String>, Vec<Upload>, u64, Option<control::Quota>);
 
 #[derive(Default)]
 struct Batch {
@@ -176,7 +170,8 @@ pub async fn run_with_options(
 ) -> Result<()> {
     let RunOptions { config_file, store } = opts;
     let root = cfg.sync_dir.clone();
-    std::fs::create_dir_all(&root).with_context(|| format!("cannot create {}", root.display()))?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("cannot create {}", root.display()))?;
     db.bind_root(&root)?;
     let _ = control::clear_stop(&db); // a stale request must not stop this run
     let reset = db.reset_uploading()?;
@@ -238,10 +233,7 @@ pub async fn run_with_options(
     let _watcher = match watcher {
         Ok(w) => Some(w),
         Err(e) => {
-            tracing::warn!(
-                "cannot watch {}: {e}; falling back to a rescan every minute",
-                eng.root.display()
-            );
+            tracing::warn!("cannot watch {}: {e}; falling back to a rescan every minute", eng.root.display());
             eng.cfg.rescan_secs = eng.cfg.rescan_secs.min(60);
             None
         }
@@ -330,13 +322,7 @@ impl Engine {
             };
         }
         let name = &self.cfg.drive_folder;
-        let id = match self
-            .drive
-            .find_child(name, "root", true)
-            .await?
-            .into_iter()
-            .next()
-        {
+        let id = match self.drive.find_child(name, "root", true).await?.into_iter().next() {
             Some(existing) => existing.id,
             None => self.drive.create_folder(name, "root").await?.id,
         };
@@ -354,10 +340,7 @@ impl Engine {
         }
         let rel = util::rel_path(&self.root, abs);
         if rel.is_none() {
-            self.warn_once(&format!(
-                "skipping {}: name is not valid UTF-8",
-                abs.display()
-            ));
+            self.warn_once(&format!("skipping {}: name is not valid UTF-8", abs.display()));
         }
         rel
     }
@@ -418,8 +401,7 @@ impl Engine {
             .collect();
         for k in keys {
             let job = self.inflight.remove(&k).expect("key");
-            self.inflight
-                .insert(format!("{to}{}", &k[from.len()..]), job);
+            self.inflight.insert(format!("{to}{}", &k[from.len()..]), job);
         }
     }
 
@@ -467,11 +449,7 @@ impl Engine {
                 }
             }
             EventKind::Modify(ModifyKind::Name(RenameMode::To)) if cfg!(windows) => {
-                let to = ev
-                    .paths
-                    .first()
-                    .and_then(|p| self.rel(p))
-                    .filter(|r| !r.is_empty());
+                let to = ev.paths.first().and_then(|p| self.rel(p)).filter(|r| !r.is_empty());
                 if let Some(t) = &to {
                     self.mark_dirty(t.clone());
                 }
@@ -579,12 +557,7 @@ impl Engine {
             moved.retry_at = None;
             self.put(&moved);
             tracing::info!("kept the cloud copy of {} as {dest}", e.path);
-            self.activity(
-                ActivityKind::KeptInCloud,
-                &dest,
-                moved.cloud_size,
-                Some(&e.path),
-            );
+            self.activity(ActivityKind::KeptInCloud, &dest, moved.cloud_size, Some(&e.path));
         } else {
             let _ = self.db.delete(&dest);
         }
@@ -620,9 +593,7 @@ impl Engine {
         }
         if self.inflight.contains_key(rel) {
             // Re-check once its job has reported back.
-            self.dirty
-                .entry(rel.to_string())
-                .or_insert_with(Instant::now);
+            self.dirty.entry(rel.to_string()).or_insert_with(Instant::now);
             return;
         }
         if from_scan && self.dirty.contains_key(rel) {
@@ -826,11 +797,7 @@ impl Engine {
 
     fn settle_removed(&mut self, mut e: Entry) {
         let has_children = e.kind == Kind::Dir
-            && self
-                .db
-                .subtree(&e.path)
-                .map(|s| s.len() > 1)
-                .unwrap_or(false);
+            && self.db.subtree(&e.path).map(|s| s.len() > 1).unwrap_or(false);
         if e.in_cloud() || has_children {
             e.state = State::CloudOnly;
             e.upload_url = None;
@@ -861,9 +828,7 @@ impl Engine {
             if e.state != State::CloudOnly
                 && !self.inflight.contains_key(&e.path)
                 && std::fs::symlink_metadata(self.abs(&e.path)).is_err()
-                && self
-                    .get(&e.path)
-                    .is_some_and(|cur| cur.state != State::CloudOnly)
+                && self.get(&e.path).is_some_and(|cur| cur.state != State::CloudOnly)
             {
                 self.handle_removed(&e.path);
             }
@@ -899,9 +864,7 @@ impl Engine {
             || new.client_id != self.cfg.client_id
             || new.endpoints != self.cfg.endpoints
         {
-            tracing::warn!(
-                "folder, Drive folder or Google client changed; restart CloudDrop to apply"
-            );
+            tracing::warn!("folder, Drive folder or Google client changed; restart CloudDrop to apply");
         }
         if new.ignore != self.cfg.ignore {
             match build_ignore(&new.ignore) {
@@ -971,9 +934,7 @@ impl Engine {
         };
         if self.paused.is_some()
             || self.user_paused
-            || self
-                .last_auto_free
-                .is_some_and(|t| t.elapsed() < AUTO_FREE_EVERY)
+            || self.last_auto_free.is_some_and(|t| t.elapsed() < AUTO_FREE_EVERY)
             || self.inflight.len() >= self.cfg.parallel_uploads
         {
             return;
@@ -1045,11 +1006,7 @@ impl Engine {
         if let Some((msg, _, _)) = &self.paused {
             return (Phase::NeedsSignIn, Some(msg.clone()));
         }
-        if self
-            .inflight
-            .values()
-            .any(|j| !j.aborted && j.is_file && !j.free)
-        {
+        if self.inflight.values().any(|j| !j.aborted && j.is_file && !j.free) {
             return (Phase::Uploading, None);
         }
         if waiting > 0 {
@@ -1081,10 +1038,7 @@ impl Engine {
         let key = (phase, message, uploads, waiting, self.quota);
         let since = self.last_status_write.elapsed();
         let changed = self.last_status.as_ref() != Some(&key);
-        if !(changed && since >= Duration::from_millis(500))
-            && since < Duration::from_secs(2)
-            && self.last_status.is_some()
-        {
+        if !(changed && since >= Duration::from_millis(500)) && since < Duration::from_secs(2) && self.last_status.is_some() {
             return;
         }
         let status = DaemonStatus {
@@ -1172,14 +1126,7 @@ impl Engine {
         }
     }
 
-    fn dispatch(
-        &mut self,
-        e: Entry,
-        name: String,
-        parent_id: String,
-        placement_only: bool,
-        free: bool,
-    ) {
+    fn dispatch(&mut self, e: Entry, name: String, parent_id: String, placement_only: bool, free: bool) {
         let id = self.next_id;
         self.next_id += 1;
         let path = e.path.clone();
@@ -1295,11 +1242,7 @@ impl Engine {
                     self.batch.files += 1;
                     self.batch.bytes += d.uploaded_bytes;
                     tracing::info!("uploaded {path} ({})", util::human_bytes(d.uploaded_bytes));
-                    let kind = if had_cloud_copy {
-                        ActivityKind::Updated
-                    } else {
-                        ActivityKind::Uploaded
-                    };
+                    let kind = if had_cloud_copy { ActivityKind::Updated } else { ActivityKind::Uploaded };
                     self.activity(kind, path, Some(d.uploaded_bytes as i64), None);
                     if self.cfg.auto_free_days == Some(0) {
                         self.last_auto_free = None; // free promptly after uploads
@@ -1350,15 +1293,10 @@ impl Engine {
                 e.state = State::Pending;
                 self.put(&e);
                 // Let the next pass see the deletion (or the replacement file).
-                self.dirty
-                    .insert(path.to_string(), Instant::now() - Duration::from_secs(3600));
+                self.dirty.insert(path.to_string(), Instant::now() - Duration::from_secs(3600));
             }
             JobOutcome::Failed(err) => {
-                let base = if job.placement_only {
-                    State::CloudOnly
-                } else {
-                    State::Pending
-                };
+                let base = if job.placement_only { State::CloudOnly } else { State::Pending };
                 match err {
                     DriveError::Auth(msg) => {
                         e.state = base;
@@ -1424,15 +1362,11 @@ impl Engine {
                 self.activity(ActivityKind::AutoFreed, &path, Some(checked.size), None);
             }
             JobOutcome::FreeSkip(skip @ (FreeSkip::CloudDiffers | FreeSkip::CloudGone)) => {
-                tracing::warn!(
-                    "{path}: Drive copy is not identical ({skip:?}); uploading the local copy again"
-                );
+                tracing::warn!("{path}: Drive copy is not identical ({skip:?}); uploading the local copy again");
                 mark_for_reupload(&mut e, skip == FreeSkip::CloudDiffers);
                 self.put(&e);
             }
-            JobOutcome::FreeSkip(FreeSkip::LocalChanged) | JobOutcome::Vanished => {
-                self.mark_dirty(path)
-            }
+            JobOutcome::FreeSkip(FreeSkip::LocalChanged) | JobOutcome::Vanished => self.mark_dirty(path),
             JobOutcome::Failed(DriveError::Auth(msg)) => self.pause(msg),
             JobOutcome::Failed(err) => tracing::debug!("{path}: free check failed: {err}"),
             JobOutcome::Done(_) => {}
@@ -1444,8 +1378,7 @@ impl Engine {
     fn pause(&mut self, msg: String) {
         if self.paused.is_none() {
             tracing::warn!("pausing uploads: {msg}");
-            self.notifier
-                .send("CloudDrop needs you to sign in again", &msg);
+            self.notifier.send("CloudDrop needs you to sign in again", &msg);
         }
         self.paused = Some((msg, mtime(&self.token_path), Instant::now()));
     }
@@ -1467,10 +1400,8 @@ impl Engine {
             return;
         }
         self.last_error_note = Some(Instant::now());
-        self.notifier.send(
-            "CloudDrop could not upload a file",
-            &format!("{path}: {msg}"),
-        );
+        self.notifier
+            .send("CloudDrop could not upload a file", &format!("{path}: {msg}"));
     }
 
     fn idle_notify(&mut self) {
@@ -1483,13 +1414,7 @@ impl Engine {
             return;
         }
         let b = std::mem::take(&mut self.batch);
-        let count = |n: u64| {
-            if n == 1 {
-                "1 file".to_string()
-            } else {
-                format!("{n} files")
-            }
-        };
+        let count = |n: u64| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
         if b.files > 0 {
             self.notifier.send(
                 "Uploaded to Google Drive",

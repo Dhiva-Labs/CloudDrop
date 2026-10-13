@@ -8,10 +8,7 @@ use common::{Harness, read};
 use std::time::Duration;
 
 fn tree(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-    pairs
-        .iter()
-        .map(|(a, b)| (a.to_string(), b.to_string()))
-        .collect()
+    pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -68,25 +65,17 @@ async fn local_delete_keeps_cloud_copy() {
     h.settle().await;
 
     std::fs::remove_file(h.path("photos/one.jpg")).unwrap();
-    h.wait("one.jpg cloud-only", |h| {
-        h.state("photos/one.jpg") == Some(State::CloudOnly)
-    })
-    .await;
+    h.wait("one.jpg cloud-only", |h| h.state("photos/one.jpg") == Some(State::CloudOnly)).await;
 
     std::fs::remove_dir_all(h.path("photos")).unwrap();
     h.wait("folder cloud-only", |h| {
-        h.state("photos") == Some(State::CloudOnly)
-            && h.state("photos/two.jpg") == Some(State::CloudOnly)
+        h.state("photos") == Some(State::CloudOnly) && h.state("photos/two.jpg") == Some(State::CloudOnly)
     })
     .await;
     // Nothing in Drive was deleted or trashed.
     assert_eq!(
         h.cloud_tree(),
-        tree(&[
-            ("photos/", ""),
-            ("photos/one.jpg", "1"),
-            ("photos/two.jpg", "2")
-        ])
+        tree(&[("photos/", ""), ("photos/one.jpg", "1"), ("photos/two.jpg", "2")])
     );
     h.stop().await;
 }
@@ -170,10 +159,7 @@ async fn overwriting_rename_keeps_old_copy_in_cloud() {
     std::fs::rename(h.path("y.txt"), h.path("x.txt")).unwrap();
     h.settle().await;
 
-    assert_eq!(
-        h.cloud_tree(),
-        tree(&[("x (2).txt", "old x"), ("x.txt", "y")])
-    );
+    assert_eq!(h.cloud_tree(), tree(&[("x (2).txt", "old x"), ("x.txt", "y")]));
     assert_eq!(h.cloud("x.txt").unwrap().id, y_id);
     assert_eq!(h.cloud("x (2).txt").unwrap().id, x_id);
     assert_eq!(h.state("x (2).txt"), Some(State::CloudOnly));
@@ -188,20 +174,14 @@ async fn new_file_over_cloud_only_pins_old_revision() {
     h.start();
     h.settle().await;
     std::fs::remove_file(h.path("plan.txt")).unwrap();
-    h.wait("cloud-only", |h| {
-        h.state("plan.txt") == Some(State::CloudOnly)
-    })
-    .await;
+    h.wait("cloud-only", |h| h.state("plan.txt") == Some(State::CloudOnly)).await;
 
     h.write("plan.txt", "a different plan");
     h.settle().await;
     let item = h.cloud("plan.txt").unwrap();
     assert_eq!(item.content, b"a different plan");
     assert_eq!(item.revisions.len(), 2);
-    assert!(
-        item.revisions[0].keep_forever,
-        "old content must be kept forever"
-    );
+    assert!(item.revisions[0].keep_forever, "old content must be kept forever");
     assert!(!item.revisions[1].keep_forever);
     h.stop().await;
 }
@@ -213,10 +193,7 @@ async fn same_file_back_over_cloud_only_is_not_reuploaded() {
     h.start();
     h.settle().await;
     std::fs::remove_file(h.path("same.txt")).unwrap();
-    h.wait("cloud-only", |h| {
-        h.state("same.txt") == Some(State::CloudOnly)
-    })
-    .await;
+    h.wait("cloud-only", |h| h.state("same.txt") == Some(State::CloudOnly)).await;
     let (sessions, _) = h.stats();
 
     h.write("same.txt", "identical");
@@ -234,23 +211,16 @@ async fn free_up_space_then_restore() {
     h.write("big/clip.mp4", "more bytes");
     h.start();
     h.settle().await;
-    let mtime = std::fs::metadata(h.path("big/video.mp4"))
-        .unwrap()
-        .modified()
-        .unwrap();
+    let mtime = std::fs::metadata(h.path("big/video.mp4")).unwrap().modified().unwrap();
 
     let ctx = h.ctx();
     let drive = h.drive();
     let report = actions::free(&ctx, &drive, &["big".into()]).await.unwrap();
     assert_eq!(report.freed_files, 2, "{report:?}");
     assert!(!h.path("big/video.mp4").exists());
-    assert!(
-        h.path("big").is_dir(),
-        "folders stay so the structure is visible"
-    );
+    assert!(h.path("big").is_dir(), "folders stay so the structure is visible");
     h.wait("cloud-only", |h| {
-        h.state("big/video.mp4") == Some(State::CloudOnly)
-            && h.state("big/clip.mp4") == Some(State::CloudOnly)
+        h.state("big/video.mp4") == Some(State::CloudOnly) && h.state("big/clip.mp4") == Some(State::CloudOnly)
     })
     .await;
     assert_eq!(h.cloud("big/video.mp4").unwrap().content, b"lots of bytes");
@@ -262,32 +232,16 @@ async fn free_up_space_then_restore() {
     assert_eq!(names, ["big/clip.mp4", "big/video.mp4"]);
 
     let (sessions, _) = h.stats();
-    let report = actions::restore(&ctx, &drive, &["big/video.mp4".into()])
-        .await
-        .unwrap();
+    let report = actions::restore(&ctx, &drive, &["big/video.mp4".into()]).await.unwrap();
     assert_eq!(report.files, 1);
     assert_eq!(read(&h.path("big/video.mp4")), "lots of bytes");
-    assert_eq!(
-        std::fs::metadata(h.path("big/video.mp4"))
-            .unwrap()
-            .modified()
-            .unwrap(),
-        mtime
-    );
+    assert_eq!(std::fs::metadata(h.path("big/video.mp4")).unwrap().modified().unwrap(), mtime);
     h.settle().await;
     assert_eq!(h.state("big/video.mp4"), Some(State::Synced));
     assert_eq!(h.state("big/clip.mp4"), Some(State::CloudOnly));
-    assert_eq!(
-        h.stats().0,
-        sessions,
-        "restored file must not be uploaded again"
-    );
+    assert_eq!(h.stats().0, sessions, "restored file must not be uploaded again");
     assert!(
-        std::fs::read_dir(h.path("big")).unwrap().all(|e| !e
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".clouddrop")),
+        std::fs::read_dir(h.path("big")).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(".clouddrop")),
         "no temp files left"
     );
     h.stop().await;
@@ -319,10 +273,7 @@ async fn free_refuses_unverified_copies() {
     // The daemon then re-uploads the lost one.
     h.start();
     h.settle().await;
-    assert_eq!(
-        h.cloud_tree(),
-        tree(&[("a.txt", "A edited"), ("b.txt", "B")])
-    );
+    assert_eq!(h.cloud_tree(), tree(&[("a.txt", "A edited"), ("b.txt", "B")]));
     h.stop().await;
 }
 
@@ -334,58 +285,38 @@ async fn restore_whole_folder_after_local_delete() {
     h.start();
     h.settle().await;
     std::fs::remove_dir_all(h.path("trip")).unwrap();
-    h.wait("cloud-only", |h| h.state("trip") == Some(State::CloudOnly))
-        .await;
+    h.wait("cloud-only", |h| h.state("trip") == Some(State::CloudOnly)).await;
     h.settle().await;
 
-    let report = actions::restore(&h.ctx(), &h.drive(), &["trip".into()])
-        .await
-        .unwrap();
+    let report = actions::restore(&h.ctx(), &h.drive(), &["trip".into()]).await.unwrap();
     assert_eq!(report.files, 2);
     assert_eq!(read(&h.path("trip/day1/a.jpg")), "a");
     assert_eq!(read(&h.path("trip/day2/b.jpg")), "b");
     h.settle().await;
-    for p in [
-        "trip",
-        "trip/day1",
-        "trip/day2",
-        "trip/day1/a.jpg",
-        "trip/day2/b.jpg",
-    ] {
+    for p in ["trip", "trip/day1", "trip/day2", "trip/day1/a.jpg", "trip/day2/b.jpg"] {
         assert_eq!(h.state(p), Some(State::Synced), "{p}");
     }
-    assert_eq!(
-        h.stats().1,
-        4,
-        "no duplicate folders: CloudDrop, trip, day1, day2"
-    );
+    assert_eq!(h.stats().1, 4, "no duplicate folders: CloudDrop, trip, day1, day2");
     h.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn multi_chunk_upload_survives_errors_and_restart() {
     let mut h = Harness::new().await;
-    let big: String = (0..900_000)
-        .map(|i| char::from(b'a' + (i % 26) as u8))
-        .collect();
+    let big: String = (0..900_000).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
     h.write("big.bin", &big);
     // Fail the third chunk: the job backs off with its session saved.
     h.mock.lock().unwrap().fail_at.insert(3, 503);
     h.start();
-    h.wait("failure recorded", |h| {
-        h.entry("big.bin").is_some_and(|e| e.attempts >= 1)
-    })
-    .await;
+    h.wait("failure recorded", |h| h.entry("big.bin").is_some_and(|e| e.attempts >= 1)).await;
     let e = h.entry("big.bin").unwrap();
     assert!(e.upload_url.is_some(), "session kept for resume");
     h.stop().await;
 
     // Restart: resumes the same session instead of starting over.
     h.start();
-    h.wait_for("upload to finish", Duration::from_secs(40), |h| {
-        h.state("big.bin") == Some(State::Synced)
-    })
-    .await;
+    h.wait_for("upload to finish", Duration::from_secs(40), |h| h.state("big.bin") == Some(State::Synced))
+        .await;
     assert_eq!(h.cloud("big.bin").unwrap().content, big.as_bytes());
     assert_eq!(h.stats().0, 1, "one session for the whole file");
     h.stop().await;
@@ -408,11 +339,7 @@ async fn moves_while_stopped_are_detected_by_inode() {
     h.settle().await;
     assert_eq!(
         h.cloud_tree(),
-        tree(&[
-            ("archive/", ""),
-            ("archive/scan.pdf", "S"),
-            ("memo-2026.txt", "M")
-        ])
+        tree(&[("archive/", ""), ("archive/scan.pdf", "S"), ("memo-2026.txt", "M")])
     );
     assert_eq!(h.stats().0, sessions);
     h.stop().await;
@@ -435,10 +362,7 @@ async fn lost_database_adopts_existing_drive_items() {
     h.start();
     h.settle().await;
     assert_eq!(h.stats(), before, "nothing uploaded or created again");
-    assert_eq!(
-        h.cloud_tree(),
-        tree(&[("keep/", ""), ("keep/one.txt", "1"), ("two.txt", "2")])
-    );
+    assert_eq!(h.cloud_tree(), tree(&[("keep/", ""), ("keep/one.txt", "1"), ("two.txt", "2")]));
     assert_eq!(h.state("keep/one.txt"), Some(State::Synced));
     h.stop().await;
 }
@@ -464,11 +388,7 @@ async fn revoked_sign_in_pauses_until_login() {
     let mut h = Harness::new().await;
     clouddrop::auth::save_token(
         &h.token_path(),
-        &clouddrop::auth::Token {
-            access_token: "x".into(),
-            refresh_token: "revoked".into(),
-            expires_at: 0,
-        },
+        &clouddrop::auth::Token { access_token: "x".into(), refresh_token: "revoked".into(), expires_at: 0 },
     )
     .unwrap();
     h.write("wait.txt", "w");
@@ -479,17 +399,11 @@ async fn revoked_sign_in_pauses_until_login() {
     // `clouddrop login` writes a new token file; the daemon notices and continues.
     clouddrop::auth::save_token(
         &h.token_path(),
-        &clouddrop::auth::Token {
-            access_token: "x".into(),
-            refresh_token: "good-refresh".into(),
-            expires_at: 0,
-        },
+        &clouddrop::auth::Token { access_token: "x".into(), refresh_token: "good-refresh".into(), expires_at: 0 },
     )
     .unwrap();
-    h.wait_for("upload after login", Duration::from_secs(60), |h| {
-        h.state("wait.txt") == Some(State::Synced)
-    })
-    .await;
+    h.wait_for("upload after login", Duration::from_secs(60), |h| h.state("wait.txt") == Some(State::Synced))
+        .await;
     h.stop().await;
 }
 
@@ -515,10 +429,7 @@ async fn interactive_login_flow() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        assert_eq!(std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
 
@@ -533,21 +444,12 @@ async fn rename_during_upload_lands_on_new_name() {
     h.write("raw.bin", &big);
     h.mock.lock().unwrap().put_delay_ms = 300;
     h.start();
-    h.wait("upload in flight", |h| {
-        h.mock.lock().unwrap().chunk_puts >= 1
-    })
-    .await;
+    h.wait("upload in flight", |h| h.mock.lock().unwrap().chunk_puts >= 1).await;
     std::fs::create_dir_all(h.path("sorted")).unwrap();
     std::fs::rename(h.path("raw.bin"), h.path("sorted/final.bin")).unwrap();
     h.mock.lock().unwrap().put_delay_ms = 0;
     h.settle().await;
-    assert_eq!(
-        h.cloud_tree()
-            .iter()
-            .map(|(p, _)| p.as_str())
-            .collect::<Vec<_>>(),
-        ["sorted/", "sorted/final.bin"]
-    );
+    assert_eq!(h.cloud_tree().iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["sorted/", "sorted/final.bin"]);
     assert_eq!(h.cloud("sorted/final.bin").unwrap().content, big.as_bytes());
     assert_eq!(h.state("sorted/final.bin"), Some(State::Synced));
     assert!(h.entry("raw.bin").is_none());
@@ -561,16 +463,10 @@ async fn delete_during_upload_still_keeps_cloud_copy() {
     h.write("gone.bin", &big);
     h.mock.lock().unwrap().put_delay_ms = 300;
     h.start();
-    h.wait("upload in flight", |h| {
-        h.mock.lock().unwrap().chunk_puts >= 1
-    })
-    .await;
+    h.wait("upload in flight", |h| h.mock.lock().unwrap().chunk_puts >= 1).await;
     std::fs::remove_file(h.path("gone.bin")).unwrap();
     h.mock.lock().unwrap().put_delay_ms = 0;
-    h.wait("cloud-only", |h| {
-        h.state("gone.bin") == Some(State::CloudOnly)
-    })
-    .await;
+    h.wait("cloud-only", |h| h.state("gone.bin") == Some(State::CloudOnly)).await;
     assert_eq!(h.cloud("gone.bin").unwrap().content, big.as_bytes());
     h.stop().await;
 }
@@ -596,11 +492,7 @@ async fn burst_of_files_has_no_duplicates() {
 #[tokio::test(flavor = "multi_thread")]
 async fn odd_names_and_empty_files() {
     // '\\' is a path separator on Windows, so it can't be part of a name there.
-    const ODD: &str = if cfg!(windows) {
-        "O'Brien & 50% notes.txt"
-    } else {
-        "O'Brien \\ notes.txt"
-    };
+    const ODD: &str = if cfg!(windows) { "O'Brien & 50% notes.txt" } else { "O'Brien \\ notes.txt" };
     let mut h = Harness::new().await;
     h.write(ODD, "quote");
     h.write("தமிழ்/ファイル 📁.txt", "unicode");
@@ -662,15 +554,8 @@ async fn trashed_root_folder_pauses_without_uploading() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     {
         let st = h.mock.lock().unwrap();
-        assert!(
-            st.items.values().all(|i| i.name != "b.txt"),
-            "nothing uploaded into a trashed folder"
-        );
-        assert_eq!(
-            st.items.values().filter(|i| i.name == "CloudDrop").count(),
-            1,
-            "no second root folder"
-        );
+        assert!(st.items.values().all(|i| i.name != "b.txt"), "nothing uploaded into a trashed folder");
+        assert_eq!(st.items.values().filter(|i| i.name == "CloudDrop").count(), 1, "no second root folder");
     }
     h.stop().await;
 }
@@ -682,33 +567,23 @@ async fn pause_stops_uploads_and_resume_continues_the_same_session() {
     h.write("long.bin", &big);
     h.mock.lock().unwrap().put_delay_ms = 200;
     h.start();
-    h.wait("upload in flight", |h| {
-        h.mock.lock().unwrap().chunk_puts >= 1
-    })
-    .await;
+    h.wait("upload in flight", |h| h.mock.lock().unwrap().chunk_puts >= 1).await;
 
     let ctx = h.ctx();
     clouddrop::control::set_paused(&ctx.db, true).unwrap();
     h.wait("paused status", |h| {
-        clouddrop::control::read_status(&h.data)
-            .is_some_and(|s| s.phase == clouddrop::control::Phase::Paused)
+        clouddrop::control::read_status(&h.data).is_some_and(|s| s.phase == clouddrop::control::Phase::Paused)
             && h.state("long.bin") == Some(State::Pending)
     })
     .await;
     let puts = h.mock.lock().unwrap().chunk_puts;
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert!(
-        h.mock.lock().unwrap().chunk_puts <= puts + 1,
-        "no new chunks while paused"
-    );
+    assert!(h.mock.lock().unwrap().chunk_puts <= puts + 1, "no new chunks while paused");
     assert!(h.cloud("long.bin").is_none());
 
     h.mock.lock().unwrap().put_delay_ms = 0;
     clouddrop::control::set_paused(&ctx.db, false).unwrap();
-    h.wait("upload after resume", |h| {
-        h.state("long.bin") == Some(State::Synced)
-    })
-    .await;
+    h.wait("upload after resume", |h| h.state("long.bin") == Some(State::Synced)).await;
     assert_eq!(h.cloud("long.bin").unwrap().content, big.as_bytes());
     assert_eq!(h.stats().0, 1, "resumed the saved session");
     h.stop().await;
@@ -735,8 +610,7 @@ async fn status_file_reports_progress_and_idle() {
     assert!(read_status(&h.data).unwrap().is_live());
     h.mock.lock().unwrap().put_delay_ms = 0;
     h.wait("idle status", |h| {
-        read_status(&h.data)
-            .is_some_and(|s| s.phase == Phase::Idle && s.uploads.is_empty() && s.waiting == 0)
+        read_status(&h.data).is_some_and(|s| s.phase == Phase::Idle && s.uploads.is_empty() && s.waiting == 0)
     })
     .await;
     h.stop().await;
@@ -744,12 +618,7 @@ async fn status_file_reports_progress_and_idle() {
 }
 
 fn kinds(h: &Harness) -> Vec<(clouddrop::db::ActivityKind, String)> {
-    let mut v: Vec<_> =
-        h.db.recent_activity(100)
-            .unwrap()
-            .into_iter()
-            .map(|a| (a.kind, a.path))
-            .collect();
+    let mut v: Vec<_> = h.db.recent_activity(100).unwrap().into_iter().map(|a| (a.kind, a.path)).collect();
     v.reverse();
     v
 }
@@ -768,25 +637,14 @@ async fn activity_history_records_what_happened() {
     std::fs::rename(h.path("a.txt"), h.path("renamed.txt")).unwrap();
     h.settle().await;
     std::fs::remove_file(h.path("b.txt")).unwrap();
-    h.wait("b cloud-only", |h| {
-        h.state("b.txt") == Some(State::CloudOnly)
-    })
-    .await;
+    h.wait("b cloud-only", |h| h.state("b.txt") == Some(State::CloudOnly)).await;
     let ctx = h.ctx();
-    actions::restore(&ctx, &h.drive(), &["b.txt".into()])
-        .await
-        .unwrap();
-    actions::free(&ctx, &h.drive(), &["renamed.txt".into()])
-        .await
-        .unwrap();
+    actions::restore(&ctx, &h.drive(), &["b.txt".into()]).await.unwrap();
+    actions::free(&ctx, &h.drive(), &["renamed.txt".into()]).await.unwrap();
     h.settle().await;
 
     let got = kinds(&h);
-    let mut uploads: Vec<_> = got
-        .iter()
-        .filter(|(k, _)| *k == Uploaded)
-        .map(|(_, p)| p.as_str())
-        .collect();
+    let mut uploads: Vec<_> = got.iter().filter(|(k, _)| *k == Uploaded).map(|(_, p)| p.as_str()).collect();
     uploads.sort();
     assert_eq!(uploads, ["a.txt", "b.txt"]);
     let rest: Vec<_> = got.into_iter().filter(|(k, _)| *k != Uploaded).collect();
@@ -800,12 +658,7 @@ async fn activity_history_records_what_happened() {
             (Freed, "renamed.txt".into()),
         ]
     );
-    let moved =
-        h.db.recent_activity(100)
-            .unwrap()
-            .into_iter()
-            .find(|a| a.kind == Moved)
-            .unwrap();
+    let moved = h.db.recent_activity(100).unwrap().into_iter().find(|a| a.kind == Moved).unwrap();
     assert_eq!(moved.detail.as_deref(), Some("a.txt"));
     h.stop().await;
 }
@@ -822,24 +675,18 @@ async fn auto_free_right_after_upload_respects_keep_folders() {
     h.write("loose.txt", "loose");
     h.start();
     h.wait_for("auto-freed", Duration::from_secs(40), |h| {
-        h.state("Videos/big.mp4") == Some(State::CloudOnly)
-            && h.state("loose.txt") == Some(State::CloudOnly)
+        h.state("Videos/big.mp4") == Some(State::CloudOnly) && h.state("loose.txt") == Some(State::CloudOnly)
     })
     .await;
     assert!(!h.path("Videos/big.mp4").exists() && !h.path("loose.txt").exists());
     assert!(h.path("Videos").is_dir(), "folders stay");
     assert_eq!(h.state("Keep/important.txt"), Some(State::Synced));
-    assert!(
-        h.path("Keep/important.txt").exists(),
-        "kept folders are never freed"
-    );
+    assert!(h.path("Keep/important.txt").exists(), "kept folders are never freed");
     assert_eq!(h.cloud("Videos/big.mp4").unwrap().content, b"movie bytes");
     assert!(kinds(&h).contains(&(clouddrop::db::ActivityKind::AutoFreed, "loose.txt".into())));
 
     // Downloading back is respected: it stays until it changes again.
-    actions::restore(&h.ctx(), &h.drive(), &["loose.txt".into()])
-        .await
-        .unwrap();
+    actions::restore(&h.ctx(), &h.drive(), &["loose.txt".into()]).await.unwrap();
     h.stop().await;
     h.start();
     h.settle().await;
@@ -861,24 +708,14 @@ async fn auto_free_after_days_waits_for_old_uploads() {
 
     // Pretend old.txt was uploaded and last changed 8 days ago.
     let eight_days = std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 3600);
-    std::fs::File::options()
-        .write(true)
-        .open(h.path("old.txt"))
-        .unwrap()
-        .set_modified(eight_days)
-        .unwrap();
+    std::fs::File::options().write(true).open(h.path("old.txt")).unwrap().set_modified(eight_days).unwrap();
     let mut e = h.entry("old.txt").unwrap();
-    e.set_local(Some(
-        clouddrop::util::LocalMeta::read(&h.path("old.txt")).unwrap(),
-    ));
+    e.set_local(Some(clouddrop::util::LocalMeta::read(&h.path("old.txt")).unwrap()));
     e.uploaded_at = Some(clouddrop::util::now_ms() - 8 * 24 * 3600 * 1000);
     h.db.put(&e).unwrap();
 
     h.start();
-    h.wait("old freed", |h| {
-        h.state("old.txt") == Some(State::CloudOnly)
-    })
-    .await;
+    h.wait("old freed", |h| h.state("old.txt") == Some(State::CloudOnly)).await;
     assert!(!h.path("old.txt").exists());
     assert_eq!(h.state("new.txt"), Some(State::Synced));
     assert!(h.path("new.txt").exists());
@@ -899,26 +736,12 @@ async fn auto_free_never_deletes_when_drive_copy_differs() {
     h.start();
     // The first check finds Drive's copy edited elsewhere: no delete; the local content
     // goes up as a new version of the same file, then is verified and freed.
-    h.wait("freed after re-upload", |h| {
-        h.state("doc.txt") == Some(State::CloudOnly)
-    })
-    .await;
-    let doc = h
-        .cloud("doc.txt")
-        .unwrap_or_else(|| panic!("one doc.txt expected: {:?}", h.cloud_tree()));
+    h.wait("freed after re-upload", |h| h.state("doc.txt") == Some(State::CloudOnly)).await;
+    let doc = h.cloud("doc.txt").unwrap_or_else(|| panic!("one doc.txt expected: {:?}", h.cloud_tree()));
     assert_eq!(doc.id, id, "same Drive file, no duplicate");
     assert_eq!(doc.content, b"local truth");
-    assert!(
-        doc.revisions
-            .iter()
-            .rev()
-            .nth(1)
-            .is_some_and(|r| r.keep_forever),
-        "the other edit is kept"
-    );
-    actions::restore(&h.ctx(), &h.drive(), &["doc.txt".into()])
-        .await
-        .unwrap();
+    assert!(doc.revisions.iter().rev().nth(1).is_some_and(|r| r.keep_forever), "the other edit is kept");
+    actions::restore(&h.ctx(), &h.drive(), &["doc.txt".into()]).await.unwrap();
     assert_eq!(read(&h.path("doc.txt")), "local truth");
     h.stop().await;
 }
@@ -929,14 +752,8 @@ async fn status_reports_drive_storage() {
     h.write("x.txt", "12345");
     h.start();
     h.settle().await;
-    h.wait("quota", |h| {
-        clouddrop::control::read_status(&h.data).is_some_and(|s| s.quota.is_some())
-    })
-    .await;
-    let q = clouddrop::control::read_status(&h.data)
-        .unwrap()
-        .quota
-        .unwrap();
+    h.wait("quota", |h| clouddrop::control::read_status(&h.data).is_some_and(|s| s.quota.is_some())).await;
+    let q = clouddrop::control::read_status(&h.data).unwrap().quota.unwrap();
     assert_eq!(q.limit, Some(16106127360));
     assert!(q.usage >= q.usage_in_drive);
     h.stop().await;
@@ -950,26 +767,15 @@ async fn placeholders_stay_visible_when_freed_and_are_never_uploaded() {
     let mut h = Harness::with(|c| c.auto_free_days = Some(0)).await;
     h.write("a.txt", "alpha content");
     h.start_with_store(store.clone());
-    h.wait("auto-freed", |h| h.state("a.txt") == Some(State::CloudOnly))
-        .await;
+    h.wait("auto-freed", |h| h.state("a.txt") == Some(State::CloudOnly)).await;
     h.settle().await;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(
-        h.path("a.txt").exists(),
-        "a freed placeholder stays in the folder"
-    );
+    assert!(h.path("a.txt").exists(), "a freed placeholder stays in the folder");
     assert_eq!(h.state("a.txt"), Some(State::CloudOnly));
     assert_eq!(h.cloud("a.txt").unwrap().content, b"alpha content");
     assert_eq!(h.stats().0, 1, "the empty placeholder is never uploaded");
     let id = h.entry("a.txt").unwrap().drive_id.unwrap();
-    assert!(
-        store
-            .synced
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(p, d)| p == &h.path("a.txt") && *d == id)
-    );
+    assert!(store.synced.lock().unwrap().iter().any(|(p, d)| p == &h.path("a.txt") && *d == id));
     h.stop().await;
 }
 
@@ -983,25 +789,13 @@ async fn explorer_free_and_open_round_trip_without_reupload() {
     let sessions = h.stats().0;
 
     store.dehydrate_externally(&h.path("b.txt"));
-    h.wait("freed by Explorer", |h| {
-        h.state("b.txt") == Some(State::CloudOnly)
-    })
-    .await;
+    h.wait("freed by Explorer", |h| h.state("b.txt") == Some(State::CloudOnly)).await;
     assert!(kinds(&h).contains(&(clouddrop::db::ActivityKind::Freed, "b.txt".into())));
 
     store.hydrate_externally(&h.path("b.txt"), b"bravo");
-    h.wait("hydrated", |h| h.state("b.txt") == Some(State::Synced))
-        .await;
-    assert_eq!(
-        h.stats().0,
-        sessions,
-        "opening a placeholder doesn't upload anything"
-    );
-    assert_eq!(
-        h.entry("b.txt").unwrap().uploaded_at,
-        None,
-        "kept until changed"
-    );
+    h.wait("hydrated", |h| h.state("b.txt") == Some(State::Synced)).await;
+    assert_eq!(h.stats().0, sessions, "opening a placeholder doesn't upload anything");
+    assert_eq!(h.entry("b.txt").unwrap().uploaded_at, None, "kept until changed");
     h.stop().await;
 }
 
@@ -1013,10 +807,7 @@ async fn pinned_items_are_not_freed_automatically() {
     h.write("Pinned/keep.txt", "keep");
     h.write("free.txt", "free");
     h.start_with_store(store.clone());
-    h.wait("free.txt freed", |h| {
-        h.state("free.txt") == Some(State::CloudOnly)
-    })
-    .await;
+    h.wait("free.txt freed", |h| h.state("free.txt") == Some(State::CloudOnly)).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(h.state("Pinned/keep.txt"), Some(State::Synced));
     assert_eq!(read(&h.path("Pinned/keep.txt")), "keep");
