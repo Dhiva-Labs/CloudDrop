@@ -52,7 +52,7 @@ CLI:
 
 | Need | Command |
 | --- | --- |
-| overall state: `configured`, `signed_in`, `has_builtin_client`, `paused`, `root_id`, counts, `daemon` (status incl. quota) — works before setup too | `clouddrop status --json` |
+| overall state: `configured` (with `config_error` when the settings file can't be read), `signed_in`, `has_builtin_client`, `paused`, `root_id`, counts, `daemon` (status incl. quota) — works before setup too | `clouddrop status --json` |
 | settings (secret withheld) | `clouddrop config get --json` |
 | change a setting (applied live) | `clouddrop config set KEY VALUE` — `parallel_uploads`, `settle_secs`, `notifications`, `ignore`, `auto_free_days` (`never`/`now`/N), `keep_local` (comma list) |
 | first-run setup | `clouddrop setup --no-login [--folder DIR] [--client-json FILE]` then `clouddrop login --no-browser` (prints the consent URL; open it; exits 0 when signed in) |

@@ -471,8 +471,14 @@ fn edit_keep(paths: &[PathBuf], keep: bool) -> Result<String> {
 fn status(json: bool) -> Result<String> {
     if !control::is_configured() {
         if json {
+            // A settings file that exists but can't be read: show it, don't offer setup.
+            let config_error = config::config_path()
+                .exists()
+                .then(|| Config::load().err().map(|e| format!("{e:#}")))
+                .flatten();
             let v = serde_json::json!({
                 "configured": false,
+                "config_error": config_error,
                 "signed_in": control::is_signed_in(),
                 "has_builtin_client": control::builtin_client().is_some(),
                 "daemon": null,
