@@ -15,6 +15,9 @@ use clouddrop::store::LocalStore;
 use clouddrop::winstore::WinStore;
 use std::os::windows::fs::MetadataExt;
 
+/// Registering two sync roots at the same moment fails ("Element not found").
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Memory(Vec<u8>);
 
 impl SyncFilter for Memory {
@@ -36,6 +39,7 @@ impl SyncFilter for Memory {
 
 #[test]
 fn placeholder_round_trip() {
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("CloudDropTest");
     std::fs::create_dir_all(&root).unwrap();
@@ -122,6 +126,12 @@ fn placeholder_round_trip() {
 /// the assertions live in `placeholder_round_trip`.
 #[test]
 fn probe_handle_kinds() {
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    macro_rules! guarded {
+        ($e:expr) => {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $e))
+        };
+    }
     use cloud_filter::placeholder::{ConvertOptions, Placeholder, UpdateOptions};
     use std::os::windows::fs::OpenOptionsExt;
 
@@ -174,26 +184,27 @@ fn probe_handle_kinds() {
         let file = root.join(format!("probe{i}.bin"));
         std::fs::write(&file, &content).unwrap();
         let mut line = format!("PROBE {name:20}");
-        let mut step = |label: &str, r: Result<String, String>| {
+        let mut step = |label: &str, r: std::thread::Result<Result<String, String>>| {
+            let r = r.unwrap_or_else(|_| Err("panicked".into()));
             line.push_str(&format!(" | {label}={}", r.unwrap_or_else(|e| format!("ERR({e})"))));
         };
-        step("convert", open(&file).and_then(|mut ph| {
+        step("convert", guarded!(open(&file).and_then(|mut ph| {
             ph.convert_to_placeholder(ConvertOptions::default().mark_in_sync().blob(b"x".to_vec()), None)
                 .map(|_| "ok".into())
                 .map_err(|e| e.to_string())
-        }));
-        step("info", open(&file).and_then(|ph| ph.info().map(|i| format!("{}", i.is_some())).map_err(|e| e.to_string())));
-        step("insync", open(&file).and_then(|mut ph| {
+        })));
+        step("placeholder", guarded!(clouddrop::winstore::is_placeholder_path(&file).map(|b| format!("{b}")).map_err(|e| e.to_string())));
+        step("insync", guarded!(open(&file).and_then(|mut ph| {
             ph.mark_in_sync(false, None).map_err(|e| e.to_string())?;
             ph.mark_in_sync(true, None).map(|_| "ok".into()).map_err(|e| e.to_string())
-        }));
-        step("dehydrate", open(&file).and_then(|mut ph| {
+        })));
+        step("dehydrate", guarded!(open(&file).and_then(|mut ph| {
             ph.update(UpdateOptions::default().dehydrate(), None).map(|_| "ok".into()).map_err(|e| e.to_string())
-        }));
-        step("dehydrated", Ok(format!("{}", WinStore.is_dehydrated(&file))));
-        step("read", std::fs::read(&file).map(|b| format!("{}", b == content)).map_err(|e| e.to_string()));
-        step("revert", clouddrop::winstore::make_plain(&file).map(|_| "ok".into()).map_err(|e| e.to_string()));
-        step("attrs", std::fs::metadata(&file).map(|m| format!("{:#x}", m.file_attributes())).map_err(|e| e.to_string()));
+        })));
+        step("dehydrated", guarded!(Ok(format!("{}", WinStore.is_dehydrated(&file)))));
+        step("read", guarded!(std::fs::read(&file).map(|b| format!("{}", b == content)).map_err(|e| e.to_string())));
+        step("revert", guarded!(clouddrop::winstore::make_plain(&file).map(|_| "ok".into()).map_err(|e| e.to_string())));
+        step("attrs", guarded!(std::fs::metadata(&file).map(|m| format!("{:#x}", m.file_attributes())).map_err(|e| e.to_string())));
         println!("{line}");
     }
     drop(connection);

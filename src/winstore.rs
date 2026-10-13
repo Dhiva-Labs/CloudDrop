@@ -70,19 +70,51 @@ fn open(abs: &Path, exclusive: bool) -> io::Result<Placeholder> {
     Ok(Placeholder::from(file))
 }
 
+/// Whether the open item is a placeholder. (cloud-filter's `Placeholder::info`
+/// panics on placeholders that carry fewer than 4 bytes of data.)
+fn is_placeholder(ph: &Placeholder) -> io::Result<bool> {
+    use windows_sys::Win32::Storage::CloudFilters::{CF_PLACEHOLDER_INFO_BASIC, CfGetPlaceholderInfo};
+    const NOT_A_CLOUD_FILE: i32 = 0x8007_0178_u32 as i32;
+    let mut buf = vec![0u8; 8192];
+    let mut len = 0u32;
+    let hr = unsafe {
+        CfGetPlaceholderInfo(
+            ph.inner_handle().handle().0,
+            CF_PLACEHOLDER_INFO_BASIC,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+            &mut len,
+        )
+    };
+    match hr {
+        hr if hr >= 0 => Ok(true),
+        NOT_A_CLOUD_FILE => Ok(false),
+        hr => Err(hr_err(hr)),
+    }
+}
+
+fn hr_err(hr: i32) -> io::Error {
+    io::Error::other(format!("Cloud Files error {:#010x}", hr as u32))
+}
+
+/// `abs` is a Cloud Files placeholder.
+pub fn is_placeholder_path(abs: &Path) -> io::Result<bool> {
+    is_placeholder(&open(abs, false)?)
+}
+
 /// Turns a placeholder back into an ordinary file or folder (uninstall). Only for
 /// items whose data is local.
 pub fn make_plain(abs: &Path) -> io::Result<()> {
     use windows_sys::Win32::Storage::CloudFilters::{CF_REVERT_FLAG_NONE, CfRevertPlaceholder};
     let ph = open(abs, false)?;
-    if ph.info().map_err(io_err)?.is_none() {
+    if !is_placeholder(&ph)? {
         return Ok(());
     }
     let hr = unsafe {
         CfRevertPlaceholder(ph.inner_handle().handle().0, CF_REVERT_FLAG_NONE, std::ptr::null_mut())
     };
     if hr < 0 {
-        return Err(io::Error::from_raw_os_error(hr));
+        return Err(hr_err(hr));
     }
     Ok(())
 }
@@ -100,7 +132,7 @@ impl LocalStore for WinStore {
 
     fn free(&self, abs: &Path, drive_id: &str) -> io::Result<()> {
         let mut ph = open(abs, true)?;
-        if ph.info().map_err(io_err)?.is_none() {
+        if !is_placeholder(&ph)? {
             ph.convert_to_placeholder(
                 ConvertOptions::default().mark_in_sync().blob(drive_id.as_bytes().to_vec()),
                 None,
@@ -115,7 +147,7 @@ impl LocalStore for WinStore {
     fn synced(&self, abs: &Path, drive_id: &str, is_dir: bool) {
         let result = (|| -> Result<(), String> {
             let mut ph = open(abs, false).map_err(|e| e.to_string())?;
-            if ph.info().map_err(|e| e.to_string())?.is_some() {
+            if is_placeholder(&ph).map_err(|e| e.to_string())? {
                 ph.mark_in_sync(true, None).map_err(|e| e.to_string())?;
             } else {
                 let mut opts = ConvertOptions::default()
@@ -136,7 +168,7 @@ impl LocalStore for WinStore {
 
     fn pending(&self, abs: &Path) {
         if let Ok(mut ph) = open(abs, false)
-            && let Ok(Some(_)) = ph.info()
+            && let Ok(true) = is_placeholder(&ph)
         {
             let _ = ph.mark_in_sync(false, None);
         }
