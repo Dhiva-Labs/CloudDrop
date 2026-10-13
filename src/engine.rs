@@ -79,6 +79,11 @@ pub struct Engine {
     quota: Option<control::Quota>,
     last_quota: Option<Instant>,
     last_auto_free: Option<Instant>,
+    config_file: Option<PathBuf>,
+    config_mtime: Option<SystemTime>,
+    last_config_check: Instant,
+    /// `clouddrop service stop` asked us to exit.
+    stop_now: bool,
     batch: Batch,
     idle_since: Option<Instant>,
     needs_rescan: bool,
@@ -128,12 +133,26 @@ pub async fn run(
     db: Arc<Db>,
     drive: Arc<Drive>,
     data_dir: PathBuf,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    run_with_config(cfg, None, db, drive, data_dir, shutdown).await
+}
+
+/// Like `run`, also applying edits to `config_file` while running (no restart needed
+/// except for the folder, Drive folder name, Google client or endpoints).
+pub async fn run_with_config(
+    cfg: Config,
+    config_file: Option<PathBuf>,
+    db: Arc<Db>,
+    drive: Arc<Drive>,
+    data_dir: PathBuf,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let root = cfg.sync_dir.clone();
     std::fs::create_dir_all(&root)
         .with_context(|| format!("cannot create {}", root.display()))?;
     db.bind_root(&root)?;
+    let _ = control::clear_stop(&db); // a stale request must not stop this run
     let reset = db.reset_uploading()?;
     if reset > 0 {
         tracing::info!("resuming {reset} interrupted uploads");
@@ -162,6 +181,10 @@ pub async fn run(
         quota: None,
         last_quota: None,
         last_auto_free: None,
+        config_mtime: config_file.as_deref().and_then(mtime),
+        config_file,
+        last_config_check: Instant::now(),
+        stop_now: false,
         batch: Batch::default(),
         idle_since: None,
         needs_rescan: false,
@@ -199,6 +222,11 @@ pub async fn run(
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if eng.stop_now {
+            tracing::info!("stopping on request");
+            let _ = control::clear_stop(&eng.db);
+            break;
+        }
         tokio::select! {
             _ = shutdown.changed() => break,
             Some(ev) = fs_rx.recv() => eng.on_fs(ev),
@@ -284,14 +312,14 @@ impl Engine {
     // ---------- paths ----------
 
     fn rel(&mut self, abs: &Path) -> Option<String> {
-        let rel = abs.strip_prefix(&self.root).ok()?;
-        match rel.to_str() {
-            Some(s) => Some(s.trim_end_matches('/').to_string()),
-            None => {
-                self.warn_once(&format!("skipping {}: name is not valid UTF-8", abs.display()));
-                None
-            }
+        if abs.strip_prefix(&self.root).is_err() {
+            return None;
         }
+        let rel = util::rel_path(&self.root, abs);
+        if rel.is_none() {
+            self.warn_once(&format!("skipping {}: name is not valid UTF-8", abs.display()));
+        }
+        rel
     }
 
     fn ignored(&self, rel: &str) -> bool {
@@ -544,7 +572,7 @@ impl Engine {
             return;
         }
         self.ensure_ancestors(rel);
-        let meta = LocalMeta::of(&md);
+        let meta = LocalMeta::at(&self.abs(rel), &md);
         if md.is_dir() {
             self.process_dir(rel, meta);
             self.scan_dir(rel);
@@ -586,7 +614,7 @@ impl Engine {
                 .get(&dir)
                 .is_some_and(|e| e.kind == Kind::Dir && e.state != State::CloudOnly);
             if !active && let Ok(md) = std::fs::symlink_metadata(self.abs(&dir)) {
-                self.process_dir(&dir, LocalMeta::of(&md));
+                self.process_dir(&dir, LocalMeta::at(&self.abs(&dir), &md));
             }
         }
     }
@@ -608,8 +636,8 @@ impl Engine {
                     }
                 }
                 // Gone from its old path (and not a hard link still there).
-                && std::fs::symlink_metadata(self.abs(&e.path))
-                    .map(|m| LocalMeta::of(&m).inode != meta.inode)
+                && LocalMeta::read(&self.abs(&e.path))
+                    .map(|m| m.inode != meta.inode)
                     .unwrap_or(true)
         }) else {
             return false;
@@ -745,7 +773,62 @@ impl Engine {
 
     // ---------- scheduling ----------
 
+    /// Applies settings edited in the config file while running.
+    fn reload_config(&mut self) {
+        let Some(path) = self.config_file.clone() else {
+            return;
+        };
+        if self.last_config_check.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_config_check = Instant::now();
+        let m = mtime(&path);
+        if m == self.config_mtime {
+            return;
+        }
+        self.config_mtime = m;
+        let new = match Config::load_from(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("ignoring config change: {e:#}");
+                return;
+            }
+        };
+        if new.sync_dir != self.cfg.sync_dir
+            || new.drive_folder != self.cfg.drive_folder
+            || new.client_id != self.cfg.client_id
+            || new.endpoints != self.cfg.endpoints
+        {
+            tracing::warn!("folder, Drive folder or Google client changed; restart CloudDrop to apply");
+        }
+        if new.ignore != self.cfg.ignore {
+            match build_ignore(&new.ignore) {
+                Ok(set) => {
+                    self.ignore = set;
+                    self.needs_rescan = true;
+                }
+                Err(e) => tracing::warn!("ignore patterns not applied: {e:#}"),
+            }
+        }
+        self.notifier = Notifier::new(new.notifications);
+        if new.auto_free_days != self.cfg.auto_free_days || new.keep_local != self.cfg.keep_local {
+            self.last_auto_free = None;
+        }
+        self.cfg.parallel_uploads = new.parallel_uploads;
+        self.cfg.settle_secs = new.settle_secs;
+        self.cfg.rescan_secs = new.rescan_secs;
+        self.cfg.notifications = new.notifications;
+        self.cfg.ignore = new.ignore;
+        self.cfg.auto_free_days = new.auto_free_days;
+        self.cfg.keep_local = new.keep_local;
+        tracing::info!("settings updated");
+    }
+
     fn on_tick(&mut self) {
+        self.reload_config();
+        if control::stop_requested(&self.db) {
+            self.stop_now = true;
+        }
         if self.needs_rescan
             || self.last_rescan.elapsed() >= Duration::from_secs(self.cfg.rescan_secs)
         {

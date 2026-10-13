@@ -98,11 +98,38 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show or change settings: `config get [--json]`, `config set KEY VALUE`.
+    Config {
+        #[command(subcommand)]
+        action: ConfigCmd,
+    },
+    /// The background service: status, start, stop, enable (at sign-in), disable.
+    Service { action: ServiceAction },
     /// Start over in Drive after the CloudDrop folder there was deleted.
     ResetCloud {
         #[arg(long)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Print the settings (the Google client secret is never shown).
+    Get {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change a setting; the running service applies it within seconds.
+    Set { key: String, value: String },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum ServiceAction {
+    Status,
+    Start,
+    Stop,
+    Enable,
+    Disable,
 }
 
 fn main() {
@@ -210,19 +237,74 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             let drive = drive_for(&cfg, auth::token_path());
             let (tx, rx) = tokio::sync::watch::channel(false);
             tokio::spawn(async move {
-                let mut term =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                        .expect("signal handler");
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
+                #[cfg(unix)]
+                {
+                    let mut term =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                            .expect("signal handler");
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = term.recv() => {}
+                    }
                 }
+                #[cfg(not(unix))]
+                let _ = tokio::signal::ctrl_c().await;
                 let _ = tx.send(true);
             });
-            engine::run(cfg, db, drive, config::data_dir(), rx).await?;
+            engine::run_with_config(cfg, Some(config::config_path()), db, drive, config::data_dir(), rx)
+                .await?;
             Ok(String::new())
         }
         Cmd::Status { json } => status(json),
+        Cmd::Config { action } => match action {
+            ConfigCmd::Get { json } => {
+                let cfg = Config::load()?;
+                let v = cfg.public_json();
+                if json {
+                    return Ok(serde_json::to_string_pretty(&v)?);
+                }
+                Ok(v.as_object()
+                    .map(|o| {
+                        o.iter()
+                            .filter(|(k, _)| *k != "endpoints")
+                            .map(|(k, v)| format!("{k} = {v}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default())
+            }
+            ConfigCmd::Set { key, value } => {
+                let path = config::config_path();
+                let mut cfg = Config::load_from(&path)?;
+                cfg.set_key(&key, &value)?;
+                cfg.save_to(&path)?;
+                Ok(format!("{key} updated."))
+            }
+        },
+        Cmd::Service { action } => match action {
+            ServiceAction::Status => Ok(format!(
+                "{}{}",
+                if control::daemon_running() { "running" } else { "stopped" },
+                if control::enabled_at_login() { ", starts at sign-in" } else { "" }
+            )),
+            ServiceAction::Start => {
+                control::start_service()?;
+                Ok("CloudDrop started.".into())
+            }
+            ServiceAction::Stop => {
+                control::stop_service()?;
+                Ok("CloudDrop is stopping.".into())
+            }
+            ServiceAction::Enable => {
+                control::enable_at_login()?;
+                control::start_service()?;
+                Ok("CloudDrop starts at sign-in.".into())
+            }
+            ServiceAction::Disable => {
+                control::disable_at_login()?;
+                Ok("CloudDrop no longer starts at sign-in.".into())
+            }
+        },
         Cmd::Keep { paths } => edit_keep(&paths, true),
         Cmd::Unkeep { paths } => edit_keep(&paths, false),
         Cmd::AutoFree { when } => {
@@ -415,6 +497,7 @@ fn status(json: bool) -> Result<String> {
             "folder": ctx.cfg.sync_dir,
             "drive_folder": ctx.cfg.drive_folder,
             "signed_in": signed_in,
+            "has_builtin_client": control::builtin_client().is_some(),
             "daemon": daemon,
             "files": states,
             "cloud_bytes": cloud_bytes,

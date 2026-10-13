@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    # The desktop app needs GTK 4.12+ and libadwaita 1.6+ (Ubuntu 24.10 or newer).
+    container: ubuntu:26.04
+    steps:
+      - name: System packages
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libgtk-4-dev libadwaita-1-dev dbus python3 python3-gi python3-nautilus
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Core, end-to-end and desktop app tests
+        run: cargo test -p clouddrop -p clouddrop-gui
+      - name: Top-bar icon tests (private session bus)
+        run: dbus-run-session -- cargo test -p clouddrop-tray
+      - name: Files extension tests
+        run: python3 -m unittest discover -s nautilus/tests
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (core)
+        run: cargo clippy -p clouddrop --all-targets -- -D warnings
+      - name: Core and end-to-end tests
+        run: cargo test -p clouddrop

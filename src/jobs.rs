@@ -211,7 +211,7 @@ async fn file_job(spec: &JobSpec, drive: &Drive, tx: &UnboundedSender<JobEvent>)
         if !md.is_file() {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not a file"));
         }
-        let meta = LocalMeta::of(&md);
+        let meta = LocalMeta::of_file(&f)?;
         let md5 = crate::util::md5_reader(&mut f)?;
         Ok((f, md5, meta))
     })

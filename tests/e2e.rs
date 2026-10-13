@@ -426,8 +426,11 @@ async fn interactive_login_flow() {
     .unwrap();
     let tok: clouddrop::auth::Token = serde_json::from_str(&read(&token_file)).unwrap();
     assert_eq!(tok.refresh_token, "good-refresh");
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
 }
 
 fn big_content(n: usize) -> String {

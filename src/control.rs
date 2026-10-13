@@ -87,6 +87,19 @@ pub fn write_status(data_dir: &Path, status: &DaemonStatus) -> Result<()> {
     Ok(())
 }
 
+/// Asks a running daemon to exit (works where there is no service manager).
+pub fn request_stop(db: &Db) -> Result<()> {
+    db.meta_set("stop", "1")
+}
+
+pub fn stop_requested(db: &Db) -> bool {
+    db.meta_get("stop").ok().flatten().as_deref() == Some("1")
+}
+
+pub fn clear_stop(db: &Db) -> Result<()> {
+    db.meta_delete("stop")
+}
+
 pub fn is_paused(db: &Db) -> bool {
     db.meta_get("paused").ok().flatten().as_deref() == Some("1")
 }
@@ -179,6 +192,135 @@ pub fn sign_out() -> Result<()> {
     match std::fs::remove_file(crate::auth::token_path()) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
+    }
+}
+
+// ---------- background service (systemd on Linux, login item on Windows) ----------
+
+/// Whether the daemon is running right now (judged by its live status file).
+pub fn daemon_running() -> bool {
+    read_status(&config::data_dir()).is_some_and(|s| s.is_live())
+}
+
+#[cfg(windows)]
+mod winsvc {
+    use anyhow::{Context, Result, bail};
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+    /// The background agent (GUI subsystem, no console) if installed, else this CLI.
+    fn agent() -> Result<(PathBuf, Vec<&'static str>)> {
+        let me = std::env::current_exe()?;
+        let agent = me.with_file_name("clouddrop-agent.exe");
+        Ok(if agent.exists() { (agent, vec![]) } else { (me, vec!["run"]) })
+    }
+
+    fn reg(args: &[&str]) -> Result<bool> {
+        use std::os::windows::process::CommandExt;
+        Ok(Command::new("reg")
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .context("cannot run reg.exe")?
+            .status
+            .success())
+    }
+
+    pub fn enabled() -> bool {
+        reg(&["query", RUN_KEY, "/v", "CloudDrop"]).unwrap_or(false)
+    }
+
+    pub fn enable() -> Result<()> {
+        let (exe, args) = agent()?;
+        let mut cmd = format!("\"{}\"", exe.display());
+        for a in args {
+            cmd.push(' ');
+            cmd.push_str(a);
+        }
+        if !reg(&["add", RUN_KEY, "/v", "CloudDrop", "/t", "REG_SZ", "/d", &cmd, "/f"])? {
+            bail!("could not register CloudDrop to start at sign-in");
+        }
+        Ok(())
+    }
+
+    pub fn disable() -> Result<()> {
+        reg(&["delete", RUN_KEY, "/v", "CloudDrop", "/f"])?;
+        Ok(())
+    }
+
+    pub fn start() -> Result<()> {
+        use std::os::windows::process::CommandExt;
+        let (exe, args) = agent()?;
+        Command::new(exe)
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+            .spawn()
+            .context("cannot start CloudDrop")?;
+        Ok(())
+    }
+}
+
+/// Stops the daemon: via systemd on Linux, by request through the database elsewhere.
+pub fn stop_service() -> Result<()> {
+    #[cfg(unix)]
+    if service_installed() {
+        systemctl(&["stop", SERVICE])?;
+        return Ok(());
+    }
+    request_stop(&Db::open_default()?)
+}
+
+/// Starts the daemon at sign-in from now on.
+pub fn enable_at_login() -> Result<()> {
+    #[cfg(windows)]
+    return winsvc::enable();
+    #[cfg(unix)]
+    {
+        if !service_installed() {
+            bail!("the clouddrop service is not installed");
+        }
+        systemctl(&["daemon-reload"])?;
+        if !systemctl(&["enable", SERVICE])? {
+            bail!("could not enable the clouddrop service");
+        }
+        Ok(())
+    }
+}
+
+pub fn disable_at_login() -> Result<()> {
+    #[cfg(windows)]
+    return winsvc::disable();
+    #[cfg(unix)]
+    {
+        systemctl(&["disable", SERVICE])?;
+        Ok(())
+    }
+}
+
+pub fn enabled_at_login() -> bool {
+    #[cfg(windows)]
+    return winsvc::enabled();
+    #[cfg(unix)]
+    service_enabled()
+}
+
+/// Starts the daemon now if it isn't running.
+pub fn start_service() -> Result<()> {
+    if daemon_running() {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    return winsvc::start();
+    #[cfg(unix)]
+    {
+        if !systemctl(&["start", SERVICE])? {
+            bail!("could not start the clouddrop service — see `journalctl --user -u clouddrop`");
+        }
+        Ok(())
     }
 }
 

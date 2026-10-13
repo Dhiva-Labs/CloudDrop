@@ -37,15 +37,14 @@ impl Ctx {
             std::env::current_dir()?.join(arg)
         };
         let full = normalize(&full);
-        let rel = full.strip_prefix(self.root()).map_err(|_| {
-            anyhow!(
+        if full.strip_prefix(self.root()).is_err() {
+            bail!(
                 "{} is not inside the CloudDrop folder ({})",
                 full.display(),
                 self.root().display()
-            )
-        })?;
-        rel.to_str()
-            .map(|s| s.trim_end_matches('/').to_string())
+            );
+        }
+        util::rel_path(self.root(), &full)
             .ok_or_else(|| anyhow!("{} is not valid UTF-8", full.display()))
     }
 }
