@@ -28,7 +28,7 @@ space on your computer without losing anything — by hand, or automatically.
 
 CloudDrop only asks Google for access to the files it creates itself
 (`drive.file`) — it cannot see anything else in your Drive. Files go straight
-between your computer and Google; see the [privacy policy](https://dhivalabs.com/privacy.html#clouddrop).
+between your computer and Google; see the [privacy policy](PRIVACY.md).
 
 ## Install (Ubuntu 26.04)
 
