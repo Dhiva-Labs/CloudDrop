@@ -30,6 +30,23 @@ pub trait LocalStore: Send + Sync {
 
     /// The local file at `abs` has changes that are not in Drive yet.
     fn pending(&self, _abs: &Path) {}
+
+    /// "Free up space" was chosen in the file manager for this file, which still
+    /// has its data. The engine frees it after the usual Drive check.
+    fn free_requested(&self, _abs: &Path) -> bool {
+        false
+    }
+
+    /// Frees `abs` if this process may, or asks the engine to (`Ok(false)`): on
+    /// Windows only the agent that owns the sync root can remove a file's data.
+    fn request_free(&self, abs: &Path, drive_id: &str) -> io::Result<bool> {
+        self.free(abs, drive_id).map(|()| true)
+    }
+
+    /// Brings back the data of a placeholder (Windows downloads it on access).
+    fn hydrate(&self, _abs: &Path) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Plain files: Linux, and Windows when the sync root isn't available.

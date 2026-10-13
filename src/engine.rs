@@ -29,6 +29,8 @@ const AUTH_RECHECK: Duration = Duration::from_secs(600);
 const MAX_CONTENT_RETRIES: i64 = 5;
 const QUOTA_EVERY: Duration = Duration::from_secs(600);
 const AUTO_FREE_EVERY: Duration = Duration::from_secs(30);
+/// How long a pinned placeholder's download may take before it's tried again.
+const HYDRATE_RETRY: Duration = Duration::from_secs(120);
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
 struct Inflight {
@@ -80,6 +82,9 @@ pub struct Engine {
     quota: Option<control::Quota>,
     last_quota: Option<Instant>,
     last_auto_free: Option<Instant>,
+    /// Placeholders being downloaded because they were pinned ("Always keep on
+    /// this device"), with when the download started.
+    hydrating: HashMap<String, Instant>,
     store: Arc<dyn LocalStore>,
     config_file: Option<PathBuf>,
     config_mtime: Option<SystemTime>,
@@ -202,6 +207,7 @@ pub async fn run_with_options(
         quota: None,
         last_quota: None,
         last_auto_free: None,
+        hydrating: HashMap::new(),
         store,
         config_mtime: config_file.as_deref().and_then(mtime),
         config_file,
@@ -727,6 +733,7 @@ impl Engine {
         if self.store.is_dehydrated(&self.abs(rel)) {
             return self.process_placeholder(rel, meta);
         }
+        self.hydrating.remove(rel);
         match self.get(rel) {
             None => {
                 if !self.adopt_moved(rel, Kind::File, meta) {
@@ -753,6 +760,9 @@ impl Engine {
                     e.set_local(Some(meta));
                     self.put(&e);
                     self.store.pending(&self.abs(rel));
+                } else if e.state == State::Synced && self.store.free_requested(&self.abs(rel)) {
+                    // "Free up space" in the file manager: same Drive check as always.
+                    self.dispatch(e, String::new(), String::new(), false, true);
                 }
             }
         }
@@ -777,6 +787,20 @@ impl Engine {
         }
         e.set_local(Some(meta));
         self.put(&e);
+
+        // "Always keep on this device": download it now. It comes back through
+        // process_file as a known file, so nothing is uploaded.
+        let abs = self.abs(rel);
+        let started = self.hydrating.get(rel);
+        if self.store.is_pinned(&abs) && started.is_none_or(|t| t.elapsed() >= HYDRATE_RETRY) {
+            self.hydrating.insert(rel.to_string(), Instant::now());
+            let store = self.store.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(err) = store.hydrate(&abs) {
+                    tracing::warn!("cannot download {}: {err}", abs.display());
+                }
+            });
+        }
     }
 
     /// The local item at `rel` is gone. Drive is never touched: whatever it holds
@@ -1350,6 +1374,7 @@ impl Engine {
                     return;
                 }
                 let id = e.drive_id.clone().unwrap_or_default();
+                let asked = self.store.free_requested(&abs);
                 if let Err(err) = self.store.free(&abs, &id) {
                     tracing::warn!("cannot free {path}: {err}");
                     return;
@@ -1359,7 +1384,8 @@ impl Engine {
                 self.batch.freed_files += 1;
                 self.batch.freed_bytes += checked.size as u64;
                 tracing::info!("freed {path} ({})", util::human_bytes(checked.size as u64));
-                self.activity(ActivityKind::AutoFreed, &path, Some(checked.size), None);
+                let kind = if asked { ActivityKind::Freed } else { ActivityKind::AutoFreed };
+                self.activity(kind, &path, Some(checked.size), None);
             }
             JobOutcome::FreeSkip(skip @ (FreeSkip::CloudDiffers | FreeSkip::CloudGone)) => {
                 tracing::warn!("{path}: Drive copy is not identical ({skip:?}); uploading the local copy again");

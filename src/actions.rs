@@ -102,6 +102,9 @@ fn tracked_subtree(ctx: &Ctx, rel: &str) -> Result<Vec<Entry>> {
 pub struct FreeReport {
     pub freed_files: u64,
     pub freed_bytes: u64,
+    /// Handed to the running service (Windows: only it may free files).
+    pub handed_files: u64,
+    pub handed_bytes: u64,
     pub not_uploaded: u64,
     pub changed: u64,
     pub cloud_mismatch: u64,
@@ -109,7 +112,14 @@ pub struct FreeReport {
 
 impl FreeReport {
     pub fn summary(&self) -> String {
-        let mut s = if self.freed_files == 0 {
+        let mut s = if self.handed_files > 0 {
+            format!(
+                "Freeing {} ({} file{}) — CloudDrop does it in a moment. The files stay in Google Drive.",
+                util::human_bytes(self.freed_bytes + self.handed_bytes),
+                self.freed_files + self.handed_files,
+                if self.freed_files + self.handed_files == 1 { "" } else { "s" }
+            )
+        } else if self.freed_files == 0 {
             "Nothing to free.".to_string()
         } else {
             format!(
@@ -186,9 +196,14 @@ pub async fn free(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<FreeRepor
             report.changed += 1;
             continue;
         }
-        crate::store::platform()
-            .free(&abs, &id)
+        let freed_now = crate::store::platform()
+            .request_free(&abs, &id)
             .with_context(|| format!("cannot free {}", abs.display()))?;
+        if !freed_now {
+            report.handed_files += 1;
+            report.handed_bytes += meta.size as u64;
+            continue;
+        }
         e.state = State::CloudOnly;
         ctx.db.put(&e)?;
         let _ = ctx.db.log_activity(ActivityKind::Freed, &e.path, Some(meta.size), None);
@@ -259,10 +274,20 @@ pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<Restor
                 }
                 Kind::File => {
                     let abs = ctx.abs(&e.path);
-                    // A placeholder without data (Windows) is replaced by the download.
-                    if std::fs::symlink_metadata(&abs).is_ok()
-                        && !crate::store::platform().is_dehydrated(&abs)
-                    {
+                    let store = crate::store::platform();
+                    if store.is_dehydrated(&abs) {
+                        // Windows: reading a placeholder downloads it through the
+                        // CloudDrop agent, which keeps it a cloud file in Explorer.
+                        let path = abs.clone();
+                        tokio::task::spawn_blocking(move || store.hydrate(&path))
+                            .await?
+                            .with_context(|| format!("cannot download {} — is CloudDrop running?", e.path))?;
+                        let _ = ctx.db.log_activity(ActivityKind::Restored, &e.path, e.cloud_size, None);
+                        report.files += 1;
+                        report.bytes += e.cloud_size.unwrap_or(0) as u64;
+                        continue;
+                    }
+                    if std::fs::symlink_metadata(&abs).is_ok() {
                         report.blocked.push(e.path.clone());
                         continue;
                     }

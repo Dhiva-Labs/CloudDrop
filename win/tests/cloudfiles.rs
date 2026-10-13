@@ -88,6 +88,16 @@ fn placeholder_round_trip() {
         let dir = root.join("Folder");
         std::fs::create_dir(&dir).unwrap();
         store.synced(&dir, "drive-id-2", true);
+        assert!(
+            clouddrop::winstore::is_placeholder_path(&dir).unwrap(),
+            "folders get Explorer's in-sync mark too"
+        );
+
+        store.free(&file, "drive-id-1").expect("dehydrate");
+        assert!(store.is_dehydrated(&file));
+        store.hydrate(&file).expect("download back");
+        assert!(!store.is_dehydrated(&file));
+        assert_eq!(std::fs::read(&file).unwrap(), content);
 
         // Set up for the uninstall check below: one freed file, one kept.
         std::fs::write(dir.join("kept.txt"), b"kept").unwrap();

@@ -1,0 +1,3 @@
+tags:
+  integration:
+    description: runs the real clouddrop CLI/daemon against a fake Google Drive (needs cargo build, see test/integration)

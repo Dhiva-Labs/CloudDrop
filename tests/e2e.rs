@@ -800,6 +800,41 @@ async fn explorer_free_and_open_round_trip_without_reupload() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn free_up_space_in_explorer_is_checked_and_done_by_the_engine() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::new().await;
+    h.write("c.txt", "charlie");
+    h.start_with_store(store.clone());
+    h.settle().await;
+
+    store.unpin_externally(&h.path("c.txt"));
+    h.wait("freed", |h| h.state("c.txt") == Some(State::CloudOnly)).await;
+    assert!(store.dehydrated.lock().unwrap().contains(&h.path("c.txt")));
+    assert!(kinds(&h).contains(&(clouddrop::db::ActivityKind::Freed, "c.txt".into())));
+    assert_eq!(h.cloud("c.txt").unwrap().content, b"charlie");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_on_this_device_downloads_a_freed_file() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::new().await;
+    h.write("d.txt", "delta");
+    h.start_with_store(store.clone());
+    h.settle().await;
+    let sessions = h.stats().0;
+    store.dehydrate_externally(&h.path("d.txt"));
+    h.wait("freed", |h| h.state("d.txt") == Some(State::CloudOnly)).await;
+
+    store.pin_externally(&h.path("d.txt"));
+    h.wait("downloaded", |h| h.state("d.txt") == Some(State::Synced)).await;
+    assert_eq!(read(&h.path("d.txt")), "delta");
+    assert_eq!(h.stats().0, sessions, "nothing uploaded");
+    assert_eq!(h.entry("d.txt").unwrap().uploaded_at, None, "kept until changed");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pinned_items_are_not_freed_automatically() {
     let store = std::sync::Arc::new(common::FakeStore::default());
     let mut h = Harness::with(|c| c.auto_free_days = Some(0)).await;

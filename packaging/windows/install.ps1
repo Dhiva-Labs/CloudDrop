@@ -1,6 +1,8 @@
 # Installs CloudDrop for the current user: copies it to
 # %LOCALAPPDATA%\Programs\CloudDrop, adds a Start menu shortcut and an entry in
-# Settings > Apps, then opens the app. Running it again upgrades in place.
+# Settings > Apps, then opens the app (unless -NoLaunch). Running it again upgrades
+# in place.
+param([switch]$NoLaunch)
 $ErrorActionPreference = 'Stop'
 
 # Runs the CLI, ignoring failures (e.g. "not running"). Windows PowerShell 5.1
@@ -54,5 +56,5 @@ Set-ItemProperty $key NoModify 1 -Type DWord
 Set-ItemProperty $key NoRepair 1 -Type DWord
 
 if ($wasRunning) { Quietly { & $cli service start } }
-Start-Process $app
+if (-not $NoLaunch) { Start-Process $app }
 Write-Host "CloudDrop $version is installed. Find it in the Start menu."

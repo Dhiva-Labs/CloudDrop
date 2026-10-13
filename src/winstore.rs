@@ -3,7 +3,7 @@
 //! files are placeholders without data. See docs/WINDOWS.md.
 
 use crate::store::LocalStore;
-use cloud_filter::placeholder::{ConvertOptions, Placeholder, UpdateOptions};
+use cloud_filter::placeholder::{ConvertOptions, PinOptions, PinState, Placeholder, UpdateOptions};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
@@ -12,6 +12,9 @@ use std::path::Path;
 const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
 const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
 const FILE_ATTRIBUTE_PINNED: u32 = 0x0008_0000;
+const FILE_ATTRIBUTE_UNPINNED: u32 = 0x0010_0000;
+/// HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_ACCESS_DENIED): not the sync root's owner.
+const CLOUD_ACCESS_DENIED: i32 = 0x8007_018B_u32 as i32;
 const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
 
 pub struct WinStore;
@@ -140,22 +143,54 @@ impl LocalStore for WinStore {
             .map_err(io_err)?;
         }
         ph.update(UpdateOptions::default().dehydrate(), None)
-            .map_err(io_err)?;
+            .map_err(|e| {
+                if e.code().0 == CLOUD_ACCESS_DENIED {
+                    io::Error::new(io::ErrorKind::PermissionDenied, e.to_string())
+                } else {
+                    io_err(e)
+                }
+            })?;
+        // Done: opening it later should keep the downloaded copy, not free it again.
+        let _ = ph.mark_pin(PinState::Unspecified, PinOptions::default());
         Ok(())
     }
 
-    fn synced(&self, abs: &Path, drive_id: &str, is_dir: bool) {
+    fn free_requested(&self, abs: &Path) -> bool {
+        attrs(abs) & FILE_ATTRIBUTE_UNPINNED != 0 && !self.is_dehydrated(abs)
+    }
+
+    fn request_free(&self, abs: &Path, drive_id: &str) -> io::Result<bool> {
+        match self.free(abs, drive_id) {
+            Ok(()) => Ok(true),
+            // Same as Explorer's "Free up space": the agent sees it and frees the file.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                let mut ph = open(abs, false)?;
+                ph.mark_pin(PinState::Unpinned, PinOptions::default())
+                    .map_err(io_err)?;
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn hydrate(&self, abs: &Path) -> io::Result<()> {
+        // Reading is what downloads a placeholder, from any process.
+        let mut f = std::fs::File::open(abs)?;
+        std::io::copy(&mut f, &mut std::io::sink())?;
+        Ok(())
+    }
+
+    fn synced(&self, abs: &Path, drive_id: &str, _is_dir: bool) {
         let result = (|| -> Result<(), String> {
             let mut ph = open(abs, false).map_err(|e| e.to_string())?;
             if is_placeholder(&ph).map_err(|e| e.to_string())? {
                 ph.mark_in_sync(true, None).map_err(|e| e.to_string())?;
             } else {
-                let mut opts = ConvertOptions::default()
+                // Folders too: no on-demand population flag, which Windows rejects in
+                // a sync root whose folders are always complete (PopulationType::AlwaysFull).
+                let opts = ConvertOptions::default()
                     .mark_in_sync()
                     .blob(drive_id.as_bytes().to_vec());
-                if is_dir {
-                    opts = opts.has_children();
-                }
                 ph.convert_to_placeholder(opts, None)
                     .map_err(|e| e.to_string())?;
             }
