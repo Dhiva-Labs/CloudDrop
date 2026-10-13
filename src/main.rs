@@ -104,7 +104,14 @@ enum Cmd {
         action: ConfigCmd,
     },
     /// The background service: status, start, stop, enable (at sign-in), disable.
-    Service { action: ServiceAction },
+    Service {
+        action: ServiceAction,
+        /// With `status`: print {"running": …, "at_login": …}.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sign out of Google: stops the service and forgets the sign-in.
+    Logout,
     /// Start over in Drive after the CloudDrop folder there was deleted.
     ResetCloud {
         #[arg(long)]
@@ -164,20 +171,12 @@ fn main() {
     }
 }
 
-fn open_in_browser(url: &str) {
-    let _ = std::process::Command::new("xdg-open")
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-}
 
 async fn login(cfg: &Config, browser: bool) -> Result<()> {
     auth::login(cfg, &auth::token_path(), |url| {
         println!("Sign in to Google to let CloudDrop upload to your Drive:\n\n  {url}\n");
         if browser {
-            open_in_browser(url);
+            control::open_uri(url);
         }
         println!("Waiting for the browser…");
     })
@@ -221,8 +220,8 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
                 login(&cfg, true).await?;
             }
             Ok(format!(
-                "CloudDrop is set up. Start it with:\n  systemctl --user enable --now clouddrop\n\
-                 Then drop files into {}",
+                "CloudDrop is set up. Start it with:\n  {}\nThen drop files into {}",
+                if cfg!(windows) { "clouddrop service enable" } else { "systemctl --user enable --now clouddrop" },
                 cfg.sync_dir.display()
             ))
         }
@@ -230,6 +229,16 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             let cfg = Config::load()?;
             login(&cfg, !no_browser).await?;
             Ok("Signed in.".into())
+        }
+        Cmd::Logout => {
+            if control::daemon_running() {
+                control::stop_service()?;
+            }
+            match std::fs::remove_file(auth::token_path()) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            Ok("Signed out. Uploads stop until you sign in again (clouddrop login).".into())
         }
         Cmd::Run => {
             let cfg = Config::load()?;
@@ -284,7 +293,12 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
                 Ok(format!("{key} updated."))
             }
         },
-        Cmd::Service { action } => match action {
+        Cmd::Service { action, json } => match action {
+            ServiceAction::Status if json => Ok(serde_json::json!({
+                "running": control::daemon_running(),
+                "at_login": control::enabled_at_login(),
+            })
+            .to_string()),
             ServiceAction::Status => Ok(format!(
                 "{}{}",
                 if control::daemon_running() { "running" } else { "stopped" },
@@ -352,7 +366,7 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
         Cmd::Open { path } => {
             let ctx = Ctx::load()?;
             let url = actions::url_for(&ctx, &ctx.resolve(&path)?)?;
-            open_in_browser(&url);
+            control::open_uri(&url);
             Ok(String::new())
         }
         Cmd::Url { path } => {
@@ -419,18 +433,14 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             }
             let ctx = Ctx::load()?;
             let (requeued, dropped) = actions::reset_cloud(&ctx)?;
-            Ok(format!(
-                "Queued {requeued} items for upload; dropped {dropped} cloud-only items. \
-                 Restart the daemon: systemctl --user restart clouddrop"
-            ))
+            restart_if_running();
+            Ok(format!("Queued {requeued} items for upload; dropped {dropped} cloud-only items."))
         }
     }
 }
 
 fn restart_if_running() {
-    if control::service_active() {
-        let _ = control::restart_service();
-    }
+    let _ = control::restart_if_running();
 }
 
 fn edit_keep(paths: &[PathBuf], keep: bool) -> Result<String> {
@@ -459,6 +469,18 @@ fn edit_keep(paths: &[PathBuf], keep: bool) -> Result<String> {
 }
 
 fn status(json: bool) -> Result<String> {
+    if !control::is_configured() {
+        if json {
+            let v = serde_json::json!({
+                "configured": false,
+                "signed_in": control::is_signed_in(),
+                "has_builtin_client": control::builtin_client().is_some(),
+                "daemon": null,
+            });
+            return Ok(serde_json::to_string_pretty(&v)?);
+        }
+        return Ok("CloudDrop isn't set up yet: run `clouddrop setup`.".into());
+    }
     let ctx = Ctx::load()?;
     let counts = ctx.db.counts()?;
     let count = |kind: &str, state: State| {
@@ -473,7 +495,7 @@ fn status(json: bool) -> Result<String> {
     let signed_in = auth::token_path().exists();
     let daemon = control::read_status(&config::data_dir()).filter(|s| s.is_live());
     let activity = match &daemon {
-        None => "not running — systemctl --user start clouddrop".to_string(),
+        None => format!("not running — {}", control::START_HINT),
         Some(s) => {
             let what = match s.phase {
                 Phase::Starting => "starting".to_string(),
@@ -497,6 +519,9 @@ fn status(json: bool) -> Result<String> {
             states.insert(s.as_str().into(), count("file", s).into());
         }
         let v = serde_json::json!({
+            "configured": true,
+            "paused": control::is_paused(&ctx.db),
+            "root_id": ctx.db.meta_get("root_id")?,
             "folder": ctx.cfg.sync_dir,
             "drive_folder": ctx.cfg.drive_folder,
             "signed_in": signed_in,

@@ -55,3 +55,51 @@ jobs:
           path: |
             target/release/clouddrop.exe
             target/release/clouddrop-agent.exe
+
+  app:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: winapp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.6
+          channel: stable
+      - run: flutter pub get
+      - run: flutter analyze
+      - name: App tests (logic, widgets, screenshots)
+        run: flutter test
+
+  windows-package:
+    needs: [windows, app]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.6
+          channel: stable
+      - name: Build the app
+        working-directory: winapp
+        run: flutter build windows --release
+      - uses: actions/download-artifact@v4
+        with:
+          name: clouddrop-windows-x64
+          path: engine
+      - name: Assemble the test package
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $out = "dist/CloudDrop-$version-windows-x64"
+          New-Item -ItemType Directory -Force "$out/CloudDrop" | Out-Null
+          Copy-Item -Recurse winapp/build/windows/x64/runner/Release/* "$out/CloudDrop"
+          Copy-Item engine/clouddrop.exe, engine/clouddrop-agent.exe "$out/CloudDrop"
+          Copy-Item packaging/windows/install.cmd, packaging/windows/install.ps1, packaging/windows/uninstall.ps1, packaging/windows/README.txt $out
+          Set-Content "$out/VERSION" $version -NoNewline
+          "VERSION=$version" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloudDrop-${{ env.VERSION }}-windows-x64
+          path: dist/

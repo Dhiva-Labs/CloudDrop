@@ -43,21 +43,24 @@ app's Files tab, where they can be downloaded back.
 
 ## App ↔ engine contract
 
+Binary lookup order: `CLOUDDROP_BIN`, then `clouddrop.exe` next to the app's exe, then
+`PATH`.
+
 Read (never write) the state database (`state.db`, SQLite, WAL; open read-only) and
 `status.json` as described in [DESIGN.md](DESIGN.md). Do everything else through the
-CLI (`clouddrop.exe` next to the app's exe, else on `PATH`, else `CLOUDDROP_BIN`):
+CLI:
 
 | Need | Command |
 | --- | --- |
-| overall state (signed in, built-in client, counts, daemon status, quota) | `clouddrop status --json` |
+| overall state: `configured`, `signed_in`, `has_builtin_client`, `paused`, `root_id`, counts, `daemon` (status incl. quota) — works before setup too | `clouddrop status --json` |
 | settings (secret withheld) | `clouddrop config get --json` |
 | change a setting (applied live) | `clouddrop config set KEY VALUE` — `parallel_uploads`, `settle_secs`, `notifications`, `ignore`, `auto_free_days` (`never`/`now`/N), `keep_local` (comma list) |
 | first-run setup | `clouddrop setup --no-login [--folder DIR] [--client-json FILE]` then `clouddrop login --no-browser` (prints the consent URL; open it; exits 0 when signed in) |
-| sign in again | `clouddrop login` |
+| sign in again / sign out | `clouddrop login`, `clouddrop logout` (stops the service, forgets the sign-in) |
 | free / download back / retry | `clouddrop free PATH…`, `clouddrop restore PATH…`, `clouddrop retry [PATH…]` |
 | pause / resume | `clouddrop pause`, `clouddrop resume` |
 | keep on this computer | `clouddrop keep PATH…`, `clouddrop unkeep PATH…` |
-| background service | `clouddrop service status|start|stop|enable|disable` |
+| background service | `clouddrop service start\|stop\|enable\|disable`; `clouddrop service status --json` → `{"running", "at_login"}` |
 | Drive link | `clouddrop url PATH` |
 
 Commands print a human sentence on success (exit 0) or an error on stderr (exit 1).

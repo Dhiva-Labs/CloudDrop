@@ -212,6 +212,13 @@ pub fn is_configured() -> bool {
     Config::load().is_ok_and(|c| !c.client_id.is_empty() && !c.client_secret.is_empty())
 }
 
+/// How to start the background service, for messages.
+pub const START_HINT: &str = if cfg!(windows) {
+    "clouddrop service start"
+} else {
+    "systemctl --user start clouddrop"
+};
+
 pub fn is_signed_in() -> bool {
     crate::auth::token_path().exists()
 }
@@ -397,6 +404,26 @@ pub fn enable_service() -> Result<()> {
     Ok(())
 }
 
+/// Restarts the service if it is running, for changes it can't apply live.
+pub fn restart_if_running() -> Result<()> {
+    #[cfg(unix)]
+    if service_active() {
+        restart_service()?;
+    }
+    #[cfg(windows)]
+    if daemon_running() {
+        stop_service()?;
+        for _ in 0..40 {
+            if !daemon_running() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        start_service()?;
+    }
+    Ok(())
+}
+
 pub fn restart_service() -> Result<()> {
     if !systemctl(&["restart", SERVICE])? {
         bail!("could not restart the clouddrop service — see `journalctl --user -u clouddrop`");
@@ -461,9 +488,21 @@ pub fn restart_files() -> Result<()> {
     Ok(())
 }
 
+/// Opens a link or file in its default app (the browser for web links).
 pub fn open_uri(uri: &str) {
-    let _ = Command::new("xdg-open")
-        .arg(uri)
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("rundll32.exe");
+        c.args(["url.dll,FileProtocolHandler", uri]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new("xdg-open");
+        c.arg(uri);
+        c
+    };
+    let _ = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
