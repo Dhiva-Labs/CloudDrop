@@ -118,6 +118,57 @@ void main() {
       expect(find.textContaining('needs clouddrop.exe'), findsNothing);
     });
 
+    uiTest('a settings file that cannot be read gets an error page, not the setup assistant', (
+      tester,
+    ) async {
+      const error =
+          r'invalid config C:\Users\Dhiva\AppData\Roaming\clouddrop\config.toml: TOML parse error at line 4, column 12'
+          '\n  |\n4 | sync_dir = C:\\Users\n  |            ^\ninvalid escape\n';
+      final t = TestApp(windows: true, status: const EngineStatus.unconfigured(configError: error));
+      t.engine.config = null;
+      await pumpApp(tester, t);
+      expect(find.text("CloudDrop's settings can't be read"), findsOneWidget);
+      // Only the first line of the error, which names the file.
+      expect(find.textContaining('TOML parse error at line 4, column 12'), findsOneWidget);
+      expect(find.textContaining('invalid escape'), findsNothing);
+      expect(find.textContaining('Nothing was changed'), findsOneWidget);
+      expect(find.text('Welcome to CloudDrop'), findsNothing);
+      expect(find.text('Home'), findsNothing);
+      expect(find.text('Try Again'), findsOneWidget);
+      expect(find.text('Open Settings Folder'), findsOneWidget);
+
+      await tester.tap(find.text('Open Settings Folder'));
+      await tester.pump();
+      expect(t.system.opened, [r'C:\Users\Dhiva\AppData\Roaming\clouddrop']);
+      expect(t.engine.calls, isEmpty, reason: 'nothing was run that could touch the file');
+
+      // Still broken: Try Again stays on the page.
+      await tester.tap(find.text('Try Again'));
+      await tester.settle();
+      expect(find.text("CloudDrop's settings can't be read"), findsOneWidget);
+
+      // Fixed by hand: Try Again leads on (this folder was never set up: the assistant).
+      t.engine.statusValue = const EngineStatus.unconfigured(hasBuiltinClient: true);
+      await tester.tap(find.text('Try Again'));
+      await tester.settle();
+      expect(find.text("CloudDrop's settings can't be read"), findsNothing);
+      expect(find.text('Welcome to CloudDrop'), findsOneWidget);
+    });
+
+    uiTest('a settings error that does not name the file shows the path itself', (tester) async {
+      final t = TestApp(
+        windows: true,
+        status: const EngineStatus.unconfigured(configError: 'cannot read the file: access denied'),
+      );
+      t.engine.config = null;
+      await pumpApp(tester, t);
+      expect(find.text('cannot read the file: access denied'), findsOneWidget);
+      expect(
+        find.textContaining(r'Settings file: C:\Users\Dhiva\AppData\Roaming\clouddrop\config.toml'),
+        findsOneWidget,
+      );
+    });
+
     uiTest('messages appear as InfoBars', (tester) async {
       final t = busyApp();
       await pumpApp(tester, t);

@@ -126,6 +126,74 @@ void main() {
     expect((await t2.ready()).snapshot.rootId, 'FROM-DB', reason: 'status has none: the database');
   });
 
+  group('a settings file that exists but cannot be read', () {
+    const error =
+        'invalid config /home/me/.config/clouddrop/config.toml: TOML parse error at line 1, column 6\n'
+        '  |\n1 | this is = not [valid toml\n  |      ^\nkey with no value, expected `=`\n';
+
+    test('never opens the setup assistant (it would overwrite the file)', () async {
+      final t = TestApp(status: const EngineStatus.unconfigured(configError: error));
+      t.engine.config = null;
+      final app = await t.ready();
+      expect(app.loaded, isTrue);
+      expect(app.configError, error);
+      expect(app.setupActive, isFalse);
+      expect(app.fatal, isNull);
+      expect(t.engine.calls, isEmpty, reason: 'nothing was written or run');
+    });
+
+    test('Open Settings Folder opens the folder that holds config.toml', () async {
+      final t = TestApp(status: const EngineStatus.unconfigured(configError: error));
+      t.engine.config = null;
+      final app = await t.ready();
+      app.openSettingsFolder();
+      expect(t.system.opened, ['/home/me/.config/clouddrop']);
+    });
+
+    test('Try Again re-reads: once the file is fixed the normal start-up check runs', () async {
+      final t = TestApp(status: const EngineStatus.unconfigured(configError: error));
+      t.engine.config = null;
+      final app = await t.ready();
+      // Still broken: nothing changes.
+      await app.refreshNow();
+      expect(app.configError, error);
+      expect(app.setupActive, isFalse);
+      // Fixed, but never set up: now the assistant is due.
+      t.engine.statusValue = const EngineStatus.unconfigured(hasBuiltinClient: true);
+      await app.refreshNow();
+      expect(app.configError, isNull);
+      expect(app.setupActive, isTrue);
+    });
+
+    test('fixed and already set up: straight to the main window', () async {
+      final t = TestApp(status: const EngineStatus.unconfigured(configError: error));
+      final app = await t.ready();
+      expect(app.setupActive, isFalse);
+      t.engine.statusValue = const EngineStatus(
+        configured: true,
+        signedIn: true,
+        folder: '/home/me/CloudDrop',
+      );
+      await app.refreshNow();
+      expect(app.configError, isNull);
+      expect(app.setupActive, isFalse);
+      expect(app.snapshot.ready, isTrue);
+    });
+
+    test('a file that breaks while the app is running shows the error too', () async {
+      final t = TestApp(daemon: daemon());
+      final app = await t.ready();
+      expect(app.configError, isNull);
+      var heard = 0;
+      app.addListener(() => heard++);
+      t.engine.statusValue = const EngineStatus.unconfigured(configError: error);
+      await app.refreshNow();
+      expect(app.configError, error);
+      expect(heard, greaterThan(0));
+      expect(app.setupActive, isFalse);
+    });
+  });
+
   test('finishing the setup returns to the main window', () async {
     final t = TestApp(status: const EngineStatus(configured: true, signedIn: false));
     final app = await t.ready();

@@ -41,6 +41,16 @@ void main() {
       expect(p.cliBinary, r'D:\bin\cd.exe');
     });
 
+    test('the settings folder is the one holding config.toml', () {
+      final p = AppPaths.resolve(env: env, windows: true);
+      expect(p.configDir, r'C:\Users\Dhiva\AppData\Roaming\clouddrop');
+      final q = AppPaths.resolve(
+        env: {...env, 'CLOUDDROP_CONFIG': r'D:\sandbox\cfg\config.toml'},
+        windows: true,
+      );
+      expect(q.configDir, r'D:\sandbox\cfg');
+    });
+
     test('Windows shows real paths', () {
       final p = AppPaths.resolve(env: env, windows: true);
       expect(p.pretty(r'C:\Users\Dhiva\CloudDrop'), r'C:\Users\Dhiva\CloudDrop');

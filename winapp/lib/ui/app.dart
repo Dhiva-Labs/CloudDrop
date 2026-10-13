@@ -190,6 +190,7 @@ class _GateState extends State<_Gate> {
       builder: (context, _) {
         if (!app.loaded) return const _Splash();
         if (app.fatal != null) return _Problem(app: app);
+        if (app.configError != null) return _ConfigProblem(app: app);
         if (app.setupActive) {
           _ensureSetup();
           final s = _setup;
@@ -256,6 +257,63 @@ class _Problem extends StatelessWidget {
                     onPressed: () => app.refreshNow(),
                     child: const Text('Try Again'),
                   ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The settings file exists but can't be read. Nothing else runs: the setup assistant would
+/// overwrite the user's file.
+class _ConfigProblem extends StatelessWidget {
+  const _ConfigProblem({required this.app});
+
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FluentTheme.of(context);
+    final error = app.configError ?? '';
+    final firstLine = error.trim().split(RegExp(r'\r?\n')).first;
+    final path = app.paths.configPath;
+    return ScaffoldPage(
+      content: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text("CloudDrop's settings can't be read", style: theme.typography.subtitle),
+                const SizedBox(height: 12),
+                InfoBar(
+                  title: Text(firstLine),
+                  // The engine's sentence usually names the file already.
+                  content: Text(
+                    firstLine.contains(path)
+                        ? 'Fix the file or move it away, then try again. Nothing was changed.'
+                        : 'Settings file: $path\nFix the file or move it away, then try again.',
+                  ),
+                  severity: InfoBarSeverity.error,
+                  isLong: true,
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton(onPressed: () => app.refreshNow(), child: const Text('Try Again')),
+                    Button(
+                      onPressed: app.openSettingsFolder,
+                      child: const Text('Open Settings Folder'),
+                    ),
+                  ],
                 ),
               ],
             ),

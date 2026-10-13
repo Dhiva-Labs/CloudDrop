@@ -49,6 +49,9 @@ class AppPaths {
   /// [picked] relative to [syncDir] ('/' separated) if it is a folder beneath it.
   String? relInSync(String syncDir, String picked) => fs.relInSync(syncDir, picked, context: _p);
 
+  /// The folder that holds `config.toml`.
+  String get configDir => _p.dirname(configPath);
+
   String get dbPath => _p.join(dataDir, 'state.db');
   String get statusPath => _p.join(dataDir, 'status.json');
   String get tokenPath => _p.join(dataDir, 'token.json');

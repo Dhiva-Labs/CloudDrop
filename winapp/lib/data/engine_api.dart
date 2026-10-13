@@ -36,11 +36,21 @@ class EngineStatus {
     this.errors = const [],
     this.paused = false,
     this.rootId,
+    this.configError,
   });
 
-  /// Not set up yet: the setup assistant is due.
-  const EngineStatus.unconfigured({bool signedIn = false, bool hasBuiltinClient = false})
-    : this(configured: false, signedIn: signedIn, hasBuiltinClient: hasBuiltinClient);
+  /// Not set up yet: the setup assistant is due (unless [configError] says the settings file
+  /// exists but can't be read: then the assistant must not run, it would overwrite the file).
+  const EngineStatus.unconfigured({
+    bool signedIn = false,
+    bool hasBuiltinClient = false,
+    String? configError,
+  }) : this(
+         configured: false,
+         signedIn: signedIn,
+         hasBuiltinClient: hasBuiltinClient,
+         configError: configError,
+       );
 
   /// The engine has a config with a Google client (setup was done).
   final bool configured;
@@ -63,6 +73,10 @@ class EngineStatus {
 
   /// Drive id of the top CloudDrop folder, once it exists.
   final String? rootId;
+
+  /// The settings file exists but can't be read (a TOML error, say). Only ever set together with
+  /// `configured: false`.
+  final String? configError;
 
   bool get ready => configured && signedIn;
 
@@ -88,6 +102,7 @@ class EngineStatus {
       configured: j['configured'] != false,
       paused: j['paused'] == true,
       rootId: j['root_id'] as String?,
+      configError: j['config_error'] as String?,
       folder: j['folder'] as String?,
       driveFolder: j['drive_folder'] as String?,
       signedIn: j['signed_in'] == true,

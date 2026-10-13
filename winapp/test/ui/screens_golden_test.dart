@@ -50,6 +50,20 @@ void main() {
   });
   tearDownAll(unpinTime);
 
+  // ---------- the settings file can't be read ----------
+  screen('config_error', () {
+    final t = TestApp(
+      windows: true,
+      status: const EngineStatus.unconfigured(
+        configError:
+            r'invalid config C:\Users\Dhiva\AppData\Roaming\clouddrop\config.toml: TOML parse error at line 4, column 12'
+            '\n  |\n4 | sync_dir = C:\\Users\\Dhiva\\CloudDrop\n  |            ^\ninvalid escape\n',
+      ),
+    );
+    t.engine.config = null;
+    return t;
+  });
+
   // ---------- Home ----------
   screen('home_busy', busyApp);
   screen('home_idle', calmApp);

@@ -121,6 +121,35 @@ void main() {
       expect((s.configured, s.signedIn, s.hasBuiltinClient, s.ready), (false, true, false, false));
     });
 
+    test('a settings file that exists but cannot be read comes as config_error', () async {
+      runner.onRun = (args, env) => CliResult(
+        0,
+        jsonEncode({
+          'configured': false,
+          'signed_in': false,
+          'has_builtin_client': false,
+          'daemon': null,
+          'config_error': 'invalid config /x/config.toml: TOML parse error at line 1, column 6\n',
+        }),
+        '',
+      );
+      final s = await api.status();
+      expect(s.configured, isFalse);
+      expect(s.configError, startsWith('invalid config /x/config.toml: TOML parse error'));
+      expect(s.ready, isFalse);
+    });
+
+    test('config_error is absent or null when the file is fine', () async {
+      runner.onRun = (args, env) => const CliResult(
+        0,
+        '{"configured": false, "signed_in": false, "has_builtin_client": false, "daemon": null, "config_error": null}',
+        '',
+      );
+      expect((await api.status()).configError, isNull);
+      runner.onRun = (args, env) => const CliResult(0, statusJson, '');
+      expect((await api.status()).configError, isNull);
+    });
+
     test('configured: paused and the Drive folder id come with it', () async {
       runner.onRun = (args, env) => const CliResult(0, statusJson, '');
       final s = await api.status();

@@ -870,14 +870,47 @@ void main() {
     });
 
     test(
-      'an unreadable config shows up as "not set up" (the engine can\'t tell the difference)',
+      'a broken config.toml: status says config_error, the app shows the error page and never touches the file',
       () async {
+        const broken = 'this is = not [valid toml';
         fresh.writeConfig(withClient: false);
-        File(fresh.configPath).writeAsStringSync('this is = not [valid toml');
+        final file = File(fresh.configPath)..writeAsStringSync(broken);
         final api = fresh.api();
+
         final st = await api.status();
         expect(st.configured, isFalse);
+        expect(st.ready, isFalse);
+        expect(st.configError, isNotNull);
+        expect(st.configError!.split('\n').first, contains(fresh.configPath));
+        expect(st.configError, contains('TOML parse error'));
         expect(await api.configGet(), isNull);
+
+        // The app: error-page state, no setup assistant, and nothing it does rewrites the file.
+        final system = FakeSystem();
+        final real = AppController(fresh.services(system));
+        addTearDown(real.dispose);
+        await real.poll(forceEngine: true);
+        expect(real.loaded, isTrue);
+        expect(real.fatal, isNull);
+        expect(real.configError, st.configError);
+        expect(real.setupActive, isFalse);
+        real.openSettingsFolder();
+        expect(system.opened, [p.dirname(fresh.configPath)]);
+        await real.refreshNow(); // Try Again, still broken
+        expect(real.setupActive, isFalse);
+        expect(file.readAsStringSync(), broken, reason: "the user's file is exactly as it was");
+        expect(
+          Directory(fresh.dataDir).listSync(),
+          isEmpty,
+          reason: 'and nothing else was created',
+        );
+
+        // Fixed by hand: Try Again picks it up. (Configured, no sign-in yet: the assistant is due.)
+        fresh.writeConfig();
+        await real.refreshNow();
+        expect(real.configError, isNull);
+        expect(real.snapshot.signedIn, isFalse);
+        expect(real.setupActive, isTrue);
       },
     );
   });

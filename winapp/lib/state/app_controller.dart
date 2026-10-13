@@ -133,6 +133,9 @@ class AppController extends ChangeNotifier {
   String? get syncDir => config?.syncDir ?? engineStatus?.folder;
   bool get hasBuiltinClient => engineStatus?.hasBuiltinClient ?? false;
 
+  /// The settings file exists but can't be read: the sentence from the engine.
+  String? get configError => engineStatus?.configError;
+
   // ---------- polling ----------
 
   Timer? _timer;
@@ -185,9 +188,10 @@ class AppController extends ChangeNotifier {
     } on StateError catch (e) {
       _failed(e.message, missingCli: false);
     }
-    // The first good answer decides whether the setup assistant is due.
+    // The first good answer decides whether the setup assistant is due. A settings file that
+    // exists but can't be read is not "not set up": the assistant would overwrite it.
     final st = engineStatus;
-    if (fatal == null && !_gateChecked && st != null) {
+    if (fatal == null && !_gateChecked && st != null && st.configError == null) {
       _gateChecked = true;
       setupActive = !st.ready;
     }
@@ -249,6 +253,7 @@ class AppController extends ChangeNotifier {
 
   bool _published = false;
   String? _lastFatal;
+  String? _lastConfigError;
   bool _lastSetup = false;
   bool _lastBuiltin = false;
 
@@ -273,11 +278,13 @@ class AppController extends ChangeNotifier {
         !_published ||
         next != snapshot ||
         fatal != _lastFatal ||
+        configError != _lastConfigError ||
         setupActive != _lastSetup ||
         hasBuiltinClient != _lastBuiltin;
     snapshot = next;
     _published = true;
     _lastFatal = fatal;
+    _lastConfigError = configError;
     _lastSetup = setupActive;
     _lastBuiltin = hasBuiltinClient;
     if (changed) notifyListeners();
@@ -474,6 +481,9 @@ class AppController extends ChangeNotifier {
     if (root == null || !services.hasPlaceholders) return false;
     return services.pathExists(paths.absolute(root, rel));
   }
+
+  /// Opens the folder that holds `config.toml` (to fix or move the file by hand).
+  void openSettingsFolder() => services.system.openPath(paths.configDir);
 
   void openFolder() {
     final root = syncDir;
