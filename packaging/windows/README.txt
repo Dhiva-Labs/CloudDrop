@@ -7,9 +7,9 @@ Install
   menu entry and opens the setup assistant. Running install.cmd again upgrades.
 
 Sign in
-  This build has no Google sign-in key built in (the Microsoft Store build will).
-  When the setup assistant asks for a Google client file, pick the
-  client_secret_....json you downloaded from Google Cloud for CloudDrop.
+  Builds from GitHub have no Google sign-in key built in. In that case the setup
+  assistant asks for one: pick the client_secret_....json you downloaded from
+  Google Cloud for CloudDrop (the assistant shows how to make one).
 
 What to try
   - Put files in the CloudDrop folder (File Explorer > CloudDrop in the left pane).
