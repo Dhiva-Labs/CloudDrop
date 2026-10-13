@@ -4,6 +4,15 @@
 # git), its Google client is built in, so sign-in works without a key file.
 # Needs Rust (MSVC), Flutter and the Visual Studio C++ build tools.
 $ErrorActionPreference = 'Stop'
+
+# Runs a program. (Windows PowerShell 5.1 turns a program's stderr output into
+# errors, which 'Stop' would make fatal, so the exit code decides instead.)
+function Run([string]$what, [scriptblock]$command) {
+    $ErrorActionPreference = 'Continue'
+    & $command 2>&1 | ForEach-Object { "$_" }
+    if ($LASTEXITCODE) { throw "$what failed" }
+}
+
 $root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 Set-Location $root
 
@@ -19,14 +28,9 @@ if (Test-Path $envFile) {
     Write-Host 'No packaging\oauth-client.env: building without a built-in Google client.'
 }
 
-cargo build --release -p clouddrop -p clouddrop-agent
-if ($LASTEXITCODE) { throw 'cargo build failed' }
-
+Run 'cargo build' { cargo build --release -p clouddrop -p clouddrop-agent }
 Push-Location winapp
-flutter build windows --release
-$code = $LASTEXITCODE
-Pop-Location
-if ($code) { throw 'flutter build failed' }
+try { Run 'flutter build' { flutter build windows --release } } finally { Pop-Location }
 
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
 $out = Join-Path $root "dist\CloudDrop-$version-windows-x64"

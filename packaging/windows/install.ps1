@@ -2,6 +2,14 @@
 # %LOCALAPPDATA%\Programs\CloudDrop, adds a Start menu shortcut and an entry in
 # Settings > Apps, then opens the app. Running it again upgrades in place.
 $ErrorActionPreference = 'Stop'
+
+# Runs the CLI, ignoring failures (e.g. "not running"). Windows PowerShell 5.1
+# would otherwise turn its stderr output into a fatal error.
+function Quietly([scriptblock]$command) {
+    $ErrorActionPreference = 'Continue'
+    & $command 2>&1 | Out-Null
+}
+
 $src = Join-Path $PSScriptRoot 'CloudDrop'
 $dest = Join-Path $env:LOCALAPPDATA 'Programs\CloudDrop'
 $version = (Get-Content (Join-Path $PSScriptRoot 'VERSION') -ErrorAction SilentlyContinue) -as [string]
@@ -13,7 +21,7 @@ $cli = Join-Path $dest 'clouddrop.exe'
 if (Test-Path $cli) {
     $wasRunning = [bool](Get-Process clouddrop-agent -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -like "$dest\*" })
-    & $cli service stop 2>$null | Out-Null
+    Quietly { & $cli service stop }
     for ($i = 0; $i -lt 20 -and (Get-Process clouddrop-agent -ErrorAction SilentlyContinue |
             Where-Object { $_.Path -like "$dest\*" }); $i++) { Start-Sleep -Milliseconds 500 }
     Get-Process clouddrop_app, clouddrop-agent -ErrorAction SilentlyContinue |
@@ -45,6 +53,6 @@ $uninstall = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$dest\un
 Set-ItemProperty $key NoModify 1 -Type DWord
 Set-ItemProperty $key NoRepair 1 -Type DWord
 
-if ($wasRunning) { & $cli service start | Out-Null }
+if ($wasRunning) { Quietly { & $cli service start } }
 Start-Process $app
 Write-Host "CloudDrop $version is installed. Find it in the Start menu."
