@@ -8,10 +8,12 @@ use anyhow::{Result, bail};
 use clouddrop::config::{self, Config};
 use clouddrop::db::{Db, State};
 use clouddrop::drive::Drive;
+use clouddrop::store::LocalStore;
+use clouddrop::winstore::{WinStore, is_sync_root};
 use cloud_filter::error::{CResult, CloudErrorKind};
 use cloud_filter::filter::{Request, SyncFilter, info, ticket};
 use cloud_filter::root::{
-    Connection, HydrationType, PopulationType, ProtectionMode, SecurityId, Session,
+    Connection, HydrationType, PopulationType, ProtectionMode, SecurityId, Session, SyncRootId,
     SyncRootIdBuilder, SyncRootInfo, is_supported,
 };
 use cloud_filter::utility::WriteAt;
@@ -34,10 +36,7 @@ pub fn connect(cfg: &Config, drive: Arc<Drive>, rt: tokio::runtime::Handle) -> R
     if !is_supported()? {
         bail!("this version of Windows has no cloud files support");
     }
-    let id = SyncRootIdBuilder::new("CloudDrop")
-        .user_security_id(SecurityId::current_user()?)
-        .account_name("default")
-        .build();
+    let id = sync_root_id()?;
     if !id.is_registered()? {
         let exe = std::env::current_exe()?;
         let info = SyncRootInfo::default()
@@ -59,6 +58,53 @@ pub fn connect(cfg: &Config, drive: Arc<Drive>, rt: tokio::runtime::Handle) -> R
         db_path: config::data_dir().join("state.db"),
     };
     Ok(Session::new().connect(&cfg.sync_dir, filter)?)
+}
+
+fn sync_root_id() -> Result<SyncRootId> {
+    Ok(SyncRootIdBuilder::new("CloudDrop")
+        .user_security_id(SecurityId::current_user()?)
+        .account_name("default")
+        .build())
+}
+
+/// Uninstall: the folder stops being a cloud folder in File Explorer. Run with
+/// the agent stopped.
+pub fn unregister(sync_dir: Option<&Path>) -> Result<()> {
+    if let Some(dir) = sync_dir.filter(|d| is_sync_root(d)) {
+        release(dir);
+    }
+    let id = sync_root_id()?;
+    if id.is_registered()? {
+        id.unregister()?;
+        tracing::info!("removed the CloudDrop folder from File Explorer");
+    }
+    Ok(())
+}
+
+/// Turns the placeholders under `dir` back into ordinary files and folders.
+/// Placeholders without local data would be unreadable without CloudDrop, so they
+/// are removed; those files stay in Drive.
+pub fn release(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(md) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if md.is_dir() {
+            release(&path);
+        } else if WinStore.is_dehydrated(&path) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!("cannot remove {}: {e}", path.display());
+            }
+            continue;
+        }
+        if let Err(e) = clouddrop::winstore::make_plain(&path) {
+            tracing::warn!("cannot make {} an ordinary file: {e}", path.display());
+        }
+    }
 }
 
 impl Filter {

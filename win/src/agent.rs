@@ -16,6 +16,13 @@ pub static EXIT: AtomicBool = AtomicBool::new(false);
 
 pub fn main() {
     init_logging();
+    if std::env::args().nth(1).as_deref() == Some("--unregister") {
+        if let Err(e) = unregister() {
+            tracing::error!("cannot remove the folder from File Explorer: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if !single_instance() {
         return;
     }
@@ -51,6 +58,21 @@ fn init_logging() {
             .with_ansi(false)
             .init();
     }
+}
+
+/// `clouddrop-agent --unregister`, run by the uninstaller.
+fn unregister() -> anyhow::Result<()> {
+    if control::daemon_running() {
+        let _ = control::stop_service();
+        for _ in 0..30 {
+            if !control::daemon_running() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    let sync_dir = Config::load().ok().map(|c| c.sync_dir);
+    crate::cloud::unregister(sync_dir.as_deref())
 }
 
 /// A named mutex makes a second launch exit quietly.

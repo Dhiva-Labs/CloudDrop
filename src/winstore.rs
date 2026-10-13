@@ -52,6 +52,41 @@ fn io_err(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
+/// Opens an item for Cloud Files calls with a plain Win32 handle (they reject the
+/// protected handle from cloud-filter's `Placeholder::options()` as invalid).
+/// Attribute and permission access only, so opening never downloads a placeholder.
+/// `exclusive` fails while another program has the file open.
+fn open(abs: &Path, exclusive: bool) -> io::Result<Placeholder> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+    const WRITE_DAC: u32 = 0x0004_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000; // needed to open folders
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | WRITE_DAC)
+        .share_mode(if exclusive { 0 } else { 7 })
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(abs)?;
+    Ok(Placeholder::from(file))
+}
+
+/// Turns a placeholder back into an ordinary file or folder (uninstall). Only for
+/// items whose data is local.
+pub fn make_plain(abs: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::CloudFilters::{CF_REVERT_FLAG_NONE, CfRevertPlaceholder};
+    let ph = open(abs, false)?;
+    if ph.info().map_err(io_err)?.is_none() {
+        return Ok(());
+    }
+    let hr = unsafe {
+        CfRevertPlaceholder(ph.inner_handle().handle().0, CF_REVERT_FLAG_NONE, std::ptr::null_mut())
+    };
+    if hr < 0 {
+        return Err(io::Error::from_raw_os_error(hr));
+    }
+    Ok(())
+}
+
 impl LocalStore for WinStore {
     fn is_dehydrated(&self, abs: &Path) -> bool {
         attrs(abs)
@@ -64,11 +99,7 @@ impl LocalStore for WinStore {
     }
 
     fn free(&self, abs: &Path, drive_id: &str) -> io::Result<()> {
-        let mut ph = Placeholder::options()
-            .write_access()
-            .exclusive()
-            .open(abs)
-            .map_err(io_err)?;
+        let mut ph = open(abs, true)?;
         if ph.info().map_err(io_err)?.is_none() {
             ph.convert_to_placeholder(
                 ConvertOptions::default().mark_in_sync().blob(drive_id.as_bytes().to_vec()),
@@ -83,10 +114,7 @@ impl LocalStore for WinStore {
 
     fn synced(&self, abs: &Path, drive_id: &str, is_dir: bool) {
         let result = (|| -> Result<(), String> {
-            let mut ph = Placeholder::options()
-                .write_access()
-                .open(abs)
-                .map_err(|e| e.to_string())?;
+            let mut ph = open(abs, false).map_err(|e| e.to_string())?;
             if ph.info().map_err(|e| e.to_string())?.is_some() {
                 ph.mark_in_sync(true, None).map_err(|e| e.to_string())?;
             } else {
@@ -102,12 +130,12 @@ impl LocalStore for WinStore {
             Ok(())
         })();
         if let Err(e) = result {
-            tracing::debug!("cannot mark {} in sync: {e}", abs.display());
+            tracing::warn!("cannot mark {} in sync: {e}", abs.display());
         }
     }
 
     fn pending(&self, abs: &Path) {
-        if let Ok(mut ph) = Placeholder::options().write_access().open(abs)
+        if let Ok(mut ph) = open(abs, false)
             && let Ok(Some(_)) = ph.info()
         {
             let _ = ph.mark_in_sync(false, None);
