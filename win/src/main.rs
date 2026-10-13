@@ -5,15 +5,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
-mod agent;
-#[cfg(windows)]
-mod cloud;
-#[cfg(windows)]
-mod tray;
-
-#[cfg(windows)]
 fn main() {
-    agent::main();
+    clouddrop_agent::agent::main();
 }
 
 #[cfg(not(windows))]

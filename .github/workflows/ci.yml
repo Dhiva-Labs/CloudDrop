@@ -45,6 +45,8 @@ jobs:
         run: cargo clippy -p clouddrop -p clouddrop-agent --all-targets -- -D warnings
       - name: Core and end-to-end tests
         run: cargo test -p clouddrop
+      - name: File Explorer cloud-folder test (real Cloud Files API)
+        run: cargo test -p clouddrop-agent -- --nocapture
       - name: Build the agent
         run: cargo build --release -p clouddrop -p clouddrop-agent
       - uses: actions/upload-artifact@v4

@@ -29,7 +29,7 @@ pub fn main() {
         background(handle, quit_rx);
         EXIT.store(true, Ordering::SeqCst);
     });
-    tray::run();
+    crate::tray::run();
     let _ = quit_tx.send(true);
     let _ = background.join();
     rt.shutdown_timeout(Duration::from_secs(3));

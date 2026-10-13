@@ -586,6 +586,7 @@ dependencies = [
  "cloud-filter",
  "clouddrop",
  "embed-resource",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
