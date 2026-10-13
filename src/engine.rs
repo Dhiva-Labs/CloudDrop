@@ -788,19 +788,27 @@ impl Engine {
         e.set_local(Some(meta));
         self.put(&e);
 
-        // "Always keep on this device": download it now. It comes back through
-        // process_file as a known file, so nothing is uploaded.
-        let abs = self.abs(rel);
-        let started = self.hydrating.get(rel);
-        if self.store.is_pinned(&abs) && started.is_none_or(|t| t.elapsed() >= HYDRATE_RETRY) {
-            self.hydrating.insert(rel.to_string(), Instant::now());
-            let store = self.store.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Err(err) = store.hydrate(&abs) {
-                    tracing::warn!("cannot download {}: {err}", abs.display());
-                }
-            });
+        // "Always keep on this device": download it now.
+        if self.store.is_pinned(&self.abs(rel)) {
+            self.start_hydrate(rel, false);
         }
+    }
+
+    /// Downloads a placeholder's data in the background. It comes back through
+    /// process_file as a known file, so nothing is uploaded.
+    fn start_hydrate(&mut self, rel: &str, asked: bool) {
+        let abs = self.abs(rel);
+        let recent = self.hydrating.get(rel).is_some_and(|t| t.elapsed() < HYDRATE_RETRY);
+        if !self.store.is_dehydrated(&abs) || (recent && !asked) {
+            return;
+        }
+        self.hydrating.insert(rel.to_string(), Instant::now());
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(err) = store.hydrate(&abs) {
+                tracing::warn!("cannot download {}: {err}", abs.display());
+            }
+        });
     }
 
     /// The local item at `rel` is gone. Drive is never touched: whatever it holds
@@ -917,6 +925,9 @@ impl Engine {
         self.reload_config();
         if control::stop_requested(&self.db) {
             self.stop_now = true;
+        }
+        for rel in control::take_hydrate_requests(&self.db) {
+            self.start_hydrate(&rel, true);
         }
         if self.needs_rescan
             || self.last_rescan.elapsed() >= Duration::from_secs(self.cfg.rescan_secs)

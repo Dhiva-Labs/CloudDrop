@@ -835,6 +835,25 @@ async fn keep_on_this_device_downloads_a_freed_file() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn download_back_is_requested_from_the_running_service() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::new().await;
+    h.write("e.txt", "echo");
+    h.start_with_store(store.clone());
+    h.settle().await;
+    let sessions = h.stats().0;
+    store.dehydrate_externally(&h.path("e.txt"));
+    h.wait("freed", |h| h.state("e.txt") == Some(State::CloudOnly)).await;
+
+    clouddrop::control::request_hydrate(&h.db, "e.txt").unwrap();
+    h.wait("downloaded", |h| h.state("e.txt") == Some(State::Synced)).await;
+    assert_eq!(read(&h.path("e.txt")), "echo");
+    assert_eq!(h.stats().0, sessions, "nothing uploaded");
+    assert!(clouddrop::control::take_hydrate_requests(&h.db).is_empty(), "request consumed");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pinned_items_are_not_freed_automatically() {
     let store = std::sync::Arc::new(common::FakeStore::default());
     let mut h = Harness::with(|c| c.auto_free_days = Some(0)).await;

@@ -715,10 +715,14 @@ impl FakeStore {
     }
 }
 
-/// An attribute-only change (inotify IN_ATTRIB), like a pin state change on Windows.
+/// An attribute-only change, like a pin state change on Windows: briefly
+/// read-only, then back.
 fn touch_attributes(abs: &Path) {
-    let perms = std::fs::metadata(abs).unwrap().permissions();
-    std::fs::set_permissions(abs, perms).unwrap();
+    let original = std::fs::metadata(abs).unwrap().permissions();
+    let mut read_only = original.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(abs, read_only).unwrap();
+    std::fs::set_permissions(abs, original).unwrap();
 }
 
 impl clouddrop::store::LocalStore for FakeStore {

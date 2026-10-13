@@ -26,8 +26,11 @@ if (Test-Path $cli) {
     Quietly { & $cli service stop }
     for ($i = 0; $i -lt 20 -and (Get-Process clouddrop-agent -ErrorAction SilentlyContinue |
             Where-Object { $_.Path -like "$dest\*" }); $i++) { Start-Sleep -Milliseconds 500 }
-    Get-Process clouddrop_app, clouddrop-agent -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -like "$dest\*" } | Stop-Process -Force
+    $left = Get-Process clouddrop_app, clouddrop-agent -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -like "$dest\*" }
+    $left | Stop-Process -Force
+    # Their files stay locked until they have fully exited.
+    $left | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
 }
 
 New-Item -ItemType Directory -Force $dest | Out-Null

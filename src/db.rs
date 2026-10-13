@@ -300,6 +300,19 @@ impl Db {
         Ok(())
     }
 
+    /// Removes the meta keys starting with `prefix`; returns the rest of each key.
+    pub fn meta_take(&self, prefix: &str) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let keys: Vec<String> = conn
+            .prepare("SELECT key FROM meta WHERE substr(key, 1, length(?1)) = ?1")?
+            .query_map([prefix], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for key in &keys {
+            conn.execute("DELETE FROM meta WHERE key = ?1", [key])?;
+        }
+        Ok(keys.into_iter().map(|k| k[prefix.len()..].to_string()).collect())
+    }
+
     pub fn get(&self, path: &str) -> Result<Option<Entry>> {
         Ok(self
             .conn()

@@ -128,6 +128,18 @@ pub fn clear_stop(db: &Db) -> Result<()> {
     db.meta_delete("stop")
 }
 
+const HYDRATE: &str = "hydrate/";
+
+/// Asks the running service to download a placeholder's data (Windows: only
+/// the agent that owns the sync root can be relied on to do that).
+pub fn request_hydrate(db: &Db, rel: &str) -> Result<()> {
+    db.meta_set(&format!("{HYDRATE}{rel}"), "1")
+}
+
+pub fn take_hydrate_requests(db: &Db) -> Vec<String> {
+    db.meta_take(HYDRATE).unwrap_or_default()
+}
+
 pub fn is_paused(db: &Db) -> bool {
     db.meta_get("paused").ok().flatten().as_deref() == Some("1")
 }

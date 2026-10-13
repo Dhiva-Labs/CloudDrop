@@ -218,6 +218,8 @@ pub struct RestoreReport {
     pub files: u64,
     pub bytes: u64,
     pub blocked: Vec<String>,
+    /// Still downloading (through the service) when the command stopped waiting.
+    pub downloading: u64,
 }
 
 impl RestoreReport {
@@ -237,6 +239,9 @@ impl RestoreReport {
                 " Skipped {} because another file is already there.",
                 self.blocked.join(", ")
             ));
+        }
+        if self.downloading > 0 {
+            s.push_str(&format!(" {} still downloading in the background.", self.downloading));
         }
         s
     }
@@ -260,6 +265,9 @@ fn reactivate_ancestors(ctx: &Ctx, rel: &str) -> Result<()> {
 /// Downloads cloud-only files (and recreates cloud-only folders) under each path.
 pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<RestoreReport> {
     let mut report = RestoreReport::default();
+    let store = crate::store::platform();
+    // Placeholders (Windows) the service is downloading: (path, entry path, size).
+    let mut waiting: Vec<(PathBuf, String, i64)> = Vec::new();
     for rel in rels {
         for mut e in tracked_subtree(ctx, rel)? {
             if e.state != State::CloudOnly {
@@ -274,17 +282,14 @@ pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<Restor
                 }
                 Kind::File => {
                     let abs = ctx.abs(&e.path);
-                    let store = crate::store::platform();
                     if store.is_dehydrated(&abs) {
-                        // Windows: reading a placeholder downloads it through the
-                        // CloudDrop agent, which keeps it a cloud file in Explorer.
-                        let path = abs.clone();
-                        tokio::task::spawn_blocking(move || store.hydrate(&path))
-                            .await?
-                            .with_context(|| format!("cannot download {} — is CloudDrop running?", e.path))?;
-                        let _ = ctx.db.log_activity(ActivityKind::Restored, &e.path, e.cloud_size, None);
-                        report.files += 1;
-                        report.bytes += e.cloud_size.unwrap_or(0) as u64;
+                        // Windows: the agent downloads it, so it stays a cloud file
+                        // in Explorer.
+                        if !crate::control::daemon_running() {
+                            bail!("CloudDrop isn't running: start it to download {}", e.path);
+                        }
+                        crate::control::request_hydrate(&ctx.db, &e.path)?;
+                        waiting.push((abs, e.path.clone(), e.cloud_size.unwrap_or(0)));
                         continue;
                     }
                     if std::fs::symlink_metadata(&abs).is_ok() {
@@ -297,6 +302,27 @@ pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<Restor
                 }
             }
         }
+    }
+    if !waiting.is_empty() {
+        // Wait for the downloads, allowing at least 1 MB/s.
+        let total: i64 = waiting.iter().map(|w| w.2).sum();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60 + total as u64 / 1_000_000);
+        loop {
+            waiting.retain(|(abs, rel, size)| {
+                if store.is_dehydrated(abs) {
+                    return true;
+                }
+                let _ = ctx.db.log_activity(ActivityKind::Restored, rel, Some(*size), None);
+                report.files += 1;
+                report.bytes += *size as u64;
+                false
+            });
+            if waiting.is_empty() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        report.downloading = waiting.len() as u64;
     }
     Ok(report)
 }
