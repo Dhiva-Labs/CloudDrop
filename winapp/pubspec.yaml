@@ -1,0 +1,36 @@
+name: clouddrop_app
+description: "CloudDrop - the desktop app (Fluent design) for the upload-only Google Drive folder."
+publish_to: 'none'
+
+# Windows: the first three numbers are the product version, the last one the build suffix.
+version: 0.2.0+2
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  fluent_ui: ^4.16.1
+  # Read-only access to the engine's state.db; sqlite3 (3.x) bundles SQLite for Windows
+  # through its build hook, sqlite3_flutter_libs is kept for older toolchains.
+  sqlite3: ^3.5.2
+  sqlite3_flutter_libs: ^0.6.0+eol
+  file_selector: ^1.1.0
+  desktop_drop: ^0.8.4
+  url_launcher: ^6.3.3
+  path: ^1.9.1
+  # Mica material and window size/title (Windows 11).
+  flutter_acrylic: ^1.1.4
+  window_manager: ^0.5.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icon.png

@@ -426,8 +426,11 @@ async fn interactive_login_flow() {
     .unwrap();
     let tok: clouddrop::auth::Token = serde_json::from_str(&read(&token_file)).unwrap();
     assert_eq!(tok.refresh_token, "good-refresh");
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
 }
 
 fn big_content(n: usize) -> String {
@@ -488,8 +491,10 @@ async fn burst_of_files_has_no_duplicates() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn odd_names_and_empty_files() {
+    // '\\' is a path separator on Windows, so it can't be part of a name there.
+    const ODD: &str = if cfg!(windows) { "O'Brien & 50% notes.txt" } else { "O'Brien \\ notes.txt" };
     let mut h = Harness::new().await;
-    h.write("O'Brien \\ notes.txt", "quote");
+    h.write(ODD, "quote");
     h.write("தமிழ்/ファイル 📁.txt", "unicode");
     h.write("empty.dat", "");
     h.start();
@@ -497,7 +502,7 @@ async fn odd_names_and_empty_files() {
     assert_eq!(
         h.cloud_tree(),
         tree(&[
-            ("O'Brien \\ notes.txt", "quote"),
+            (ODD, "quote"),
             ("empty.dat", ""),
             ("தமிழ்/", ""),
             ("தமிழ்/ファイル 📁.txt", "unicode"),
@@ -751,5 +756,114 @@ async fn status_reports_drive_storage() {
     let q = clouddrop::control::read_status(&h.data).unwrap().quota.unwrap();
     assert_eq!(q.limit, Some(16106127360));
     assert!(q.usage >= q.usage_in_drive);
+    h.stop().await;
+}
+
+// ---- Windows placeholder behaviour, simulated with common::FakeStore ----
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placeholders_stay_visible_when_freed_and_are_never_uploaded() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::with(|c| c.auto_free_days = Some(0)).await;
+    h.write("a.txt", "alpha content");
+    h.start_with_store(store.clone());
+    h.wait("auto-freed", |h| h.state("a.txt") == Some(State::CloudOnly)).await;
+    h.settle().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(h.path("a.txt").exists(), "a freed placeholder stays in the folder");
+    assert_eq!(h.state("a.txt"), Some(State::CloudOnly));
+    assert_eq!(h.cloud("a.txt").unwrap().content, b"alpha content");
+    assert_eq!(h.stats().0, 1, "the empty placeholder is never uploaded");
+    let id = h.entry("a.txt").unwrap().drive_id.unwrap();
+    assert!(store.synced.lock().unwrap().iter().any(|(p, d)| p == &h.path("a.txt") && *d == id));
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explorer_free_and_open_round_trip_without_reupload() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::new().await;
+    h.write("b.txt", "bravo");
+    h.start_with_store(store.clone());
+    h.settle().await;
+    let sessions = h.stats().0;
+
+    store.dehydrate_externally(&h.path("b.txt"));
+    h.wait("freed by Explorer", |h| h.state("b.txt") == Some(State::CloudOnly)).await;
+    assert!(kinds(&h).contains(&(clouddrop::db::ActivityKind::Freed, "b.txt".into())));
+
+    store.hydrate_externally(&h.path("b.txt"), b"bravo");
+    h.wait("hydrated", |h| h.state("b.txt") == Some(State::Synced)).await;
+    assert_eq!(h.stats().0, sessions, "opening a placeholder doesn't upload anything");
+    assert_eq!(h.entry("b.txt").unwrap().uploaded_at, None, "kept until changed");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn free_up_space_in_explorer_is_checked_and_done_by_the_engine() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::new().await;
+    h.write("c.txt", "charlie");
+    h.start_with_store(store.clone());
+    h.settle().await;
+
+    store.unpin_externally(&h.path("c.txt"));
+    h.wait("freed", |h| h.state("c.txt") == Some(State::CloudOnly)).await;
+    assert!(store.dehydrated.lock().unwrap().contains(&h.path("c.txt")));
+    assert!(kinds(&h).contains(&(clouddrop::db::ActivityKind::Freed, "c.txt".into())));
+    assert_eq!(h.cloud("c.txt").unwrap().content, b"charlie");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_on_this_device_downloads_a_freed_file() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::new().await;
+    h.write("d.txt", "delta");
+    h.start_with_store(store.clone());
+    h.settle().await;
+    let sessions = h.stats().0;
+    store.dehydrate_externally(&h.path("d.txt"));
+    h.wait("freed", |h| h.state("d.txt") == Some(State::CloudOnly)).await;
+
+    store.pin_externally(&h.path("d.txt"));
+    h.wait("downloaded", |h| h.state("d.txt") == Some(State::Synced)).await;
+    assert_eq!(read(&h.path("d.txt")), "delta");
+    assert_eq!(h.stats().0, sessions, "nothing uploaded");
+    assert_eq!(h.entry("d.txt").unwrap().uploaded_at, None, "kept until changed");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn download_back_is_requested_from_the_running_service() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::new().await;
+    h.write("e.txt", "echo");
+    h.start_with_store(store.clone());
+    h.settle().await;
+    let sessions = h.stats().0;
+    store.dehydrate_externally(&h.path("e.txt"));
+    h.wait("freed", |h| h.state("e.txt") == Some(State::CloudOnly)).await;
+
+    clouddrop::control::request_hydrate(&h.db, "e.txt").unwrap();
+    h.wait("downloaded", |h| h.state("e.txt") == Some(State::Synced)).await;
+    assert_eq!(read(&h.path("e.txt")), "echo");
+    assert_eq!(h.stats().0, sessions, "nothing uploaded");
+    assert!(clouddrop::control::take_hydrate_requests(&h.db).is_empty(), "request consumed");
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_items_are_not_freed_automatically() {
+    let store = std::sync::Arc::new(common::FakeStore::default());
+    let mut h = Harness::with(|c| c.auto_free_days = Some(0)).await;
+    store.pinned.lock().unwrap().push(h.path("Pinned"));
+    h.write("Pinned/keep.txt", "keep");
+    h.write("free.txt", "free");
+    h.start_with_store(store.clone());
+    h.wait("free.txt freed", |h| h.state("free.txt") == Some(State::CloudOnly)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(h.state("Pinned/keep.txt"), Some(State::Synced));
+    assert_eq!(read(&h.path("Pinned/keep.txt")), "keep");
     h.stop().await;
 }

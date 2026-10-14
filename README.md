@@ -1,11 +1,12 @@
 # CloudDrop
 
-An upload-only Google Drive folder for Linux.
+An upload-only Google Drive folder for Linux and Windows.
 
-Anything you put in `~/CloudDrop` is uploaded to Google Drive with the same
+Anything you put in your CloudDrop folder (`~/CloudDrop`, or `%USERPROFILE%\CloudDrop`
+on Windows) is uploaded to Google Drive with the same
 folder structure, under a `CloudDrop` folder in My Drive. Deleting a file
 locally **never** deletes it from Drive: it becomes *cloud-only*, stays listed in
-CloudDrop and in Files, and can be downloaded back at any time. So you can free up
+CloudDrop and in your file manager, and can be downloaded back at any time. So you can free up
 space on your computer without losing anything — by hand, or automatically.
 
 - **Uploads** new and edited files; edits become new versions of the same Drive file.
@@ -22,7 +23,9 @@ space on your computer without losing anything — by hand, or automatically.
   (cloud-only included) with search, filters, multi-select and drag & drop, an
   **Activity** history, and **Settings**.
 - **Top-bar icon**: status at a glance, pause/resume, quick links.
-- **Files integration**: status emblems and a "Google Drive" column in Nautilus;
+- **Windows: a File Explorer cloud folder** with Explorer's own status icons,
+  *Free up space* and *Always keep on this device*, and a notification-area icon.
+- **Linux: Files integration**: status emblems and a "Google Drive" column in Nautilus;
   right-click *Free Up Space*, *Open in Google Drive*, *Retry Upload*,
   *Always Keep on This Computer*, and a *Cloud-only Files* menu to download things back.
 
@@ -30,7 +33,24 @@ CloudDrop only asks Google for access to the files it creates itself
 (`drive.file`) — it cannot see anything else in your Drive. Files go straight
 between your computer and Google; see the [privacy policy](PRIVACY.md).
 
-## Install (Ubuntu 26.04)
+## Install on Windows (10 version 1809 or later, 11)
+
+- **[Microsoft Store](https://apps.microsoft.com/detail/9P8CJ02X8KD8)** (free; signed,
+  updated by the Store, and works out of the box).
+- **Zip**: download `CloudDrop-…-windows-x64.zip` from
+  [Releases](https://github.com/Dhiva-Labs/CloudDrop/releases/latest), extract it
+  and double-click `install.cmd`. It installs for your user only (no administrator
+  rights) and adds CloudDrop to the Start menu and to *Settings › Apps* for
+  uninstalling. This build is unsigned, so Windows *Smart App Control* may block
+  it, and it has no Google client built in: the setup assistant shows how to create
+  your own (as in [From source](#from-source)).
+
+The CloudDrop folder appears in File Explorer's navigation pane. Uploaded files get
+a green check; right-click → *Free up space* keeps a file listed with a cloud icon
+and downloads it again when you open it; *Always keep on this device* downloads it
+back and keeps it. See [docs/WINDOWS.md](docs/WINDOWS.md) for how it works.
+
+## Install on Linux (Ubuntu 26.04)
 
 ```bash
 sudo add-apt-repository ppa:dhiva-labs/apps

@@ -106,14 +106,16 @@ pub fn config_path() -> PathBuf {
     }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("clouddrop/config.toml")
+        .join("clouddrop")
+        .join("config.toml")
 }
 
 pub fn data_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("CLOUDDROP_DATA_DIR") {
         return PathBuf::from(p);
     }
-    dirs::data_dir()
+    // Local (not roaming) app data on Windows; ~/.local/share on Linux.
+    dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("clouddrop")
 }
@@ -152,6 +154,75 @@ impl Config {
         Ok(())
     }
 
+    /// Changes one user-editable setting from text (used by `clouddrop config set`
+    /// and the desktop apps). The running service picks the change up by itself.
+    pub fn set_key(&mut self, key: &str, value: &str) -> Result<()> {
+        let v = value.trim();
+        let num = |what: &str| -> Result<u64> {
+            v.parse::<u64>().map_err(|_| anyhow::anyhow!("{what} must be a whole number"))
+        };
+        match key {
+            "parallel_uploads" => {
+                let n = num(key)?;
+                if !(1..=16).contains(&n) {
+                    bail!("parallel_uploads must be between 1 and 16");
+                }
+                self.parallel_uploads = n as usize;
+            }
+            "settle_secs" => self.settle_secs = num(key)?.min(3600),
+            "rescan_secs" => self.rescan_secs = num(key)?.max(30),
+            "notifications" => {
+                self.notifications = match v {
+                    "true" | "on" | "yes" | "1" => true,
+                    "false" | "off" | "no" | "0" => false,
+                    _ => bail!("notifications must be true or false"),
+                }
+            }
+            "ignore" => {
+                self.ignore = v
+                    .split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            }
+            "auto_free_days" => {
+                self.auto_free_days = match v {
+                    "never" | "off" | "" => None,
+                    "now" | "after_upload" => Some(0),
+                    _ => Some(num(key)?.min(3650) as u32),
+                }
+            }
+            "keep_local" => {
+                self.keep_local = v
+                    .split(',')
+                    .map(|p| p.trim().trim_matches('/').to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            }
+            other => bail!(
+                "unknown or read-only setting {other:?}; editable: parallel_uploads, settle_secs, \
+                 rescan_secs, notifications, ignore, auto_free_days, keep_local"
+            ),
+        }
+        self.validate()
+    }
+
+    /// The config as JSON for desktop apps, with the client secret withheld.
+    pub fn public_json(&self) -> serde_json::Value {
+        let mut v = serde_json::to_value(self).unwrap_or_default();
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "client_secret".into(),
+                serde_json::Value::Bool(!self.client_secret.is_empty()),
+            );
+            obj.insert("auto_free_days".into(), serde_json::json!(self.auto_free_days));
+            obj.insert("keep_local".into(), serde_json::json!(self.keep_local));
+            obj.insert("config_path".into(), serde_json::json!(config_path()));
+            obj.insert("data_dir".into(), serde_json::json!(data_dir()));
+        }
+        v
+    }
+
     /// `rel` is inside a folder marked "always keep on this computer".
     pub fn keeps_local(&self, rel: &str) -> bool {
         self.keep_local.iter().any(|k| {
@@ -173,6 +244,24 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_key_validates_and_maps() {
+        let mut c = Config::default();
+        c.set_key("parallel_uploads", "4").unwrap();
+        c.set_key("notifications", "off").unwrap();
+        c.set_key("auto_free_days", "now").unwrap();
+        c.set_key("keep_local", "Work/, Photos ,").unwrap();
+        c.set_key("ignore", "*.tmp, *.bak").unwrap();
+        assert_eq!((c.parallel_uploads, c.notifications, c.auto_free_days), (4, false, Some(0)));
+        assert_eq!(c.keep_local, ["Work", "Photos"]);
+        assert_eq!(c.ignore, ["*.tmp", "*.bak"]);
+        c.set_key("auto_free_days", "never").unwrap();
+        assert_eq!(c.auto_free_days, None);
+        assert!(c.set_key("parallel_uploads", "0").is_err());
+        assert!(c.set_key("sync_dir", "/x").is_err());
+        assert_eq!(c.public_json()["client_secret"], serde_json::json!(false));
+    }
 
     #[test]
     fn keep_local_matches_folders_not_prefixes() {

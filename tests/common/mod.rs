@@ -557,10 +557,16 @@ impl Harness {
     }
 
     pub fn start(&mut self) {
+        self.start_with_store(std::sync::Arc::new(clouddrop::store::PlainStore));
+    }
+
+    pub fn start_with_store(&mut self, store: std::sync::Arc<dyn clouddrop::store::LocalStore>) {
         assert!(self.engine.is_none());
         let (tx, rx) = watch::channel(false);
-        let handle = tokio::spawn(clouddrop::engine::run(
+        let opts = clouddrop::engine::RunOptions { config_file: None, store };
+        let handle = tokio::spawn(clouddrop::engine::run_with_options(
             self.cfg.clone(),
+            opts,
             self.db.clone(),
             self.drive(),
             self.data.clone(),
@@ -661,4 +667,89 @@ impl Harness {
 
 pub fn read(p: &Path) -> String {
     std::fs::read_to_string(p).unwrap()
+}
+
+/// Simulates Windows placeholders on Linux: a "dehydrated" file is an empty file the
+/// store remembers; `free` turns a file into one.
+#[derive(Default)]
+pub struct FakeStore {
+    pub dehydrated: Mutex<std::collections::HashSet<PathBuf>>,
+    pub pinned: Mutex<Vec<PathBuf>>,
+    pub unpinned: Mutex<std::collections::HashSet<PathBuf>>,
+    /// Content of dehydrated files, for hydrating them again.
+    pub saved: Mutex<HashMap<PathBuf, Vec<u8>>>,
+    pub synced: Mutex<Vec<(PathBuf, String)>>,
+    pub pending: Mutex<Vec<PathBuf>>,
+}
+
+impl FakeStore {
+    /// Explorer freeing a file itself (what Windows' storage settings can do).
+    pub fn dehydrate_externally(&self, abs: &Path) {
+        self.save(abs);
+        self.dehydrated.lock().unwrap().insert(abs.to_path_buf());
+        std::fs::write(abs, b"").unwrap();
+    }
+
+    /// Explorer's "Free up space": marks the file; CloudDrop has to free it.
+    pub fn unpin_externally(&self, abs: &Path) {
+        self.unpinned.lock().unwrap().insert(abs.to_path_buf());
+        touch_attributes(abs);
+    }
+
+    /// Explorer's "Always keep on this device".
+    pub fn pin_externally(&self, abs: &Path) {
+        self.pinned.lock().unwrap().push(abs.to_path_buf());
+        touch_attributes(abs);
+    }
+
+    fn save(&self, abs: &Path) {
+        if let Ok(content) = std::fs::read(abs) {
+            self.saved.lock().unwrap().insert(abs.to_path_buf(), content);
+        }
+    }
+
+    /// What opening a placeholder does (Windows downloads it).
+    pub fn hydrate_externally(&self, abs: &Path, content: &[u8]) {
+        self.dehydrated.lock().unwrap().remove(abs);
+        std::fs::write(abs, content).unwrap();
+    }
+}
+
+/// An attribute-only change, like a pin state change on Windows: briefly
+/// read-only, then back.
+fn touch_attributes(abs: &Path) {
+    let original = std::fs::metadata(abs).unwrap().permissions();
+    let mut read_only = original.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(abs, read_only).unwrap();
+    std::fs::set_permissions(abs, original).unwrap();
+}
+
+impl clouddrop::store::LocalStore for FakeStore {
+    fn is_dehydrated(&self, abs: &Path) -> bool {
+        abs.exists() && self.dehydrated.lock().unwrap().contains(abs)
+    }
+    fn is_pinned(&self, abs: &Path) -> bool {
+        self.pinned.lock().unwrap().iter().any(|p| abs.starts_with(p))
+    }
+    fn free(&self, abs: &Path, _drive_id: &str) -> std::io::Result<()> {
+        self.save(abs);
+        self.unpinned.lock().unwrap().remove(abs);
+        self.dehydrated.lock().unwrap().insert(abs.to_path_buf());
+        std::fs::write(abs, b"")
+    }
+    fn free_requested(&self, abs: &Path) -> bool {
+        self.unpinned.lock().unwrap().contains(abs) && !self.is_dehydrated(abs)
+    }
+    fn hydrate(&self, abs: &Path) -> std::io::Result<()> {
+        let content = self.saved.lock().unwrap().get(abs).cloned().unwrap_or_default();
+        self.dehydrated.lock().unwrap().remove(abs);
+        std::fs::write(abs, content)
+    }
+    fn synced(&self, abs: &Path, drive_id: &str, _is_dir: bool) {
+        self.synced.lock().unwrap().push((abs.to_path_buf(), drive_id.to_string()));
+    }
+    fn pending(&self, abs: &Path) {
+        self.pending.lock().unwrap().push(abs.to_path_buf());
+    }
 }

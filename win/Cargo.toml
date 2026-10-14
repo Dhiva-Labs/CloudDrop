@@ -1,0 +1,26 @@
+[package]
+name = "clouddrop-agent"
+version = "0.2.0"
+edition = "2024"
+description = "CloudDrop background agent for Windows: upload engine, File Explorer cloud folder and notification-area icon"
+license = "MIT"
+repository = "https://github.com/Dhiva-Labs/CloudDrop"
+homepage = "https://github.com/Dhiva-Labs/CloudDrop"
+
+[dependencies]
+clouddrop = { path = ".." }
+
+[target.'cfg(windows)'.dependencies]
+anyhow = "1"
+cloud-filter = "0.0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tray-icon = "0.26"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"

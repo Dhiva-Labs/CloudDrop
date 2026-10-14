@@ -12,3 +12,4 @@
 /debian/debhelper-build-stamp
 __pycache__/
 /packaging/oauth-client.env
+/dist

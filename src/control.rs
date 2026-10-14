@@ -66,8 +66,36 @@ pub struct DaemonStatus {
 impl DaemonStatus {
     /// Written recently by a process that still exists.
     pub fn is_live(&self) -> bool {
-        now_ms() - self.updated_ms < 10_000 && Path::new(&format!("/proc/{}", self.pid)).exists()
+        now_ms() - self.updated_ms < 10_000 && process_exists(self.pid)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_exists(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0;
+        CloseHandle(h);
+        ok && code == STILL_ACTIVE as u32
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn process_exists(_pid: u32) -> bool {
+    true
 }
 
 pub fn status_path(data_dir: &Path) -> PathBuf {
@@ -85,6 +113,31 @@ pub fn write_status(data_dir: &Path, status: &DaemonStatus) -> Result<()> {
     std::fs::write(&tmp, serde_json::to_vec(status)?)?;
     std::fs::rename(tmp, path)?;
     Ok(())
+}
+
+/// Asks a running daemon to exit (works where there is no service manager).
+pub fn request_stop(db: &Db) -> Result<()> {
+    db.meta_set("stop", "1")
+}
+
+pub fn stop_requested(db: &Db) -> bool {
+    db.meta_get("stop").ok().flatten().as_deref() == Some("1")
+}
+
+pub fn clear_stop(db: &Db) -> Result<()> {
+    db.meta_delete("stop")
+}
+
+const HYDRATE: &str = "hydrate/";
+
+/// Asks the running service to download a placeholder's data (Windows: only
+/// the agent that owns the sync root can be relied on to do that).
+pub fn request_hydrate(db: &Db, rel: &str) -> Result<()> {
+    db.meta_set(&format!("{HYDRATE}{rel}"), "1")
+}
+
+pub fn take_hydrate_requests(db: &Db) -> Vec<String> {
+    db.meta_take(HYDRATE).unwrap_or_default()
 }
 
 pub fn is_paused(db: &Db) -> bool {
@@ -171,6 +224,13 @@ pub fn is_configured() -> bool {
     Config::load().is_ok_and(|c| !c.client_id.is_empty() && !c.client_secret.is_empty())
 }
 
+/// How to start the background service, for messages.
+pub const START_HINT: &str = if cfg!(windows) {
+    "clouddrop service start"
+} else {
+    "systemctl --user start clouddrop"
+};
+
 pub fn is_signed_in() -> bool {
     crate::auth::token_path().exists()
 }
@@ -179,6 +239,179 @@ pub fn sign_out() -> Result<()> {
     match std::fs::remove_file(crate::auth::token_path()) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
+    }
+}
+
+// ---------- background service (systemd on Linux, login item on Windows) ----------
+
+/// Whether the daemon is running right now (judged by its live status file).
+pub fn daemon_running() -> bool {
+    read_status(&config::data_dir()).is_some_and(|s| s.is_live())
+}
+
+#[cfg(windows)]
+mod winsvc {
+    use anyhow::{Context, Result, bail};
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    /// The startup task declared in the Microsoft Store package's manifest.
+    const STARTUP_TASK: &str = "CloudDropAgent";
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+    /// The background agent (GUI subsystem, no console) if installed, else this CLI.
+    fn agent() -> Result<(PathBuf, Vec<&'static str>)> {
+        let me = std::env::current_exe()?;
+        let agent = me.with_file_name("clouddrop-agent.exe");
+        Ok(if agent.exists() { (agent, vec![]) } else { (me, vec!["run"]) })
+    }
+
+    fn reg(args: &[&str]) -> Result<bool> {
+        use std::os::windows::process::CommandExt;
+        Ok(Command::new("reg")
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .context("cannot run reg.exe")?
+            .status
+            .success())
+    }
+
+    /// Running from the Microsoft Store package, which starts the agent at sign-in
+    /// through its startup task (a Run key written from a package isn't used).
+    pub fn packaged() -> bool {
+        use windows_sys::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+        const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+        let mut len = 0u32;
+        unsafe { GetCurrentPackageFullName(&mut len, std::ptr::null_mut()) == ERROR_INSUFFICIENT_BUFFER }
+    }
+
+    fn startup_task() -> Result<windows::ApplicationModel::StartupTask> {
+        let id = windows::core::HSTRING::from(STARTUP_TASK);
+        Ok(windows::ApplicationModel::StartupTask::GetAsync(&id)?.join()?)
+    }
+
+    pub fn enabled() -> bool {
+        use windows::ApplicationModel::StartupTaskState as S;
+        if packaged() {
+            return startup_task()
+                .ok()
+                .and_then(|t| t.State().ok())
+                .is_some_and(|s| s == S::Enabled || s == S::EnabledByPolicy);
+        }
+        reg(&["query", RUN_KEY, "/v", "CloudDrop"]).unwrap_or(false)
+    }
+
+    pub fn enable() -> Result<()> {
+        use windows::ApplicationModel::StartupTaskState as S;
+        if packaged() {
+            return match startup_task()?.RequestEnableAsync()?.join()? {
+                S::Enabled | S::EnabledByPolicy => Ok(()),
+                S::DisabledByUser => {
+                    bail!("starting at sign-in is turned off in Settings › Apps › Startup; turn CloudDrop on there")
+                }
+                S::DisabledByPolicy => bail!("your organization doesn't allow CloudDrop to start at sign-in"),
+                _ => bail!("Windows didn't let CloudDrop start at sign-in"),
+            };
+        }
+        let (exe, args) = agent()?;
+        let mut cmd = format!("\"{}\"", exe.display());
+        for a in args {
+            cmd.push(' ');
+            cmd.push_str(a);
+        }
+        if !reg(&["add", RUN_KEY, "/v", "CloudDrop", "/t", "REG_SZ", "/d", &cmd, "/f"])? {
+            bail!("could not register CloudDrop to start at sign-in");
+        }
+        Ok(())
+    }
+
+    pub fn disable() -> Result<()> {
+        if packaged() {
+            startup_task()?.Disable()?;
+            return Ok(());
+        }
+        reg(&["delete", RUN_KEY, "/v", "CloudDrop", "/f"])?;
+        Ok(())
+    }
+
+    pub fn start() -> Result<()> {
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        let (exe, args) = agent()?;
+        // No inherited pipes: a caller reading this command's output (the app) would
+        // otherwise wait for the long-running agent to close them.
+        Command::new(exe)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+            .spawn()
+            .context("cannot start CloudDrop")?;
+        Ok(())
+    }
+}
+
+/// Stops the daemon: via systemd on Linux, by request through the database elsewhere.
+pub fn stop_service() -> Result<()> {
+    #[cfg(unix)]
+    if service_installed() {
+        systemctl(&["stop", SERVICE])?;
+        return Ok(());
+    }
+    request_stop(&Db::open_default()?)
+}
+
+/// Starts the daemon at sign-in from now on.
+pub fn enable_at_login() -> Result<()> {
+    #[cfg(windows)]
+    return winsvc::enable();
+    #[cfg(unix)]
+    {
+        if !service_installed() {
+            bail!("the clouddrop service is not installed");
+        }
+        systemctl(&["daemon-reload"])?;
+        if !systemctl(&["enable", SERVICE])? {
+            bail!("could not enable the clouddrop service");
+        }
+        Ok(())
+    }
+}
+
+pub fn disable_at_login() -> Result<()> {
+    #[cfg(windows)]
+    return winsvc::disable();
+    #[cfg(unix)]
+    {
+        systemctl(&["disable", SERVICE])?;
+        Ok(())
+    }
+}
+
+pub fn enabled_at_login() -> bool {
+    #[cfg(windows)]
+    return winsvc::enabled();
+    #[cfg(unix)]
+    service_enabled()
+}
+
+/// Starts the daemon now if it isn't running.
+pub fn start_service() -> Result<()> {
+    if daemon_running() {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    return winsvc::start();
+    #[cfg(unix)]
+    {
+        if !systemctl(&["start", SERVICE])? {
+            bail!("could not start the clouddrop service — see `journalctl --user -u clouddrop`");
+        }
+        Ok(())
     }
 }
 
@@ -223,6 +456,26 @@ pub fn enable_service() -> Result<()> {
     }
     if !systemctl(&["restart", SERVICE])? {
         bail!("could not start the clouddrop service — see `journalctl --user -u clouddrop`");
+    }
+    Ok(())
+}
+
+/// Restarts the service if it is running, for changes it can't apply live.
+pub fn restart_if_running() -> Result<()> {
+    #[cfg(unix)]
+    if service_active() {
+        restart_service()?;
+    }
+    #[cfg(windows)]
+    if daemon_running() {
+        stop_service()?;
+        for _ in 0..40 {
+            if !daemon_running() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        start_service()?;
     }
     Ok(())
 }
@@ -291,9 +544,21 @@ pub fn restart_files() -> Result<()> {
     Ok(())
 }
 
+/// Opens a link or file in its default app (the browser for web links).
 pub fn open_uri(uri: &str) {
-    let _ = Command::new("xdg-open")
-        .arg(uri)
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("rundll32.exe");
+        c.args(["url.dll,FileProtocolHandler", uri]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new("xdg-open");
+        c.arg(uri);
+        c
+    };
+    let _ = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

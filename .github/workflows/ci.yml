@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    # The desktop app needs GTK 4.12+ and libadwaita 1.6+ (Ubuntu 24.10 or newer).
+    container: ubuntu:26.04
+    steps:
+      - name: System packages
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libgtk-4-dev libadwaita-1-dev dbus python3 python3-gi python3-nautilus
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Core, end-to-end and desktop app tests
+        run: cargo test -p clouddrop -p clouddrop-gui
+      - name: Top-bar icon tests (private session bus)
+        run: dbus-run-session -- cargo test -p clouddrop-tray
+      - name: Files extension tests
+        run: python3 -m unittest discover -s nautilus/tests
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (core and agent)
+        run: cargo clippy -p clouddrop -p clouddrop-agent --all-targets -- -D warnings
+      - name: Core and end-to-end tests
+        run: cargo test -p clouddrop
+      - name: File Explorer cloud-folder test (real Cloud Files API)
+        run: cargo test -p clouddrop-agent -- --nocapture
+      - name: Build the agent
+        run: cargo build --release -p clouddrop -p clouddrop-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clouddrop-windows-x64
+          path: |
+            target/release/clouddrop.exe
+            target/release/clouddrop-agent.exe
+
+  app:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: winapp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.6
+          channel: stable
+      - run: flutter pub get
+      - run: flutter analyze
+      - name: App tests (logic, widgets, screenshots)
+        run: flutter test
+
+  windows-package:
+    needs: [windows, app]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.6
+          channel: stable
+      - name: Build the app
+        working-directory: winapp
+        run: flutter build windows --release
+      - uses: actions/download-artifact@v4
+        with:
+          name: clouddrop-windows-x64
+          path: engine
+      - name: Assemble the test package
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $out = "dist/CloudDrop-$version-windows-x64"
+          New-Item -ItemType Directory -Force "$out/CloudDrop" | Out-Null
+          Copy-Item -Recurse winapp/build/windows/x64/runner/Release/* "$out/CloudDrop"
+          Copy-Item engine/clouddrop.exe, engine/clouddrop-agent.exe "$out/CloudDrop"
+          Copy-Item packaging/windows/install.cmd, packaging/windows/install.ps1, packaging/windows/uninstall.ps1, packaging/windows/README.txt $out
+          Set-Content "$out/VERSION" $version -NoNewline
+          "VERSION=$version" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloudDrop-${{ env.VERSION }}-windows-x64
+          path: dist/
+      - name: Microsoft Store package, installed and checked inside the package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pub = 'CN=CloudDrop CI'
+          $msix = "$env:RUNNER_TEMP\clouddrop-ci.msix"
+          & .\packaging\windows\msix\build-msix.ps1 -Name 'CloudDrop.CI' -Publisher $pub -Dist "dist\CloudDrop-$env:VERSION-windows-x64\CloudDrop" -Out $msix
+          # A throwaway certificate, trusted on this CI machine only, to install it.
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $pub -CertStoreLocation Cert:\CurrentUser\My -TextExtension @('2.5.29.19={text}')
+          $pw = ConvertTo-SecureString -String 'ci' -Force -AsPlainText
+          $pfx = "$env:RUNNER_TEMP\ci.pfx"
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $pw | Out-Null
+          Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\LocalMachine\TrustedPeople -Password $pw | Out-Null
+          $signtool = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64\signtool.exe' | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $signtool sign /fd SHA256 /f $pfx /p ci $msix
+          if ($LASTEXITCODE) { throw 'signing failed' }
+          Add-AppxPackage $msix
+          $pkg = Get-AppxPackage CloudDrop.CI
+          "installed $($pkg.PackageFullName)"
+
+          # The command-line alias runs with the package's identity.
+          $cli = "$env:LOCALAPPDATA\Microsoft\WindowsApps\clouddrop.exe"
+          $status = & $cli status --json | ConvertFrom-Json
+          if ($status.configured -ne $false) { throw "unexpected status: $status" }
+          & $cli service status --json
+          & $cli service disable
+          $svc = & $cli service status --json | ConvertFrom-Json
+          if ($svc.at_login) { throw 'the startup task is still enabled after disable' }
+          & $cli service enable
+          $svc = & $cli service status --json | ConvertFrom-Json
+          "after enable: $svc"
+          if (-not $svc.at_login) { throw 'service enable did not turn on the startup task' }
+
+          # File Explorer cloud folder from inside the package.
+          $root = "$env:RUNNER_TEMP\selftest"
+          Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId CloudDrop -Command "$($pkg.InstallLocation)\clouddrop-agent.exe" -Args "--selftest $root"
+          for ($i = 0; $i -lt 90 -and -not (Test-Path "$root.result"); $i++) { Start-Sleep 1 }
+          $result = Get-Content "$root.result" -ErrorAction SilentlyContinue
+          "self-test: $result"
+          Get-Process clouddrop* -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-AppxPackage $pkg.PackageFullName
+          if ($result -ne 'ok') { throw "cloud folder self-test inside the package: $result" }

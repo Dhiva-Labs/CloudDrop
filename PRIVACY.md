@@ -1,8 +1,8 @@
 # CloudDrop privacy policy
 
-*Last updated 14 October 2026*
+*Last updated 15 October 2026*
 
-CloudDrop is a Linux desktop application by Dhiva Labs that uploads the files you
+CloudDrop is a desktop application for Linux and Windows by Dhiva Labs that uploads the files you
 put in a folder on your computer to your own Google Drive. This policy explains how
 it uses Google user data. The general Dhiva Labs policy is at
 <https://dhivalabs.com/privacy.html>.
@@ -30,9 +30,9 @@ Google user data.
 
 ## What is stored on your computer
 
-Your Google sign-in token, in a file readable only by your user account, and a local
-database recording what has been uploaded and an activity history. Both stay on your
-computer.
+Your Google sign-in token, in a file in your user account's private app-data folder,
+and a local database recording what has been uploaded and an activity history. Both
+stay on your computer.
 
 ## No sharing or other use
 

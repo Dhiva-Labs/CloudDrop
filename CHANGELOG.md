@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.0 — 2026-10-15
+
+CloudDrop for Windows.
+
+- Windows 10 (version 1809 or later) and Windows 11. The CloudDrop folder is a File
+  Explorer cloud folder, in the navigation pane with Explorer's own status icons:
+  uploaded files get the green check; **Free up space** keeps a file listed with a
+  cloud icon and downloads it again when you open it; **Always keep on this device**
+  downloads cloud-only files back and protects them from automatic space saving.
+  The same Drive checksum check applies before any local data is removed.
+- Windows app in Fluent design: setup assistant, Home, Files, Activity and Settings,
+  plus a notification-area icon with pause/resume. CloudDrop starts at sign-in.
+- Free in the Microsoft Store, signed and with the CloudDrop Google client built in.
+  The zip on GitHub is unsigned and needs your own Google client, like source builds.
+- Command line: `clouddrop logout`; `status --json` also works before setup and
+  reports `configured`, `config_error`, `paused` and `root_id`;
+  `service status --json`; `reset-cloud` restarts the service itself.
+
 ## 0.1.0 — 2026-10-14
 
 First release.

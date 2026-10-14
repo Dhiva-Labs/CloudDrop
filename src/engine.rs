@@ -12,6 +12,7 @@ use crate::db::{ActivityKind, Db, Entry, Kind, State};
 use crate::drive::{Drive, DriveError};
 use crate::jobs::{self, FreeSkip, JobEvent, JobOutcome, JobSpec};
 use crate::notifier::Notifier;
+use crate::store::LocalStore;
 use crate::util::{self, LocalMeta, now_ms};
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -28,6 +29,8 @@ const AUTH_RECHECK: Duration = Duration::from_secs(600);
 const MAX_CONTENT_RETRIES: i64 = 5;
 const QUOTA_EVERY: Duration = Duration::from_secs(600);
 const AUTO_FREE_EVERY: Duration = Duration::from_secs(30);
+/// How long a pinned placeholder's download may take before it's tried again.
+const HYDRATE_RETRY: Duration = Duration::from_secs(120);
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
 struct Inflight {
@@ -79,9 +82,20 @@ pub struct Engine {
     quota: Option<control::Quota>,
     last_quota: Option<Instant>,
     last_auto_free: Option<Instant>,
+    /// Placeholders being downloaded because they were pinned ("Always keep on
+    /// this device"), with when the download started.
+    hydrating: HashMap<String, Instant>,
+    store: Arc<dyn LocalStore>,
+    config_file: Option<PathBuf>,
+    config_mtime: Option<SystemTime>,
+    last_config_check: Instant,
+    /// `clouddrop service stop` asked us to exit.
+    stop_now: bool,
     batch: Batch,
     idle_since: Option<Instant>,
     needs_rescan: bool,
+    /// Windows: the "from" half of a rename, waiting for its "to" event.
+    rename_from: Option<String>,
     last_rescan: Instant,
     last_error_note: Option<Instant>,
     warned: HashSet<String>,
@@ -122,18 +136,49 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// Optional parts of a daemon run.
+pub struct RunOptions {
+    /// Apply edits to this config file while running (no restart needed except for
+    /// the folder, Drive folder name, Google client or endpoints).
+    pub config_file: Option<PathBuf>,
+    /// How local copies are represented (plain files, or Windows placeholders).
+    pub store: Arc<dyn LocalStore>,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            config_file: None,
+            store: crate::store::platform(),
+        }
+    }
+}
+
 /// Runs the daemon until `shutdown` flips to true. `data_dir` holds token.json and status.json.
 pub async fn run(
     cfg: Config,
     db: Arc<Db>,
     drive: Arc<Drive>,
     data_dir: PathBuf,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    run_with_options(cfg, RunOptions::default(), db, drive, data_dir, shutdown).await
+}
+
+pub async fn run_with_options(
+    cfg: Config,
+    opts: RunOptions,
+    db: Arc<Db>,
+    drive: Arc<Drive>,
+    data_dir: PathBuf,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
+    let RunOptions { config_file, store } = opts;
     let root = cfg.sync_dir.clone();
     std::fs::create_dir_all(&root)
         .with_context(|| format!("cannot create {}", root.display()))?;
     db.bind_root(&root)?;
+    let _ = control::clear_stop(&db); // a stale request must not stop this run
     let reset = db.reset_uploading()?;
     if reset > 0 {
         tracing::info!("resuming {reset} interrupted uploads");
@@ -162,9 +207,16 @@ pub async fn run(
         quota: None,
         last_quota: None,
         last_auto_free: None,
+        hydrating: HashMap::new(),
+        store,
+        config_mtime: config_file.as_deref().and_then(mtime),
+        config_file,
+        last_config_check: Instant::now(),
+        stop_now: false,
         batch: Batch::default(),
         idle_since: None,
         needs_rescan: false,
+        rename_from: None,
         last_rescan: Instant::now(),
         last_error_note: None,
         warned: HashSet::new(),
@@ -199,6 +251,11 @@ pub async fn run(
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if eng.stop_now {
+            tracing::info!("stopping on request");
+            let _ = control::clear_stop(&eng.db);
+            break;
+        }
         tokio::select! {
             _ = shutdown.changed() => break,
             Some(ev) = fs_rx.recv() => eng.on_fs(ev),
@@ -284,14 +341,14 @@ impl Engine {
     // ---------- paths ----------
 
     fn rel(&mut self, abs: &Path) -> Option<String> {
-        let rel = abs.strip_prefix(&self.root).ok()?;
-        match rel.to_str() {
-            Some(s) => Some(s.trim_end_matches('/').to_string()),
-            None => {
-                self.warn_once(&format!("skipping {}: name is not valid UTF-8", abs.display()));
-                None
-            }
+        if abs.strip_prefix(&self.root).is_err() {
+            return None;
         }
+        let rel = util::rel_path(&self.root, abs);
+        if rel.is_none() {
+            self.warn_once(&format!("skipping {}: name is not valid UTF-8", abs.display()));
+        }
+        rel
     }
 
     fn ignored(&self, rel: &str) -> bool {
@@ -387,7 +444,23 @@ impl Engine {
         if ev.need_rescan() {
             self.needs_rescan = true;
         }
+        let rename_from = self.rename_from.take();
         match ev.kind {
+            // Windows reports a rename as a "from" event immediately followed by a
+            // "to" event; Linux sends one event with both paths.
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)) if cfg!(windows) => {
+                if let Some(rel) = ev.paths.first().and_then(|p| self.rel(p)) {
+                    self.mark_dirty(rel.clone());
+                    self.rename_from = Some(rel).filter(|r| !r.is_empty());
+                }
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)) if cfg!(windows) => {
+                let to = ev.paths.first().and_then(|p| self.rel(p)).filter(|r| !r.is_empty());
+                if let Some(t) = &to {
+                    self.mark_dirty(t.clone());
+                }
+                self.on_rename(rename_from, to);
+            }
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if ev.paths.len() == 2 => {
                 let from = self.rel(&ev.paths[0]).filter(|r| !r.is_empty());
                 let to = self.rel(&ev.paths[1]).filter(|r| !r.is_empty());
@@ -544,7 +617,7 @@ impl Engine {
             return;
         }
         self.ensure_ancestors(rel);
-        let meta = LocalMeta::of(&md);
+        let meta = LocalMeta::at(&self.abs(rel), &md);
         if md.is_dir() {
             self.process_dir(rel, meta);
             self.scan_dir(rel);
@@ -586,7 +659,7 @@ impl Engine {
                 .get(&dir)
                 .is_some_and(|e| e.kind == Kind::Dir && e.state != State::CloudOnly);
             if !active && let Ok(md) = std::fs::symlink_metadata(self.abs(&dir)) {
-                self.process_dir(&dir, LocalMeta::of(&md));
+                self.process_dir(&dir, LocalMeta::at(&self.abs(&dir), &md));
             }
         }
     }
@@ -608,8 +681,8 @@ impl Engine {
                     }
                 }
                 // Gone from its old path (and not a hard link still there).
-                && std::fs::symlink_metadata(self.abs(&e.path))
-                    .map(|m| LocalMeta::of(&m).inode != meta.inode)
+                && LocalMeta::read(&self.abs(&e.path))
+                    .map(|m| m.inode != meta.inode)
                     .unwrap_or(true)
         }) else {
             return false;
@@ -657,6 +730,10 @@ impl Engine {
     }
 
     fn process_file(&mut self, rel: &str, meta: LocalMeta) {
+        if self.store.is_dehydrated(&self.abs(rel)) {
+            return self.process_placeholder(rel, meta);
+        }
+        self.hydrating.remove(rel);
         match self.get(rel) {
             None => {
                 if !self.adopt_moved(rel, Kind::File, meta) {
@@ -668,8 +745,9 @@ impl Engine {
                 self.put(&Entry::new(rel, Kind::File, Some(meta)));
             }
             Some(mut e) if e.state == State::CloudOnly => {
-                // A file reappeared where a cloud-only one was. Same content → nothing to
-                // upload; different → new revision, keeping the old one forever.
+                // A file reappeared where a cloud-only one was (downloaded back, or a new
+                // file). Same content → nothing to upload; different → new revision,
+                // keeping the old one forever.
                 e.requeue();
                 e.pin_prev = e.drive_id.is_some();
                 e.move_pending = false;
@@ -681,9 +759,56 @@ impl Engine {
                     e.requeue();
                     e.set_local(Some(meta));
                     self.put(&e);
+                    self.store.pending(&self.abs(rel));
+                } else if e.state == State::Synced && self.store.free_requested(&self.abs(rel)) {
+                    // "Free up space" in the file manager: same Drive check as always.
+                    self.dispatch(e, String::new(), String::new(), false, true);
                 }
             }
         }
+    }
+
+    /// A placeholder without local data (Windows): never read it. If it was a
+    /// local file before, the file manager freed it.
+    fn process_placeholder(&mut self, rel: &str, meta: LocalMeta) {
+        let Some(mut e) = self.get(rel) else {
+            return; // not ours
+        };
+        if e.kind != Kind::File {
+            return;
+        }
+        if e.state != State::CloudOnly && e.in_cloud() {
+            e.state = State::CloudOnly;
+            e.upload_url = None;
+            e.upload_md5 = None;
+            e.error = None;
+            e.retry_at = None;
+            self.activity(ActivityKind::Freed, rel, e.cloud_size, None);
+        }
+        e.set_local(Some(meta));
+        self.put(&e);
+
+        // "Always keep on this device": download it now.
+        if self.store.is_pinned(&self.abs(rel)) {
+            self.start_hydrate(rel, false);
+        }
+    }
+
+    /// Downloads a placeholder's data in the background. It comes back through
+    /// process_file as a known file, so nothing is uploaded.
+    fn start_hydrate(&mut self, rel: &str, asked: bool) {
+        let abs = self.abs(rel);
+        let recent = self.hydrating.get(rel).is_some_and(|t| t.elapsed() < HYDRATE_RETRY);
+        if !self.store.is_dehydrated(&abs) || (recent && !asked) {
+            return;
+        }
+        self.hydrating.insert(rel.to_string(), Instant::now());
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(err) = store.hydrate(&abs) {
+                tracing::warn!("cannot download {}: {err}", abs.display());
+            }
+        });
     }
 
     /// The local item at `rel` is gone. Drive is never touched: whatever it holds
@@ -745,7 +870,65 @@ impl Engine {
 
     // ---------- scheduling ----------
 
+    /// Applies settings edited in the config file while running.
+    fn reload_config(&mut self) {
+        let Some(path) = self.config_file.clone() else {
+            return;
+        };
+        if self.last_config_check.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_config_check = Instant::now();
+        let m = mtime(&path);
+        if m == self.config_mtime {
+            return;
+        }
+        self.config_mtime = m;
+        let new = match Config::load_from(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("ignoring config change: {e:#}");
+                return;
+            }
+        };
+        if new.sync_dir != self.cfg.sync_dir
+            || new.drive_folder != self.cfg.drive_folder
+            || new.client_id != self.cfg.client_id
+            || new.endpoints != self.cfg.endpoints
+        {
+            tracing::warn!("folder, Drive folder or Google client changed; restart CloudDrop to apply");
+        }
+        if new.ignore != self.cfg.ignore {
+            match build_ignore(&new.ignore) {
+                Ok(set) => {
+                    self.ignore = set;
+                    self.needs_rescan = true;
+                }
+                Err(e) => tracing::warn!("ignore patterns not applied: {e:#}"),
+            }
+        }
+        self.notifier = Notifier::new(new.notifications);
+        if new.auto_free_days != self.cfg.auto_free_days || new.keep_local != self.cfg.keep_local {
+            self.last_auto_free = None;
+        }
+        self.cfg.parallel_uploads = new.parallel_uploads;
+        self.cfg.settle_secs = new.settle_secs;
+        self.cfg.rescan_secs = new.rescan_secs;
+        self.cfg.notifications = new.notifications;
+        self.cfg.ignore = new.ignore;
+        self.cfg.auto_free_days = new.auto_free_days;
+        self.cfg.keep_local = new.keep_local;
+        tracing::info!("settings updated");
+    }
+
     fn on_tick(&mut self) {
+        self.reload_config();
+        if control::stop_requested(&self.db) {
+            self.stop_now = true;
+        }
+        for rel in control::take_hydrate_requests(&self.db) {
+            self.start_hydrate(&rel, true);
+        }
         if self.needs_rescan
             || self.last_rescan.elapsed() >= Duration::from_secs(self.cfg.rescan_secs)
         {
@@ -807,6 +990,7 @@ impl Engine {
             if self.cfg.keeps_local(&e.path)
                 || self.inflight.contains_key(&e.path)
                 || self.dirty.contains_key(&e.path)
+                || self.store.is_pinned(&self.abs(&e.path))
             {
                 continue;
             }
@@ -956,6 +1140,11 @@ impl Engine {
                     e.state = State::Synced;
                 }
                 self.put(&e);
+                if e.state == State::Synced
+                    && let Some(id) = &e.drive_id
+                {
+                    self.store.synced(&self.abs(&e.path), id, true);
+                }
                 continue;
             }
             if placement_only && e.drive_id.is_none() {
@@ -1058,6 +1247,7 @@ impl Engine {
             JobOutcome::Done(d) => {
                 let content_changed = e.kind == Kind::File && e.md5 != d.md5;
                 let had_cloud_copy = e.md5.is_some();
+                let came_back_from_cloud = e.pin_prev;
                 e.drive_id = Some(d.drive_id);
                 e.cloud_name = Some(d.cloud_name);
                 e.cloud_parent = Some(d.cloud_parent);
@@ -1078,6 +1268,10 @@ impl Engine {
                 self.last_transient = None;
                 if content_changed {
                     e.uploaded_at = Some(now_ms());
+                } else if came_back_from_cloud {
+                    // Came back from cloud-only unchanged (downloaded back): keep it here
+                    // until it changes, like a restore.
+                    e.uploaded_at = None;
                 }
                 if d.uploaded_bytes > 0 {
                     self.batch.files += 1;
@@ -1118,6 +1312,11 @@ impl Engine {
                     State::Pending
                 };
                 self.put(&e);
+                if e.state == State::Synced
+                    && let Some(id) = &e.drive_id
+                {
+                    self.store.synced(&self.abs(path), id, e.kind == Kind::Dir);
+                }
                 if !local_same {
                     self.mark_dirty(path.to_string());
                 }
@@ -1185,7 +1384,9 @@ impl Engine {
                     self.mark_dirty(path);
                     return;
                 }
-                if let Err(err) = std::fs::remove_file(&abs) {
+                let id = e.drive_id.clone().unwrap_or_default();
+                let asked = self.store.free_requested(&abs);
+                if let Err(err) = self.store.free(&abs, &id) {
                     tracing::warn!("cannot free {path}: {err}");
                     return;
                 }
@@ -1194,7 +1395,8 @@ impl Engine {
                 self.batch.freed_files += 1;
                 self.batch.freed_bytes += checked.size as u64;
                 tracing::info!("freed {path} ({})", util::human_bytes(checked.size as u64));
-                self.activity(ActivityKind::AutoFreed, &path, Some(checked.size), None);
+                let kind = if asked { ActivityKind::Freed } else { ActivityKind::AutoFreed };
+                self.activity(kind, &path, Some(checked.size), None);
             }
             JobOutcome::FreeSkip(skip @ (FreeSkip::CloudDiffers | FreeSkip::CloudGone)) => {
                 tracing::warn!("{path}: Drive copy is not identical ({skip:?}); uploading the local copy again");

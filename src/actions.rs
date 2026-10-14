@@ -37,15 +37,14 @@ impl Ctx {
             std::env::current_dir()?.join(arg)
         };
         let full = normalize(&full);
-        let rel = full.strip_prefix(self.root()).map_err(|_| {
-            anyhow!(
+        if full.strip_prefix(self.root()).is_err() {
+            bail!(
                 "{} is not inside the CloudDrop folder ({})",
                 full.display(),
                 self.root().display()
-            )
-        })?;
-        rel.to_str()
-            .map(|s| s.trim_end_matches('/').to_string())
+            );
+        }
+        util::rel_path(self.root(), &full)
             .ok_or_else(|| anyhow!("{} is not valid UTF-8", full.display()))
     }
 }
@@ -103,6 +102,9 @@ fn tracked_subtree(ctx: &Ctx, rel: &str) -> Result<Vec<Entry>> {
 pub struct FreeReport {
     pub freed_files: u64,
     pub freed_bytes: u64,
+    /// Handed to the running service (Windows: only it may free files).
+    pub handed_files: u64,
+    pub handed_bytes: u64,
     pub not_uploaded: u64,
     pub changed: u64,
     pub cloud_mismatch: u64,
@@ -110,7 +112,14 @@ pub struct FreeReport {
 
 impl FreeReport {
     pub fn summary(&self) -> String {
-        let mut s = if self.freed_files == 0 {
+        let mut s = if self.handed_files > 0 {
+            format!(
+                "Freeing {} ({} file{}) — CloudDrop does it in a moment. The files stay in Google Drive.",
+                util::human_bytes(self.freed_bytes + self.handed_bytes),
+                self.freed_files + self.handed_files,
+                if self.freed_files + self.handed_files == 1 { "" } else { "s" }
+            )
+        } else if self.freed_files == 0 {
             "Nothing to free.".to_string()
         } else {
             format!(
@@ -187,7 +196,14 @@ pub async fn free(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<FreeRepor
             report.changed += 1;
             continue;
         }
-        std::fs::remove_file(&abs).with_context(|| format!("cannot delete {}", abs.display()))?;
+        let freed_now = crate::store::platform()
+            .request_free(&abs, &id)
+            .with_context(|| format!("cannot free {}", abs.display()))?;
+        if !freed_now {
+            report.handed_files += 1;
+            report.handed_bytes += meta.size as u64;
+            continue;
+        }
         e.state = State::CloudOnly;
         ctx.db.put(&e)?;
         let _ = ctx.db.log_activity(ActivityKind::Freed, &e.path, Some(meta.size), None);
@@ -202,6 +218,8 @@ pub struct RestoreReport {
     pub files: u64,
     pub bytes: u64,
     pub blocked: Vec<String>,
+    /// Still downloading (through the service) when the command stopped waiting.
+    pub downloading: u64,
 }
 
 impl RestoreReport {
@@ -221,6 +239,9 @@ impl RestoreReport {
                 " Skipped {} because another file is already there.",
                 self.blocked.join(", ")
             ));
+        }
+        if self.downloading > 0 {
+            s.push_str(&format!(" {} still downloading in the background.", self.downloading));
         }
         s
     }
@@ -244,6 +265,9 @@ fn reactivate_ancestors(ctx: &Ctx, rel: &str) -> Result<()> {
 /// Downloads cloud-only files (and recreates cloud-only folders) under each path.
 pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<RestoreReport> {
     let mut report = RestoreReport::default();
+    let store = crate::store::platform();
+    // Placeholders (Windows) the service is downloading: (path, entry path, size).
+    let mut waiting: Vec<(PathBuf, String, i64)> = Vec::new();
     for rel in rels {
         for mut e in tracked_subtree(ctx, rel)? {
             if e.state != State::CloudOnly {
@@ -257,7 +281,18 @@ pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<Restor
                     ctx.db.put(&e)?;
                 }
                 Kind::File => {
-                    if std::fs::symlink_metadata(ctx.abs(&e.path)).is_ok() {
+                    let abs = ctx.abs(&e.path);
+                    if store.is_dehydrated(&abs) {
+                        // Windows: the agent downloads it, so it stays a cloud file
+                        // in Explorer.
+                        if !crate::control::daemon_running() {
+                            bail!("CloudDrop isn't running: start it to download {}", e.path);
+                        }
+                        crate::control::request_hydrate(&ctx.db, &e.path)?;
+                        waiting.push((abs, e.path.clone(), e.cloud_size.unwrap_or(0)));
+                        continue;
+                    }
+                    if std::fs::symlink_metadata(&abs).is_ok() {
                         report.blocked.push(e.path.clone());
                         continue;
                     }
@@ -267,6 +302,27 @@ pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<Restor
                 }
             }
         }
+    }
+    if !waiting.is_empty() {
+        // Wait for the downloads, allowing at least 1 MB/s.
+        let total: i64 = waiting.iter().map(|w| w.2).sum();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60 + total as u64 / 1_000_000);
+        loop {
+            waiting.retain(|(abs, rel, size)| {
+                if store.is_dehydrated(abs) {
+                    return true;
+                }
+                let _ = ctx.db.log_activity(ActivityKind::Restored, rel, Some(*size), None);
+                report.files += 1;
+                report.bytes += *size as u64;
+                false
+            });
+            if waiting.is_empty() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        report.downloading = waiting.len() as u64;
     }
     Ok(report)
 }
@@ -322,6 +378,9 @@ async fn restore_file(ctx: &Ctx, drive: &Drive, mut e: Entry) -> Result<u64> {
             return Err(anyhow!("cannot move download into place: {err}"));
         }
         let _ = ctx.db.log_activity(ActivityKind::Restored, &e.path, Some(n as i64), None);
+        if e.state == State::Synced {
+            crate::store::platform().synced(&dest, &id, false);
+        }
         Ok(n)
     }
     .await;

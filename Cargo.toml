@@ -1,6 +1,6 @@
 [package]
 name = "clouddrop"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Upload-only Google Drive folder for Linux: daemon and CLI"
 license = "MIT"
@@ -33,9 +33,15 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Storage_CloudFilters", "Win32_Storage_Packaging_Appx", "Win32_System_IO", "Win32_System_Threading"] }
+cloud-filter = "0.0.6"
+# The Microsoft Store package's startup task (start at sign-in).
+windows = { version = "0.62", features = ["ApplicationModel"] }
+
 [dev-dependencies]
 axum = "0.8.9"
 tempfile = "3.27.0"
 
 [workspace]
-members = ["tray", "gui"]
+members = ["tray", "gui", "win"]
