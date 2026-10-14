@@ -78,6 +78,8 @@ parts:
     rust-path:
       - .
       - gui
+    build-snaps:
+      - rustup
     build-packages:
       - pkg-config
     override-build: |
