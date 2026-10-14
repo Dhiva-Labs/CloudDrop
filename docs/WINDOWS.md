@@ -67,6 +67,12 @@ Commands print a human sentence on success (exit 0) or an error on stderr (exit 
 
 ## Distribution
 
-- **Microsoft Store** (MSIX, signed by the Store): built with the CloudDrop Google
-  client compiled in; the agent starts at sign-in through the package's startup task.
-- **GitHub**: source only, no client — source builds create their own (see README).
+- **Microsoft Store** (paid, $10 one-time; MSIX signed by the Store): built with the
+  CloudDrop Google client compiled in (`packaging/windows/build.ps1` with
+  `packaging/oauth-client.env`, then `packaging/windows/msix/build-msix.ps1`). The agent
+  starts at sign-in through the package's startup task (`CloudDropAgent`), which
+  `clouddrop service enable|disable` switches; `clouddrop` works in terminals through
+  an app execution alias. CI installs a test-signed copy and runs the cloud-folder
+  self-test (`clouddrop-agent --selftest DIR`) inside the package.
+- **GitHub** (free): source, plus the CI-built zip (`install.cmd`; unsigned, no Google
+  client — like source builds, the setup assistant asks for your own).
