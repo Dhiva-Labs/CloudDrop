@@ -339,9 +339,15 @@ mod winsvc {
 
     pub fn start() -> Result<()> {
         use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
         let (exe, args) = agent()?;
+        // No inherited pipes: a caller reading this command's output (the app) would
+        // otherwise wait for the long-running agent to close them.
         Command::new(exe)
             .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
             .spawn()
             .context("cannot start CloudDrop")?;
