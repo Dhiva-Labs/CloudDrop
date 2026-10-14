@@ -241,13 +241,14 @@ class TestApp {
     FakeEngine? engine,
     String? syncDir,
     bool windows = false,
+    String windowsUser = 'Dhiva',
     DaemonStatus? daemon,
     EngineStatus? status,
     AppConfig? config,
     int? nowMs,
     this.cloudFiles = false,
     StateReader? reader,
-  }) : syncDir = syncDir ?? (windows ? r'C:\Users\Dhiva\CloudDrop' : '/home/me/CloudDrop'),
+  }) : syncDir = syncDir ?? (windows ? 'C:\\Users\\$windowsUser\\CloudDrop' : '/home/me/CloudDrop'),
        db = db ?? TestDb.memory(),
        engine = engine ?? FakeEngine(),
        statusSource = FakeStatus(daemon),
@@ -276,11 +277,11 @@ class TestApp {
       AppServices(
         paths: windows
             ? AppPaths(
-                configPath: r'C:\Users\Dhiva\AppData\Roaming\clouddrop\config.toml',
-                dataDir: r'C:\Users\Dhiva\AppData\Local\clouddrop',
-                defaultSyncDir: r'C:\Users\Dhiva\CloudDrop',
+                configPath: 'C:\\Users\\$windowsUser\\AppData\\Roaming\\clouddrop\\config.toml',
+                dataDir: 'C:\\Users\\$windowsUser\\AppData\\Local\\clouddrop',
+                defaultSyncDir: 'C:\\Users\\$windowsUser\\CloudDrop',
                 cliBinary: 'clouddrop.exe',
-                homeDir: r'C:\Users\Dhiva',
+                homeDir: 'C:\\Users\\$windowsUser',
                 context: p.windows,
               )
             : AppPaths(

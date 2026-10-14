@@ -169,7 +169,13 @@ class FileTypeIcon extends StatelessWidget {
         return (FluentIcons.pdf, const Color(0xFFD13438));
       case 'zip' || 'rar' || '7z' || 'tar' || 'gz' || 'xz':
         return (FluentIcons.package, const Color(0xFFCA8A04));
-      case 'txt' || 'md' || 'log' || 'csv' || 'json' || 'xml' || 'doc' || 'docx' || 'odt' || 'rtf':
+      case 'doc' || 'docx' || 'odt' || 'rtf':
+        return (FluentIcons.text_document, const Color(0xFF2B579A));
+      case 'xls' || 'xlsx' || 'ods' || 'csv':
+        return (FluentIcons.excel_document, const Color(0xFF217346));
+      case 'ppt' || 'pptx' || 'odp':
+        return (FluentIcons.power_point_document, const Color(0xFFD24726));
+      case 'txt' || 'md' || 'log' || 'json' || 'xml':
         return (FluentIcons.text_document, const Color(0xFF3B82C4));
       default:
         return (FluentIcons.page, const Color(0xFF7A8794));

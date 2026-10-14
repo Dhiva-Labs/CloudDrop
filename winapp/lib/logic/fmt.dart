@@ -134,9 +134,20 @@ List<({String heading, List<T> items})> groupByDay<T>(
   return [for (final g in groups) (heading: g.heading, items: g.items)];
 }
 
-String files(int n) => n == 1 ? '1 file' : '$n files';
+/// 1234567 -> "1,234,567".
+String groupDigits(int n) {
+  final digits = n.abs().toString();
+  final out = StringBuffer(n < 0 ? '-' : '');
+  for (var i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 == 0) out.write(',');
+    out.write(digits[i]);
+  }
+  return out.toString();
+}
 
-String items(int n) => n == 1 ? '1 item' : '$n items';
+String files(int n) => n == 1 ? '1 file' : '${groupDigits(n)} files';
+
+String items(int n) => n == 1 ? '1 item' : '${groupDigits(n)} items';
 
 /// How a file or folder is doing, for the status column.
 enum Status {
@@ -171,12 +182,12 @@ enum Status {
 String folderSummary(FolderStats s) {
   if (s.files == 0) return 'Empty';
   final parts = [files(s.files)];
-  if (s.failed > 0) parts.add('${s.failed} failed');
-  if (s.waiting > 0) parts.add('${s.waiting} waiting');
+  if (s.failed > 0) parts.add('${groupDigits(s.failed)} failed');
+  if (s.waiting > 0) parts.add('${groupDigits(s.waiting)} waiting');
   if (s.cloudOnly == s.files) {
     parts.add('all cloud-only');
   } else if (s.cloudOnly > 0) {
-    parts.add('${s.cloudOnly} cloud-only');
+    parts.add('${groupDigits(s.cloudOnly)} cloud-only');
   }
   return parts.join(' · ');
 }

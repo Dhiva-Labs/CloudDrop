@@ -339,7 +339,7 @@ class FilesController extends ChangeNotifier {
     final st = stats;
     if (st != null && st.files > 0) {
       var s = '${fmt.files(st.files)} · ${fmt.humanBytes(st.bytes < 0 ? 0 : st.bytes)}';
-      if (st.cloudOnly > 0) s += ' · ${st.cloudOnly} only in Google Drive';
+      if (st.cloudOnly > 0) s += ' · ${fmt.groupDigits(st.cloudOnly)} only in Google Drive';
       return s;
     }
     return '';

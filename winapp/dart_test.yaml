@@ -1,3 +1,10 @@
 tags:
   integration:
     description: runs the real clouddrop CLI/daemon against a fake Google Drive (needs cargo build, see test/integration)
+  store:
+    description: renders the Microsoft Store listing screenshots into store/screenshots (see test/store)
+
+# Not excluded here: a config-level exclude_tags would also exclude `--tags store` (the command
+# line selector is ANDed with it). test/store/store_screenshots_test.dart skips itself instead,
+# unless goldens are being updated, so a plain `flutter test` leaves the screenshots alone:
+#   flutter test --tags store --update-goldens test/store

@@ -70,6 +70,10 @@ flutter test --tags integration test/integration
 flutter test --update-goldens test/ui        # regenerate the screenshots in test/goldens/
 ```
 
+`store/screenshots/` holds the Microsoft Store listing screenshots (1920x1080, light, 150% scaling, sample
+data from `test/store/store_data.dart`). They are not part of the normal run (the tests skip
+themselves); regenerate them with `flutter test --tags store --update-goldens test/store`.
+
 `test/ui/*golden*` render every screen, light and dark, 1100x760 and 480 wide, with a bundled
 open font (`test/fonts`: Noto Sans, Liberation Sans for symbols; test only).
 `test/integration` starts the real `clouddrop run` and the fake Drive in a sandbox with an empty

@@ -79,6 +79,12 @@ void main() {
     expect(files(1), '1 file');
     expect(files(2), '2 files');
     expect(items(0), '0 items');
+    expect(files(1284), '1,284 files');
+    expect(items(1000000), '1,000,000 items');
+    expect(
+      folderSummary(const FolderStats(files: 2410, cloudOnly: 1180, waiting: 1200)),
+      '2,410 files · 1,200 waiting · 1,180 cloud-only',
+    );
     expect(items(1), '1 item');
   });
 

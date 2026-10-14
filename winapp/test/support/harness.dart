@@ -68,9 +68,10 @@ const Size wide = Size(1100, 760);
 const Size narrow = Size(480, 820);
 
 extension WindowSize on WidgetTester {
-  void useWindow(Size size) {
+  /// A window of [size] physical pixels at [devicePixelRatio] (the layout sees size / ratio).
+  void useWindow(Size size, {double devicePixelRatio = 1.0}) {
     view.physicalSize = size;
-    view.devicePixelRatio = 1.0;
+    view.devicePixelRatio = devicePixelRatio;
     addTearDown(view.resetPhysicalSize);
     addTearDown(view.resetDevicePixelRatio);
   }
@@ -90,8 +91,9 @@ Future<void> pumpApp(
   Size size = wide,
   Brightness brightness = Brightness.light,
   bool settle = true,
+  double devicePixelRatio = 1.0,
 }) async {
-  tester.useWindow(size);
+  tester.useWindow(size, devicePixelRatio: devicePixelRatio);
   await t.ready();
   await tester.pumpWidget(
     CloudDropApp(
