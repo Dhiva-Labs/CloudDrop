@@ -355,10 +355,34 @@ mod winsvc {
     }
 }
 
+/// Running from the CloudDrop snap. snapd runs the background service (a user
+/// daemon started at login) and systemctl isn't available inside the snap.
+pub fn in_snap() -> bool {
+    cfg!(unix) && std::env::var_os("SNAP_NAME").is_some_and(|n| n == "clouddrop")
+}
+
+/// Starts `clouddrop run` in the background from inside the snap.
+fn snap_spawn_daemon() -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let snap = std::env::var_os("SNAP").ok_or_else(|| anyhow!("SNAP is not set"))?;
+        Command::new(PathBuf::from(snap).join("bin/clouddrop"))
+            .arg("run")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .context("cannot start CloudDrop")?;
+    }
+    Ok(())
+}
+
 /// Stops the daemon: via systemd on Linux, by request through the database elsewhere.
 pub fn stop_service() -> Result<()> {
     #[cfg(unix)]
-    if service_installed() {
+    if service_installed() && !in_snap() {
         systemctl(&["stop", SERVICE])?;
         return Ok(());
     }
@@ -371,6 +395,9 @@ pub fn enable_at_login() -> Result<()> {
     return winsvc::enable();
     #[cfg(unix)]
     {
+        if in_snap() {
+            return Ok(()); // snapd starts it at every login
+        }
         if !service_installed() {
             bail!("the clouddrop service is not installed");
         }
@@ -387,6 +414,12 @@ pub fn disable_at_login() -> Result<()> {
     return winsvc::disable();
     #[cfg(unix)]
     {
+        if in_snap() {
+            bail!(
+                "in the snap, the background service starts at every login; to turn that off run \
+                 `systemctl --user disable snap.clouddrop.daemon`"
+            );
+        }
         systemctl(&["disable", SERVICE])?;
         Ok(())
     }
@@ -408,6 +441,9 @@ pub fn start_service() -> Result<()> {
     return winsvc::start();
     #[cfg(unix)]
     {
+        if in_snap() {
+            return snap_spawn_daemon();
+        }
         if !systemctl(&["start", SERVICE])? {
             bail!("could not start the clouddrop service — see `journalctl --user -u clouddrop`");
         }
@@ -428,6 +464,9 @@ fn systemctl(args: &[&str]) -> Result<bool> {
 }
 
 pub fn service_installed() -> bool {
+    if in_snap() {
+        return true;
+    }
     let user = dirs::config_dir().map(|d| d.join("systemd/user/clouddrop.service"));
     let candidates = [
         user,
@@ -438,15 +477,24 @@ pub fn service_installed() -> bool {
 }
 
 pub fn service_active() -> bool {
+    if in_snap() {
+        return daemon_running();
+    }
     systemctl(&["is-active", "--quiet", SERVICE]).unwrap_or(false)
 }
 
 pub fn service_enabled() -> bool {
+    if in_snap() {
+        return true;
+    }
     systemctl(&["is-enabled", "--quiet", SERVICE]).unwrap_or(false)
 }
 
 /// Enables the daemon at login and (re)starts it so it picks up a new config.
 pub fn enable_service() -> Result<()> {
+    if in_snap() {
+        return restart_service();
+    }
     if !service_installed() {
         bail!("the clouddrop service is not installed — run install.sh");
     }
@@ -481,6 +529,18 @@ pub fn restart_if_running() -> Result<()> {
 }
 
 pub fn restart_service() -> Result<()> {
+    if in_snap() {
+        if daemon_running() {
+            request_stop(&Db::open_default()?)?;
+            for _ in 0..40 {
+                if !daemon_running() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+        return snap_spawn_daemon();
+    }
     if !systemctl(&["restart", SERVICE])? {
         bail!("could not restart the clouddrop service — see `journalctl --user -u clouddrop`");
     }
@@ -490,7 +550,9 @@ pub fn restart_service() -> Result<()> {
 // ---------- desktop integration ----------
 
 fn autostart_file() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join(format!("autostart/{APP_ID}.desktop")))
+    // The snap's tray app declares `autostart: clouddrop-tray.desktop`.
+    let name = if in_snap() { "clouddrop-tray".to_string() } else { APP_ID.to_string() };
+    dirs::config_dir().map(|d| d.join(format!("autostart/{name}.desktop")))
 }
 
 pub fn autostart_enabled() -> bool {

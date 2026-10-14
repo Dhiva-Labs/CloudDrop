@@ -68,7 +68,11 @@ pub fn dialog(parent: &impl IsA<gtk::Widget>, on_done: impl Fn() + 'static) {
         Some("Your browser opened Google's sign-in page. Choose your account and allow CloudDrop, then come back here."),
     );
     let url: Rc<RefCell<Option<String>>> = Rc::default();
-    let spinner = adw::Spinner::builder().width_request(32).height_request(32).build();
+    let spinner = gtk::Spinner::builder()
+        .spinning(true)
+        .width_request(32)
+        .height_request(32)
+        .build();
     let copy = copy_link_button(&url);
     let extra = crate::ui::vbox(12);
     extra.append(&spinner);

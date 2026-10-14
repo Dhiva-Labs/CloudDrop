@@ -182,10 +182,11 @@ fn key_page(
         .title("Add your key")
         .description("Choose the JSON file you downloaded, or paste the two values.")
         .build();
-    let choose = adw::ButtonRow::builder()
+    let choose = adw::ActionRow::builder()
         .title("Choose Downloaded Key File…")
-        .start_icon_name("document-open-symbolic")
+        .activatable(true)
         .build();
+    choose.add_prefix(&gtk::Image::from_icon_name("document-open-symbolic"));
     let id_row = adw::EntryRow::builder().title("Client ID").build();
     let secret_row = adw::PasswordEntryRow::builder().title("Client secret").build();
     let error = gtk::Label::builder()
@@ -393,7 +394,8 @@ fn signin_page(
             &["dim-label", "caption"],
         ));
     }
-    let spinner = adw::Spinner::builder()
+    let spinner = gtk::Spinner::builder()
+        .spinning(true)
         .width_request(32)
         .height_request(32)
         .visible(false)
@@ -502,7 +504,7 @@ fn done_page(
         .title("Starting CloudDrop…")
         .subtitle("It runs in the background and starts when you log in.")
         .build();
-    let service_icon = adw::Spinner::new();
+    let service_icon = gtk::Spinner::builder().spinning(true).build();
     service_row.add_prefix(&service_icon);
     let retry = gtk::Button::builder()
         .label("Try Again")
