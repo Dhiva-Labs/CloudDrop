@@ -256,6 +256,8 @@ mod winsvc {
     use std::process::Command;
 
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    /// The startup task declared in the Microsoft Store package's manifest.
+    const STARTUP_TASK: &str = "CloudDropAgent";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
 
@@ -277,11 +279,43 @@ mod winsvc {
             .success())
     }
 
+    /// Running from the Microsoft Store package, which starts the agent at sign-in
+    /// through its startup task (a Run key written from a package isn't used).
+    pub fn packaged() -> bool {
+        use windows_sys::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+        const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+        let mut len = 0u32;
+        unsafe { GetCurrentPackageFullName(&mut len, std::ptr::null_mut()) == ERROR_INSUFFICIENT_BUFFER }
+    }
+
+    fn startup_task() -> Result<windows::ApplicationModel::StartupTask> {
+        let id = windows::core::HSTRING::from(STARTUP_TASK);
+        Ok(windows::ApplicationModel::StartupTask::GetAsync(&id)?.join()?)
+    }
+
     pub fn enabled() -> bool {
+        use windows::ApplicationModel::StartupTaskState as S;
+        if packaged() {
+            return startup_task()
+                .ok()
+                .and_then(|t| t.State().ok())
+                .is_some_and(|s| s == S::Enabled || s == S::EnabledByPolicy);
+        }
         reg(&["query", RUN_KEY, "/v", "CloudDrop"]).unwrap_or(false)
     }
 
     pub fn enable() -> Result<()> {
+        use windows::ApplicationModel::StartupTaskState as S;
+        if packaged() {
+            return match startup_task()?.RequestEnableAsync()?.join()? {
+                S::Enabled | S::EnabledByPolicy => Ok(()),
+                S::DisabledByUser => {
+                    bail!("starting at sign-in is turned off in Settings › Apps › Startup; turn CloudDrop on there")
+                }
+                S::DisabledByPolicy => bail!("your organization doesn't allow CloudDrop to start at sign-in"),
+                _ => bail!("Windows didn't let CloudDrop start at sign-in"),
+            };
+        }
         let (exe, args) = agent()?;
         let mut cmd = format!("\"{}\"", exe.display());
         for a in args {
@@ -295,6 +329,10 @@ mod winsvc {
     }
 
     pub fn disable() -> Result<()> {
+        if packaged() {
+            startup_task()?.Disable()?;
+            return Ok(());
+        }
         reg(&["delete", RUN_KEY, "/v", "CloudDrop", "/f"])?;
         Ok(())
     }

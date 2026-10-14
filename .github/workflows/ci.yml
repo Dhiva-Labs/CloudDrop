@@ -103,3 +103,45 @@ jobs:
         with:
           name: CloudDrop-${{ env.VERSION }}-windows-x64
           path: dist/
+      - name: Microsoft Store package, installed and checked inside the package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pub = 'CN=CloudDrop CI'
+          $msix = "$env:RUNNER_TEMP\clouddrop-ci.msix"
+          & .\packaging\windows\msix\build-msix.ps1 -Name 'CloudDrop.CI' -Publisher $pub -Dist "dist\CloudDrop-$env:VERSION-windows-x64\CloudDrop" -Out $msix
+          # A throwaway certificate, trusted on this CI machine only, to install it.
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $pub -CertStoreLocation Cert:\CurrentUser\My -TextExtension @('2.5.29.19={text}')
+          $pw = ConvertTo-SecureString -String 'ci' -Force -AsPlainText
+          $pfx = "$env:RUNNER_TEMP\ci.pfx"
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $pw | Out-Null
+          Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\LocalMachine\TrustedPeople -Password $pw | Out-Null
+          $signtool = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64\signtool.exe' | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $signtool sign /fd SHA256 /f $pfx /p ci $msix
+          if ($LASTEXITCODE) { throw 'signing failed' }
+          Add-AppxPackage $msix
+          $pkg = Get-AppxPackage CloudDrop.CI
+          "installed $($pkg.PackageFullName)"
+
+          # The command-line alias runs with the package's identity.
+          $cli = "$env:LOCALAPPDATA\Microsoft\WindowsApps\clouddrop.exe"
+          $status = & $cli status --json | ConvertFrom-Json
+          if ($status.configured -ne $false) { throw "unexpected status: $status" }
+          & $cli service status --json
+          & $cli service disable
+          $svc = & $cli service status --json | ConvertFrom-Json
+          if ($svc.at_login) { throw 'the startup task is still enabled after disable' }
+          & $cli service enable
+          $svc = & $cli service status --json | ConvertFrom-Json
+          "after enable: $svc"
+          if (-not $svc.at_login) { throw 'service enable did not turn on the startup task' }
+
+          # File Explorer cloud folder from inside the package.
+          $root = "$env:RUNNER_TEMP\selftest"
+          Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId CloudDrop -Command "$($pkg.InstallLocation)\clouddrop-agent.exe" -Args "--selftest $root"
+          for ($i = 0; $i -lt 90 -and -not (Test-Path "$root.result"); $i++) { Start-Sleep 1 }
+          $result = Get-Content "$root.result" -ErrorAction SilentlyContinue
+          "self-test: $result"
+          Get-Process clouddrop* -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-AppxPackage $pkg.PackageFullName
+          if ($result -ne 'ok') { throw "cloud folder self-test inside the package: $result" }

@@ -214,3 +214,84 @@ impl SyncFilter for Filter {
         ticket.pass().map_err(|_| CloudErrorKind::Unsuccessful)
     }
 }
+
+/// `clouddrop-agent --selftest DIR`: the File Explorer cloud-folder steps in a
+/// temporary sync root, for checking an installed Microsoft Store package (CI runs
+/// it inside the package). Writes "ok" or the failure to `DIR.result`.
+pub fn selftest(dir: &Path) -> Result<()> {
+    struct Fixed(Vec<u8>);
+    impl SyncFilter for Fixed {
+        fn fetch_data(&self, _r: Request, ticket: ticket::FetchData, info: info::FetchData) -> CResult<()> {
+            let range = info.required_file_range();
+            let start = (range.start - range.start % PAGE) as usize;
+            let end = (range.end as usize).min(self.0.len());
+            ticket
+                .write_at(&self.0[start..end], start as u64)
+                .map_err(|_| CloudErrorKind::Unsuccessful)
+        }
+        fn dehydrate(&self, _r: Request, ticket: ticket::Dehydrate, _i: info::Dehydrate) -> CResult<()> {
+            ticket.pass().map_err(|_| CloudErrorKind::Unsuccessful)
+        }
+        fn delete(&self, _r: Request, ticket: ticket::Delete, _i: info::Delete) -> CResult<()> {
+            ticket.pass().map_err(|_| CloudErrorKind::Unsuccessful)
+        }
+    }
+
+    std::fs::create_dir_all(dir)?;
+    let content: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let id = SyncRootIdBuilder::new("CloudDropSelfTest")
+        .user_security_id(SecurityId::current_user()?)
+        .account_name("selftest")
+        .build();
+    let exe = std::env::current_exe()?;
+    id.register(
+        SyncRootInfo::default()
+            .with_display_name("CloudDrop self-test")
+            .with_icon(format!("{},0", exe.display()))
+            .with_version(env!("CARGO_PKG_VERSION"))
+            .with_hydration_type(HydrationType::Full)
+            .with_population_type(PopulationType::AlwaysFull)
+            .with_allow_pinning(true)
+            .with_protection_mode(ProtectionMode::Personal)
+            .with_path(dir)?,
+    )?;
+    let result = Session::new()
+        .connect(dir, Fixed(content.clone()))
+        .map_err(anyhow::Error::from)
+        .and_then(|connection| {
+            let steps = (|| -> Result<()> {
+                let store = WinStore;
+                let file = dir.join("a.bin");
+                std::fs::write(&file, &content)?;
+                store.synced(&file, "self-test-1", false);
+                if !clouddrop::winstore::is_placeholder_path(&file)? {
+                    bail!("a file didn't become a cloud file");
+                }
+                let sub = dir.join("Folder");
+                std::fs::create_dir_all(&sub)?;
+                store.synced(&sub, "self-test-2", true);
+                if !clouddrop::winstore::is_placeholder_path(&sub)? {
+                    bail!("a folder didn't become a cloud folder");
+                }
+                store.free(&file, "self-test-1")?;
+                if !store.is_dehydrated(&file) {
+                    bail!("freeing didn't remove the local data");
+                }
+                store.hydrate(&file)?;
+                if store.is_dehydrated(&file) || std::fs::read(&file)? != content {
+                    bail!("downloading back didn't restore the data");
+                }
+                Ok(())
+            })();
+            drop(connection);
+            release(dir);
+            steps
+        });
+    let _ = id.unregister();
+    let report = dir.with_extension("result");
+    match &result {
+        Ok(()) => std::fs::write(&report, "ok")?,
+        Err(e) => std::fs::write(&report, format!("fail: {e:#}"))?,
+    }
+    result
+}

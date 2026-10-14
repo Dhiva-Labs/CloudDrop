@@ -16,7 +16,18 @@ pub static EXIT: AtomicBool = AtomicBool::new(false);
 
 pub fn main() {
     init_logging();
-    if std::env::args().nth(1).as_deref() == Some("--unregister") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--selftest") {
+        let dir = args.get(2).map(std::path::PathBuf::from).unwrap_or_else(|| {
+            std::env::temp_dir().join("CloudDropSelfTest")
+        });
+        if let Err(e) = crate::cloud::selftest(&dir) {
+            tracing::error!("self-test failed: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("--unregister") {
         if let Err(e) = unregister() {
             tracing::error!("cannot remove the folder from File Explorer: {e:#}");
             std::process::exit(1);
