@@ -12,8 +12,8 @@ CloudDrop for Windows.
   The same Drive checksum check applies before any local data is removed.
 - Windows app in Fluent design: setup assistant, Home, Files, Activity and Settings,
   plus a notification-area icon with pause/resume. CloudDrop starts at sign-in.
-- Microsoft Store edition with the CloudDrop Google client built in. The free zip on
-  GitHub is unsigned and needs your own Google client, like source builds.
+- Free in the Microsoft Store, signed and with the CloudDrop Google client built in.
+  The zip on GitHub is unsigned and needs your own Google client, like source builds.
 - Command line: `clouddrop logout`; `status --json` also works before setup and
   reports `configured`, `config_error`, `paused` and `root_id`;
   `service status --json`; `reset-cloud` restarts the service itself.

@@ -4,7 +4,8 @@ The text entered in Partner Center for CloudDrop, kept here for future updates.
 
 ## Pricing and availability
 
-- Price: USD 10.00 (or the nearest tier, 9.99), one-time. No free trial, no in-app purchases.
+- Price: free. No in-app purchases.
+- Organizational licensing: Store-managed (online) allowed.
 - Markets: all.
 - Visibility: public.
 
@@ -14,7 +15,7 @@ The text entered in Partner Center for CloudDrop, kept here for future updates.
 - Privacy policy: <https://github.com/Dhiva-Labs/CloudDrop/blob/main/PRIVACY.md>
 - Website: <https://github.com/Dhiva-Labs/CloudDrop>
 - Support contact: reachout@dhivalabs.com
-- Product declarations: none apply (no ads, no children-directed content). Accessibility: not claimed.
+- Product declarations: installs to alternate drives allowed; OneDrive backup of app data turned OFF (it would copy the Google sign-in token off the PC, and the privacy policy says it stays on the computer).
 - System requirements: an internet connection and a Google account.
 
 ## Store listing (English, United States)
@@ -39,7 +40,7 @@ It's made for saving space. Uploading is one-way: deleting or freeing up a file 
 • A clear app. A setup assistant, a Home overview with your Drive storage and the space you've freed, a Files browser with search and filters, an Activity history, and Settings, plus a notification-area icon with pause and resume.
 • Private by design. CloudDrop asks Google only for access to the files it creates itself (the drive.file permission), so it cannot see the rest of your Drive. Your files go straight between your PC and Google: no CloudDrop servers.
 
-CloudDrop is open source (MIT) at github.com/Dhiva-Labs/CloudDrop. Buying it here gets you the ready-to-use edition: signed, updated by the Store, with Google sign-in built in.
+CloudDrop is open source (MIT) at github.com/Dhiva-Labs/CloudDrop. The Store edition is free and ready to use: signed, updated by the Store, with Google sign-in built in.
 
 **What's new in this version:** First Windows release.
 
@@ -54,7 +55,7 @@ CloudDrop is open source (MIT) at github.com/Dhiva-Labs/CloudDrop. Buying it her
 7. Download cloud-only files back any time
 8. Only accesses files it creates in your Drive
 
-**Search terms:** google drive, backup, upload, cloud storage, free up space, file sync, drive uploader
+**Keywords:** google drive, backup, upload, free up space, file sync, drive uploader, cloud backup (Partner Center rejects "cloud storage")
 
 **Copyright:** © 2026 Dhiva Labs
 
@@ -62,11 +63,11 @@ CloudDrop is open source (MIT) at github.com/Dhiva-Labs/CloudDrop. Buying it her
 
 **Screenshots:** `winapp/store/screenshots/*.png`
 
-**Store logos:** `packaging/windows/msix/store-logos/` (1:1 box art 1080×1080, 1:1 app tile icon 300×300).
+**Store logos:** `packaging/windows/msix/store-logos/` (9:16 poster art 1440×2160, 1:1 box art 1080×1080, 1:1 app tile icon 300×300).
 
 ## Age ratings (IARC)
 
-Productivity utility. No user-generated content shared with others, no chat, no purchases inside the app, no location or personal-data sharing, and no unrestricted web browsing (only Google's sign-in page). Expected: 3+.
+All Other App Types; every question answered No (no ratings-relevant content, no user-to-user sharing, no featured online content, no age-restricted products, no location sharing, no digital purchases, no rewards, not a browser, not news/education). Result: IARC 3+, ESRB Everyone, PEGI 3, USK 0.
 
 ## Certification notes
 

@@ -35,9 +35,9 @@ between your computer and Google; see the [privacy policy](PRIVACY.md).
 
 ## Install on Windows (10 version 1809 or later, 11)
 
-- **[Microsoft Store](https://apps.microsoft.com/detail/9P8CJ02X8KD8)** (paid,
-  one-time; signed, updated by the Store, and works out of the box).
-- **Free zip**: download `CloudDrop-…-windows-x64.zip` from
+- **[Microsoft Store](https://apps.microsoft.com/detail/9P8CJ02X8KD8)** (free; signed,
+  updated by the Store, and works out of the box).
+- **Zip**: download `CloudDrop-…-windows-x64.zip` from
   [Releases](https://github.com/Dhiva-Labs/CloudDrop/releases/latest), extract it
   and double-click `install.cmd`. It installs for your user only (no administrator
   rights) and adds CloudDrop to the Start menu and to *Settings › Apps* for

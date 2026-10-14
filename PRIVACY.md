@@ -34,12 +34,6 @@ Your Google sign-in token, in a file in your user account's private app-data fol
 and a local database recording what has been uploaded and an activity history. Both
 stay on your computer.
 
-## Microsoft Store purchases
-
-If you buy CloudDrop from the Microsoft Store, Microsoft handles the purchase under
-its own privacy statement. CloudDrop and Dhiva Labs never receive your payment
-details.
-
 ## No sharing or other use
 
 CloudDrop does not sell, share or transfer Google user data to anyone, does not use
