@@ -72,15 +72,13 @@ apps:
 
 parts:
   clouddrop:
-    plugin: rust
+    # Built with the pinned toolchain installed by rustup-init: the rust
+    # plugin's rustup integration is fragile in managed builds.
+    plugin: nil
     source: .
-    rust-channel: "1.97.1"
-    rust-path:
-      - .
-      - gui
-    build-snaps:
-      - rustup
     build-packages:
+      - curl
+      - gcc
       - pkg-config
     override-build: |
       # The CloudDrop Google client: not in git, written by
@@ -88,7 +86,12 @@ parts:
       if [ -f packaging/oauth-client.env ]; then
         set -a; . packaging/oauth-client.env; set +a
       fi
-      craftctl default
+      export RUSTUP_HOME="$CRAFT_PART_BUILD/.rustup" CARGO_HOME="$CRAFT_PART_BUILD/.cargo"
+      export RUSTUP_TOOLCHAIN=1.97.1
+      curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN" --no-modify-path
+      "$CARGO_HOME/bin/cargo" build --release --locked -p clouddrop -p clouddrop-gui
+      install -Dm755 target/release/clouddrop "$CRAFT_PART_INSTALL/bin/clouddrop"
+      install -Dm755 target/release/clouddrop-gui "$CRAFT_PART_INSTALL/bin/clouddrop-gui"
   data:
     plugin: dump
     source: data
