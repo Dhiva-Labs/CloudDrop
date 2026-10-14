@@ -4,6 +4,7 @@
 # and every crate Cargo.lock resolves to are vendored under packaging/vendor/
 # (see packaging/vendor/README) and unpacked into build-scoped directories.
 RUST_VERSION := 1.97.1
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 RUST_TRIPLE := x86_64-unknown-linux-gnu
 VENDOR := $(CURDIR)/packaging/vendor
 RUST_ROOT := $(CURDIR)/debian/.rust
@@ -38,7 +39,7 @@ override_dh_auto_configure:
 		rm -rf $$tmp; \
 	fi
 	if [ ! -d "$(CURDIR)/vendor" ]; then \
-		tar --no-same-owner -xJf $(VENDOR)/crates-0.1.0.tar.xz -C $(CURDIR); \
+		tar --no-same-owner -xJf $(VENDOR)/crates-$(VERSION).tar.xz -C $(CURDIR); \
 	fi
 	printf '[source.crates-io]\nreplace-with = "vendored"\n[source.vendored]\ndirectory = "%s/vendor"\n[net]\noffline = true\n' \
 		"$(CURDIR)" > $(CARGO_HOME)/config.toml

@@ -1,3 +1,12 @@
+clouddrop (0.2.0~resolute1) resolute; urgency=medium
+
+  * New upstream release 0.2.0 (adds CloudDrop for Windows; see CHANGELOG.md).
+  * Command line: `clouddrop logout`; `status --json` works before setup and
+    reports configured, config_error, paused and root_id; `service status
+    --json`; `reset-cloud` restarts the service itself.
+
+ -- Dhiva Labs <dhivakar1010@gmail.com>  Thu, 15 Oct 2026 05:06:37 +0530
+
 clouddrop (0.1.0~resolute1) resolute; urgency=medium
 
   * Initial release.

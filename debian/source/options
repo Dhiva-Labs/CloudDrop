@@ -7,3 +7,6 @@ tar-ignore = "debian/.rust"
 tar-ignore = "debian/.cargo"
 tar-ignore = "debian/.home"
 tar-ignore = "__pycache__"
+# The Windows app (Flutter) and Windows build output aren't part of the Linux build.
+tar-ignore = "winapp"
+tar-ignore = "dist"
