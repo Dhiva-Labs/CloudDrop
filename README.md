@@ -50,11 +50,20 @@ a green check; right-click → *Free up space* keeps a file listed with a cloud 
 and downloads it again when you open it; *Always keep on this device* downloads it
 back and keeps it. See [docs/WINDOWS.md](docs/WINDOWS.md) for how it works.
 
-## Install on Linux (Ubuntu 26.04)
+## Install on Linux
+
+Ubuntu 26.04, from the PPA (includes the Files integration):
 
 ```bash
 sudo add-apt-repository ppa:dhiva-labs/apps
 sudo apt install clouddrop
+```
+
+Any distribution, from the [Snap Store](https://snapcraft.io/clouddrop) (everything
+except the Files integration, which a snap can't add):
+
+```bash
+sudo snap install clouddrop
 ```
 
 Open **CloudDrop** from your app grid, click **Sign In with Google**, and you're
