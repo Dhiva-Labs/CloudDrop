@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing release (for example v0.2.0) to attach the Windows arm64 zip to. Leave empty to only build.
+        description: Existing release (for example v0.2.0) to attach the Windows zips to (those it lacks). Leave empty to only build.
         required: false
         default: ''
   release:
@@ -498,12 +498,13 @@ jobs:
           Remove-AppxPackage $pkg.PackageFullName
           if ($result -ne 'ok') { throw "cloud folder self-test inside the package: $result" }
 
-  # Attaches the Windows arm64 zip to a release, the way the x64 zip was attached: the
-  # zip is the CI artifact of the windows-package job. The x64 asset is never touched.
+  # Attaches the Windows zips to a release, the way the x64 zip was attached: each zip is
+  # the CI artifact of the windows-package job. Assets already on the release are left
+  # alone (a hand-uploaded file wins, and nothing is overwritten); CI adds the others.
   # Runs on every event, so the asset selection is exercised on pull requests; only the
   # upload is limited to a published release (or a manual run naming one).
   release:
-    name: Release assets (arm64)
+    name: Release assets
     needs: [windows-package]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -516,33 +517,42 @@ jobs:
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
-          pattern: CloudDrop-*-windows-arm64
+          pattern: CloudDrop-*-windows-*
           path: assets
           merge-multiple: true
-      - name: Make CloudDrop-<version>-windows-arm64.zip
+      - name: Make CloudDrop-<version>-windows-<arch>.zip for x64 and arm64
         id: select
         run: |
           VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          NAME="CloudDrop-${VERSION}-windows-arm64"
           find assets -maxdepth 3 | sort
-          [ -f "assets/$NAME/CloudDrop/clouddrop_app.exe" ]
-          (cd assets && zip -qr "../$NAME.zip" "$NAME")
-          unzip -l "$NAME.zip" | sed -n '1,12p;$p'
-          unzip -l "$NAME.zip" | grep -q "$NAME/CloudDrop/clouddrop-agent.exe"
-          unzip -l "$NAME.zip" | grep -q "$NAME/install.cmd"
-          ls -l "$NAME.zip"
+          mkdir -p release
+          for arch in x64 arm64; do
+            NAME="CloudDrop-${VERSION}-windows-${arch}"
+            [ -f "assets/$NAME/CloudDrop/clouddrop_app.exe" ]
+            (cd assets && zip -qr "../release/$NAME.zip" "$NAME")
+            unzip -l "release/$NAME.zip" | grep -q "$NAME/CloudDrop/clouddrop-agent.exe"
+            unzip -l "release/$NAME.zip" | grep -q "$NAME/install.cmd"
+          done
+          ls -l release
+          unzip -l "release/CloudDrop-${VERSION}-windows-arm64.zip" | sed -n '1,12p;$p'
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "file=$NAME.zip" >> "$GITHUB_OUTPUT"
-      - name: Upload to the release
+      - name: Upload what the release does not have yet
         if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
           VERSION: ${{ steps.select.outputs.version }}
-          FILE: ${{ steps.select.outputs.file }}
         run: |
           if [ "$TAG" != "v$VERSION" ]; then
             echo "::error::release tag $TAG does not match the version in Cargo.toml ($VERSION)"
             exit 1
           fi
-          gh release upload "$TAG" "$FILE" --clobber --repo "$GITHUB_REPOSITORY"
+          existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          for f in release/*.zip; do
+            name="$(basename "$f")"
+            if printf '%s\n' "$existing" | grep -qxF "$name"; then
+              echo "$name is already on $TAG: left as it is"
+            else
+              gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY"
+            fi
+          done
