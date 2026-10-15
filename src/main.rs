@@ -241,6 +241,20 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             Ok("Signed out. Uploads stop until you sign in again (clouddrop login).".into())
         }
         Cmd::Run => {
+            // One engine at a time (the snap's service and an app-started one could
+            // otherwise both run).
+            let data = config::data_dir();
+            std::fs::create_dir_all(&data)?;
+            let lock = std::fs::File::create(data.join("engine.lock"))?;
+            if lock.try_lock().is_err() {
+                return Ok("CloudDrop is already running.".into());
+            }
+            // The snap's service starts at every login, set up or not: wait for setup.
+            if control::in_snap() {
+                while !(control::is_configured() && control::is_signed_in()) {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
             let cfg = Config::load()?;
             let db = Arc::new(Db::open_default()?);
             let drive = drive_for(&cfg, auth::token_path());
