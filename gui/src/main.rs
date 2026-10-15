@@ -42,6 +42,9 @@ struct App {
     tray_starting: Cell<bool>,
     /// Failed attempts to show the icon (the shell may not be ready right after login).
     tray_attempts: Cell<u32>,
+    /// Held while this process shows the top-bar icon, so a second CloudDrop
+    /// process (the snap runs the window and the icon separately) doesn't add one.
+    tray_lock: RefCell<Option<std::fs::File>>,
     tray_state: RefCell<Option<TrayState>>,
     tray_tx: async_channel::Sender<TrayCommand>,
     tray_rx: RefCell<Option<async_channel::Receiver<TrayCommand>>>,
@@ -263,6 +266,16 @@ impl App {
         if self.tray.borrow().is_some() || self.tray_starting.replace(true) {
             return;
         }
+        if self.tray_lock.borrow().is_none() {
+            match take_tray_lock() {
+                Some(lock) => *self.tray_lock.borrow_mut() = Some(lock),
+                None => {
+                    // Another CloudDrop process shows the icon.
+                    self.tray_starting.set(false);
+                    return;
+                }
+            }
+        }
         // Keep running without windows while the icon is shown.
         *self.hold.borrow_mut() = Some(self.adw.hold());
         let snap = self.snap.borrow().clone();
@@ -317,6 +330,7 @@ impl App {
         }
         self.tray_state.borrow_mut().take();
         self.hold.borrow_mut().take();
+        self.tray_lock.borrow_mut().take();
     }
 
     fn on_tray(self: &Rc<Self>, cmd: TrayCommand) {
@@ -350,10 +364,25 @@ impl App {
     }
 }
 
+/// The top-bar icon's lock, if no other CloudDrop process holds it.
+fn take_tray_lock() -> Option<std::fs::File> {
+    let dir = clouddrop::config::data_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = std::fs::File::create(dir.join("tray.lock")).ok()?;
+    file.try_lock().ok()?;
+    Some(file)
+}
+
 fn main() -> glib::ExitCode {
+    // In the snap, owning the app's D-Bus name needs a slot that the store
+    // reviews by hand, so each process runs on its own there.
+    let mut flags = gio::ApplicationFlags::HANDLES_COMMAND_LINE;
+    if control::in_snap() {
+        flags |= gio::ApplicationFlags::NON_UNIQUE;
+    }
     let adw_app = adw::Application::builder()
         .application_id(APP_ID)
-        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .flags(flags)
         .build();
     let (tray_tx, tray_rx) = async_channel::unbounded();
     let app = Rc::new(App {
@@ -363,6 +392,7 @@ fn main() -> glib::ExitCode {
         tray: RefCell::default(),
         tray_starting: Cell::new(false),
         tray_attempts: Cell::new(0),
+        tray_lock: RefCell::default(),
         tray_state: RefCell::default(),
         tray_tx,
         tray_rx: RefCell::new(Some(tray_rx)),

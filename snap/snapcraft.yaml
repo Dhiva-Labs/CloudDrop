@@ -45,13 +45,6 @@ environment:
   CLOUDDROP_DATA_DIR: $SNAP_USER_COMMON/data
   XDG_CONFIG_HOME: $SNAP_USER_DATA/.config
 
-slots:
-  # The desktop app and the top-bar icon are one GApplication instance.
-  clouddrop-dbus:
-    interface: dbus
-    bus: session
-    name: com.dhivalabs.CloudDrop
-
 apps:
   clouddrop:
     command: bin/clouddrop
@@ -62,7 +55,6 @@ apps:
     common-id: com.dhivalabs.CloudDrop
     extensions: [gnome]
     plugs: [home, network, network-bind, unity7]
-    slots: [clouddrop-dbus]
   # The top-bar icon; the app turns it on by writing
   # $SNAP_USER_DATA/.config/autostart/clouddrop-tray.desktop.
   tray:
@@ -70,7 +62,6 @@ apps:
     autostart: clouddrop-tray.desktop
     extensions: [gnome]
     plugs: [home, network, network-bind, unity7]
-    slots: [clouddrop-dbus]
   # The upload engine, started with the desktop session once setup turned on
   # "start at sign-in" ($SNAP_USER_DATA/.config/autostart/clouddrop-engine.desktop).
   engine:
