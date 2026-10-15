@@ -3,9 +3,12 @@
 # Launchpad's PPA builders have no network access, so a pinned Rust toolchain
 # and every crate Cargo.lock resolves to are vendored under packaging/vendor/
 # (see packaging/vendor/README) and unpacked into build-scoped directories.
+# The toolchain is the one for the machine that builds (amd64 or arm64); the
+# crates are the same for both.
+include /usr/share/dpkg/architecture.mk
 RUST_VERSION := 1.97.1
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-RUST_TRIPLE := x86_64-unknown-linux-gnu
+RUST_TRIPLE := $(DEB_HOST_GNU_CPU)-unknown-linux-gnu
 VENDOR := $(CURDIR)/packaging/vendor
 RUST_ROOT := $(CURDIR)/debian/.rust
 PKG := $(CURDIR)/debian/clouddrop
@@ -30,7 +33,11 @@ override_dh_auto_configure:
 	mkdir -p $(HOME) $(CARGO_HOME)
 	cd $(VENDOR) && sha256sum -c SHA256SUMS
 	if [ ! -x "$(RUST_ROOT)/bin/cargo" ]; then \
-		set -e; tmp=$$(mktemp -d); \
+		set -e; \
+		[ -f $(VENDOR)/rustc-$(RUST_VERSION)-$(RUST_TRIPLE).tar.xz ] || { \
+			echo "error: packaging/vendor has no Rust $(RUST_VERSION) toolchain for $(RUST_TRIPLE) (see packaging/vendor/README)" >&2; \
+			exit 1; }; \
+		tmp=$$(mktemp -d); \
 		for c in rustc cargo rust-std; do \
 			tar --no-same-owner -xJf $(VENDOR)/$$c-$(RUST_VERSION)-$(RUST_TRIPLE).tar.xz -C $$tmp; \
 			$$tmp/$$c-$(RUST_VERSION)-$(RUST_TRIPLE)/install.sh \

@@ -16,7 +16,7 @@ Vcs-Git: https://github.com/Dhiva-Labs/CloudDrop.git
 Rules-Requires-Root: no
 
 Package: clouddrop
-Architecture: amd64
+Architecture: amd64 arm64
 Depends: ${shlibs:Depends},
          ${misc:Depends},
          xdg-utils
