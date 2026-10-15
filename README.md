@@ -1,6 +1,10 @@
 # CloudDrop
 
-An upload-only Google Drive folder for Linux and Windows.
+[![ARM64 builds](https://github.com/Dhiva-Labs/CloudDrop/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dhiva-Labs/CloudDrop/actions/workflows/ci.yml)
+![Linux x64 | arm64](https://img.shields.io/badge/Linux-x64%20%7C%20arm64-informational?logo=linux&logoColor=white)
+![Windows x64 | arm64](https://img.shields.io/badge/Windows-x64%20%7C%20arm64-informational?logo=windows&logoColor=white)
+
+An upload-only Google Drive folder for Linux and Windows, on Intel/AMD (x64) and ARM (arm64) computers.
 
 Anything you put in your CloudDrop folder (`~/CloudDrop`, or `%USERPROFILE%\CloudDrop`
 on Windows) is uploaded to Google Drive with the same
@@ -38,12 +42,16 @@ between your computer and Google; see the [privacy policy](PRIVACY.md).
 - **[Microsoft Store](https://apps.microsoft.com/detail/9P8CJ02X8KD8)** (free; signed,
   updated by the Store, and works out of the box).
 - **Zip**: download `CloudDrop-…-windows-x64.zip` from
-  [Releases](https://github.com/Dhiva-Labs/CloudDrop/releases/latest), extract it
-  and double-click `install.cmd`. It installs for your user only (no administrator
-  rights) and adds CloudDrop to the Start menu and to *Settings › Apps* for
-  uninstalling. This build is unsigned, so Windows *Smart App Control* may block
-  it, and it has no Google client built in: the setup assistant shows how to create
-  your own (as in [From source](#from-source)).
+  [Releases](https://github.com/Dhiva-Labs/CloudDrop/releases/latest) (or
+  `CloudDrop-…-windows-arm64.zip` on a Windows on ARM PC, such as a Snapdragon X
+  laptop), extract it and double-click `install.cmd`. It installs for your user only
+  (no administrator rights) and adds CloudDrop to the Start menu and to *Settings ›
+  Apps* for uninstalling. This build is unsigned, so Windows *Smart App Control* may
+  block it, and it has no Google client built in: the setup assistant shows how to
+  create your own (as in [From source](#from-source)).
+
+Both zips are built natively for their processor (the arm64 one is not x64 code
+running under emulation).
 
 The CloudDrop folder appears in File Explorer's navigation pane. Uploaded files get
 a green check; right-click → *Free up space* keeps a file listed with a cloud icon
@@ -51,6 +59,9 @@ and downloads it again when you open it; *Always keep on this device* downloads 
 back and keeps it. See [docs/WINDOWS.md](docs/WINDOWS.md) for how it works.
 
 ## Install on Linux
+
+CloudDrop is built and tested on x86-64 (amd64) and ARM (arm64, also called aarch64)
+computers. A build from source works on both.
 
 Ubuntu 26.04, from the PPA (includes the Files integration):
 
@@ -65,6 +76,10 @@ except the Files integration, which a snap can't add):
 ```bash
 sudo snap install clouddrop
 ```
+
+CI builds the snap and the PPA's Debian package for both amd64 and arm64. The arm64
+ones reach the Snap Store and the PPA once they are uploaded there; until then, an
+arm64 computer can build from source.
 
 Open **CloudDrop** from your app grid, click **Sign In with Google**, and you're
 done: the assistant creates `~/CloudDrop`, starts the background service, adds the
@@ -194,6 +209,10 @@ Your files, settings and Drive copies are kept. Revoke access at
 your Drive.
 
 ## Development
+
+CI (`.github/workflows/ci.yml`) runs the Linux tests, the Debian package and the snap on
+amd64 and arm64, and the Windows tests, the cloud-folder test, the app and the Windows
+packages on x64 and arm64, on native runners of each.
 
 ```bash
 cargo test --workspace                                 # unit + end-to-end tests against a fake Drive

@@ -6,7 +6,8 @@
 # but crates the Linux build of clouddrop + clouddrop-gui doesn't compile
 # (Windows/macOS-only crates, test-only dev-dependencies) are replaced by
 # stubs: their Cargo.toml, an empty src/lib.rs and a .cargo-checksum.json with
-# no files but the original package checksum.
+# no files but the original package checksum. One tarball serves both Linux
+# architectures (amd64 and arm64), so a crate is kept when either one builds it.
 set -euo pipefail
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 out=packaging/vendor/crates-$version.tar.xz
@@ -14,9 +15,11 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 cargo vendor --locked --versioned-dirs "$work/vendor" >/dev/null
-cargo tree --locked --target x86_64-unknown-linux-gnu -e normal,build \
-    -p clouddrop -p clouddrop-gui -p clouddrop-tray --prefix none --format '{p}' \
-    | awk '{print $1"-"substr($2,2)}' | sort -u > "$work/keep"
+for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+    cargo tree --locked --target "$triple" -e normal,build \
+        -p clouddrop -p clouddrop-gui -p clouddrop-tray --prefix none --format '{p}' \
+        | awk '{print $1"-"substr($2,2)}'
+done | sort -u > "$work/keep"
 
 python3 - "$work/vendor" "$work/keep" <<'PY'
 import json, os, shutil, sys
