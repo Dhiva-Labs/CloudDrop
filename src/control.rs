@@ -355,10 +355,15 @@ mod winsvc {
     }
 }
 
-/// Running from the CloudDrop snap. snapd runs the background service (a user
-/// daemon started at login) and systemctl isn't available inside the snap.
+/// Running from the CloudDrop snap: systemctl isn't available, and the engine
+/// starts with the desktop session through the snap's `engine` autostart app.
 pub fn in_snap() -> bool {
     cfg!(unix) && std::env::var_os("SNAP_NAME").is_some_and(|n| n == "clouddrop")
+}
+
+/// The snap's `engine` app declares `autostart: clouddrop-engine.desktop`.
+fn snap_engine_autostart() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("autostart/clouddrop-engine.desktop"))
 }
 
 /// Starts `clouddrop run` in the background from inside the snap.
@@ -396,7 +401,15 @@ pub fn enable_at_login() -> Result<()> {
     #[cfg(unix)]
     {
         if in_snap() {
-            return Ok(()); // snapd starts it at every login
+            let file = snap_engine_autostart().ok_or_else(|| anyhow!("no config dir"))?;
+            std::fs::create_dir_all(file.parent().expect("autostart dir"))?;
+            std::fs::write(
+                &file,
+                "[Desktop Entry]\nType=Application\nName=CloudDrop\n\
+                 Comment=Uploads the CloudDrop folder to Google Drive\n\
+                 Exec=clouddrop.engine\nNoDisplay=true\n",
+            )?;
+            return Ok(());
         }
         if !service_installed() {
             bail!("the clouddrop service is not installed");
@@ -415,10 +428,13 @@ pub fn disable_at_login() -> Result<()> {
     #[cfg(unix)]
     {
         if in_snap() {
-            bail!(
-                "in the snap, the background service starts at every login; to turn that off run \
-                 `systemctl --user disable snap.clouddrop.daemon`"
-            );
+            if let Some(file) = snap_engine_autostart() {
+                match std::fs::remove_file(file) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                    _ => {}
+                }
+            }
+            return Ok(());
         }
         systemctl(&["disable", SERVICE])?;
         Ok(())
@@ -485,7 +501,7 @@ pub fn service_active() -> bool {
 
 pub fn service_enabled() -> bool {
     if in_snap() {
-        return true;
+        return snap_engine_autostart().is_some_and(|f| f.exists());
     }
     systemctl(&["is-enabled", "--quiet", SERVICE]).unwrap_or(false)
 }
@@ -493,6 +509,7 @@ pub fn service_enabled() -> bool {
 /// Enables the daemon at login and (re)starts it so it picks up a new config.
 pub fn enable_service() -> Result<()> {
     if in_snap() {
+        enable_at_login()?;
         return restart_service();
     }
     if !service_installed() {

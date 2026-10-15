@@ -62,12 +62,11 @@ apps:
     autostart: clouddrop-tray.desktop
     extensions: [gnome]
     plugs: [home, network, network-bind, unity7]
-  daemon:
+  # The upload engine, started with the desktop session once setup turned on
+  # "start at sign-in" ($SNAP_USER_DATA/.config/autostart/clouddrop-engine.desktop).
+  engine:
     command: bin/clouddrop run
-    daemon: simple
-    daemon-scope: user
-    # Stopped on purpose (Pause / quit) stays stopped until the next login.
-    restart-condition: on-failure
+    autostart: clouddrop-engine.desktop
     plugs: [home, network, network-bind, desktop]
 
 parts:

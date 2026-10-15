@@ -249,7 +249,7 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             if lock.try_lock().is_err() {
                 return Ok("CloudDrop is already running.".into());
             }
-            // The snap's service starts at every login, set up or not: wait for setup.
+            // In the snap the engine may be started before setup is finished: wait.
             if control::in_snap() {
                 while !(control::is_configured() && control::is_signed_in()) {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
