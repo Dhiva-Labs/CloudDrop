@@ -70,7 +70,7 @@ try {
     Copy-Item -Recurse (Join-Path $Dist '*') $stage
     Copy-Item -Recurse (Join-Path $PSScriptRoot 'Assets') $stage
     $manifest = (Get-Content (Join-Path $PSScriptRoot 'AppxManifest.xml.in') -Raw).
-        Replace('@NAME@', $Name).Replace('@PUBLISHER@', $Publisher).Replace('@VERSION@', "$version.0")
+        Replace('@NAME@', $Name).Replace('@PUBLISHER@', $Publisher).Replace('@VERSION@', "$version.0").Replace('@ARCH@', $Arch)
     [IO.File]::WriteAllText((Join-Path $stage 'AppxManifest.xml'), $manifest)
 
     # Resource index, so Windows picks the right image size for each place.
