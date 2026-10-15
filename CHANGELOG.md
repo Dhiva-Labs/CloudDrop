@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Linux and Windows on ARM64: CI builds and tests CloudDrop natively on arm64 as well as
+  x64 (Linux tests, Debian package and snap; Windows engine, Cloud Files test, app and
+  packages). Releases carry `CloudDrop-<version>-windows-arm64.zip` next to the x64 zip.
+  `snap/snapcraft.yaml` and `debian/` now build for arm64.
+
 ## 0.2.0 — 2026-10-15
 
 CloudDrop for Windows.
