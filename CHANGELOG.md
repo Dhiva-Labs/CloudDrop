@@ -1,11 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 — 2026-10-16
+
+Linux and Windows on ARM64, and CloudDrop as a snap.
 
 - Linux and Windows on ARM64: CI builds and tests CloudDrop natively on arm64 as well as
   x64 (Linux tests, Debian package and snap; Windows engine, Cloud Files test, app and
   packages). Releases carry `CloudDrop-<version>-windows-arm64.zip` next to the x64 zip.
-  `snap/snapcraft.yaml` and `debian/` now build for arm64.
+  `snap/snapcraft.yaml` and `debian/` now build for arm64, and the Microsoft Store
+  package declares the processor architecture it was built for.
+- Snap (strict, amd64 and arm64): the upload engine and the top-bar icon start with the
+  desktop session as autostart apps, since a snap has no systemd user service, and the
+  setup assistant's "start at sign-in" switches them on and off.
+- Only one upload engine runs at a time: a second `clouddrop run` exits with "CloudDrop
+  is already running" instead of uploading in parallel, and only one top-bar icon is
+  shown when more than one CloudDrop process is running.
+- The desktop app needs libadwaita 1.5 instead of 1.6 (GNOME 46), so it also runs on
+  older desktops.
 
 ## 0.2.0 — 2026-10-15
 

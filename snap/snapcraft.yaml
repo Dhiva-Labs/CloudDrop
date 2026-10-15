@@ -1,7 +1,7 @@
 name: clouddrop
 title: CloudDrop
 base: core24
-version: '0.2.0'
+version: '0.2.1'
 summary: Upload a folder to Google Drive and free up space without losing anything
 description: |
   Anything you put in ~/CloudDrop is uploaded to Google Drive with the same
