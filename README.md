@@ -89,7 +89,7 @@ the status icons appear.
 ### From source
 
 Needs Rust, `pkg-config`, `libgtk-4-dev`, `libadwaita-1-dev` (GTK 4.12+, libadwaita
-1.6+) and, for the Files integration, `python3-nautilus`.
+1.5+) and, for the Files integration, `python3-nautilus`.
 
 ```bash
 ./install.sh            # builds and installs into ~/.local for your user
