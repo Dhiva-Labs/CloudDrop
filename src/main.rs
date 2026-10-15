@@ -221,7 +221,11 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             }
             Ok(format!(
                 "CloudDrop is set up. Start it with:\n  {}\nThen drop files into {}",
-                if cfg!(windows) { "clouddrop service enable" } else { "systemctl --user enable --now clouddrop" },
+                if cfg!(windows) || control::in_snap() {
+                    "clouddrop service enable"
+                } else {
+                    "systemctl --user enable --now clouddrop"
+                },
                 cfg.sync_dir.display()
             ))
         }
