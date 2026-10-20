@@ -143,7 +143,8 @@ pub struct Capabilities {
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum RemoteError {
     /// Sign-in is missing, expired or revoked; nothing will work until `clouddrop login`.
-    #[error("Google sign-in needed: {0}")]
+    /// (`engine::describe` names the provider in what people see.)
+    #[error("sign-in needed: {0}")]
     Auth(String),
     /// Worth retrying later (network, server error).
     #[error("{0}")]
@@ -151,7 +152,7 @@ pub enum RemoteError {
     /// The provider asked to slow down; `retry_after` seconds if it said. Retried like Transient.
     #[error("{message}")]
     RateLimited { message: String, retry_after: Option<u64> },
-    #[error("not found in Google Drive")]
+    #[error("not found in the cloud")]
     NotFound,
     /// The account's storage is full. Not retried, like Permanent.
     #[error("{0}")]

@@ -19,7 +19,8 @@ downloaded back at any time.
 
 The engine reaches the cloud only through `src/remote.rs`: `Remote` (one variant per provider)
 and provider-neutral metadata, errors and content hashes. Google Drive's client is
-`src/drive.rs`; [PROVIDERS.md](PROVIDERS.md) is the plan for the others.
+`src/drive.rs`; [PROVIDERS.md](PROVIDERS.md) is the plan for the others. Where providers
+differ, the engine follows the provider's `Capabilities` (see "Providers" below).
 
 ## Files on disk
 
@@ -27,7 +28,8 @@ and provider-neutral metadata, errors and content hashes. Google Drive's client 
 | --- | --- | --- |
 | Config | `$XDG_CONFIG_HOME/clouddrop/config.toml` (`~/.config/clouddrop/config.toml`) | `CLOUDDROP_CONFIG` = path to file |
 | State database | `$XDG_DATA_HOME/clouddrop/state.db` (`~/.local/share/clouddrop/state.db`) | `CLOUDDROP_DATA_DIR` = directory |
-| OAuth token | `$XDG_DATA_HOME/clouddrop/token.json` (mode 0600) | `CLOUDDROP_DATA_DIR` |
+| OAuth token | `$XDG_DATA_HOME/clouddrop/token.json` (Google), `token-<id>.json` (other OAuth providers), mode 0600 | `CLOUDDROP_DATA_DIR` |
+| Other secrets | `$XDG_DATA_HOME/clouddrop/credentials.json` (mode 0600, one object per provider id) | `CLOUDDROP_DATA_DIR` |
 | Daemon status | `$XDG_DATA_HOME/clouddrop/status.json` | `CLOUDDROP_DATA_DIR` |
 
 ### config.toml
@@ -42,7 +44,13 @@ parallel_uploads = 2
 settle_secs = 2                      # a file must be quiet this long before upload
 notifications = true
 ignore = [".clouddrop-*", ".goutputstream-*", "*.part", "*.crdownload", "*.tmp", "~$*", ".~lock.*#", "*.swp", ".Trash-*"]
+
+[webdav]                             # a provider's own section, written by `setup --provider webdav --set …`
+url = "https://cloud.example.com/remote.php/dav/files/me"
 ```
+
+OAuth providers take their client id from `[<id>] client_id`, or from the build
+(`CLOUDDROP_OAUTH_CLIENTS="onedrive=…,dropbox=…"` at compile time).
 
 ## State database (SQLite, WAL mode)
 
@@ -55,16 +63,18 @@ CREATE TABLE entries (
   path        TEXT PRIMARY KEY,  -- relative to sync_dir, '/' separated, no leading or trailing slash
   kind        TEXT NOT NULL,     -- 'file' | 'dir'
   state       TEXT NOT NULL,     -- see below
-  drive_id    TEXT,              -- Drive file/folder id once it exists in Drive
-  cloud_name  TEXT,              -- name in Drive as last set
-  cloud_parent TEXT,             -- Drive id of the parent folder as last set
-  md5         TEXT,              -- md5 (hex) of the content last uploaded (= Drive md5Checksum)
+  drive_id    TEXT,              -- the provider's id of the file/folder once it exists there
+                                 -- (Drive's file id; a path where ids are paths)
+  cloud_name  TEXT,              -- name in the cloud as last set (forbidden characters mapped,
+                                 -- "name (2).ext" after a clash): the name actually used
+  cloud_parent TEXT,             -- cloud id of the parent folder as last set
+  md5         TEXT,              -- hash (hex) of the content last uploaded, of kind hash_kind
   cloud_size  INTEGER,           -- size in bytes of the content last uploaded
   local_size  INTEGER,           -- local file metadata at last observation
   local_mtime_ns INTEGER,
   inode       INTEGER,
   upload_url  TEXT,              -- resumable upload session in progress
-  upload_md5  TEXT,              -- md5 of the content that upload_url is uploading
+  upload_md5  TEXT,              -- hash (same kind) of the content that upload_url is uploading
   pin_prev    INTEGER NOT NULL DEFAULT 0, -- keep the previous Drive revision forever before replacing it
   move_pending INTEGER NOT NULL DEFAULT 0, -- cloud_only entry whose Drive name/parent must be updated
   attempts    INTEGER NOT NULL DEFAULT 0, -- consecutive failed attempts (drives the backoff)
@@ -73,8 +83,10 @@ CREATE TABLE entries (
   updated_at  INTEGER NOT NULL,  -- unix ms
   uploaded_at INTEGER,           -- unix ms the current Drive content was uploaded; NULL after a
                                  -- restore (automatic space saving skips it until re-uploaded)
-  hash_kind   TEXT               -- which hash `md5` holds; NULL = MD5 (the only kind so far)
+  hash_kind   TEXT               -- which hash `md5` holds: NULL = MD5 (Google Drive, and every
+                                 -- older database), 'sha1', 'sha256', 'quickxor', 'dropbox'
 );
+-- indexes on state, inode, drive_id, uploaded_at and cloud_parent
 CREATE TABLE activity (          -- history for the desktop app; newest 10 000 rows kept
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at INTEGER NOT NULL,           -- unix ms
@@ -88,7 +100,8 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- meta keys: 'schema_version' = '3' (version 1 databases gain uploaded_at and version 2 ones
 --            hash_kind on open), 'sync_root' = absolute sync_dir,
 --            'provider' = the cloud the ids belong to ('gdrive'); the engine refuses a database
---            bound to another provider, as it does one bound to another folder,
+--            bound to another provider, as it does one bound to another folder, until
+--            `reset-cloud --yes` rebinds it,
 --            'root_id' = Drive id of the top CloudDrop folder,
 --            'paused' = '1' while uploads are paused by the user
 ```
@@ -124,8 +137,43 @@ still exists locally, so the folder structure stays visible.
   pinned (`keepForever`) so the older content is never purged.
 - `free` deletes local copies only after re-hashing the local file **and** confirming
   Drive's `md5Checksum`/size for that file id match and it is not trashed.
-- `restore` downloads into a hidden temp file in the target folder, verifies md5,
+- `restore` downloads into a hidden temp file in the target folder, verifies the hash,
   records the entry as `synced`, then renames into place.
+
+## Providers
+
+The engine reads the provider's `Capabilities` (`src/remote.rs`); providers never touch the
+engine. Tests apply other providers' rules to the Drive mock (`engine::run_with_caps`,
+`actions::free_with`, and switches on the mock in `tests/common`).
+
+- **Hashes.** Local files are hashed in the provider's kind (`caps.hash`: MD5 for Drive,
+  QuickXorHash for OneDrive, …), or SHA-256 where the provider reports none, and the kind is
+  recorded in `hash_kind`. Contents are the same only when kind, value and size agree.
+- **Verify by download.** Where the provider has no hash (or reports none for an item), a
+  free check downloads the cloud copy into a temporary file (`.clouddrop-verify-*.part`; the
+  data directory for the daemon and File Explorer, next to the file for `clouddrop free`),
+  hashes it with SHA-256 and compares it with the local file. Nothing is deleted on a mismatch
+  or an error; a mismatch uploads the local file again as a new version, keeping the other.
+  The same proof adopts an existing cloud file after a lost database. While it runs,
+  status.json's `message` is `"Verifying…"` (`control::VERIFYING`) and `phase` is unchanged.
+- **Ids that are paths** (`stable_ids: false`: WebDAV, S3, SFTP). `move_rename` returns the
+  new id; the engine records it and, in the same transaction, moves the `drive_id` and
+  `cloud_parent` of every entry beneath the old id ("old/…", or "old…" for ids ending in '/')
+  under the new one, and drops upload sessions aimed beneath it. Nothing beneath a folder
+  starts while the folder's job runs, and a folder waits for the jobs beneath it.
+- **Names.** Characters in `caps.forbidden_chars` become their full-width look-alikes
+  (`:` → `：`, `?` → `？`), control characters their symbols (`␊`), anything else `_`. Where
+  that would clash with another item in the cloud folder, or where names differ only in case
+  and the provider ignores case (`case_insensitive`), the "name (2).ext" rule applies. An item
+  keeps the name it was given while it is still free; `cloud_name` records it.
+- **Errors.** `RateLimited` is retried like `Transient`, never before its `retry_after`;
+  `Quota` fails the file like `Permanent`, as "<Provider> storage is full: …", shown in
+  `clouddrop status` and the "could not upload" notification. Texts people see name the
+  provider (`engine::describe`); Google Drive's wording is unchanged.
+- **Sign-in.** Google keeps its own flow (`auth.rs`). `SignIn::OAuth` providers sign in in the
+  browser with PKCE and a loopback redirect, without a client secret (`oauth.rs`); their tokens
+  are refreshed from `token-<id>.json`. Form and Nextcloud providers keep their secrets in
+  `credentials.json`.
 
 ## Automatic space saving
 
@@ -172,10 +220,13 @@ failures exit non-zero with the message on stderr.
 
 | Command | Effect |
 | --- | --- |
-| `clouddrop setup --client-id ID --client-secret S [--folder DIR]` | write config, sign in |
-| `clouddrop login` | (re)run Google sign-in |
+| `clouddrop setup --client-id ID --client-secret S [--folder DIR]` | write config, sign in (Google Drive) |
+| `clouddrop setup --provider ID [--set KEY=VALUE]… [--secret KEY=VALUE]… [--folder DIR]` | another provider: its config section (through its own section struct), secrets to `credentials.json`; required form fields are checked. A folder that uploaded to another provider so far needs `reset-cloud --yes` afterwards |
+| `clouddrop providers [--json]` | every provider: `[{"id", "name", "verify_by_download", "web_links", "sign_in": {"kind": "google"\|"oauth"\|"nextcloud"\|"form", "fields": […]}}]` |
+| `clouddrop login [--no-browser]` | (re)run the provider's browser sign-in; for form and Nextcloud providers it says what to do instead |
+| `clouddrop check [--json]` | connect with the saved settings; `--json`: `{"ok", "provider", "provider_name", "message", "folder_exists", "quota"}` or `{"ok": false, …, "error_kind"}` |
 | `clouddrop run` | the daemon (systemd user service) |
-| `clouddrop status [--json]` | counts per state, errors |
+| `clouddrop status [--json]` | counts per state, errors; JSON has `provider` and `provider_name` |
 | `clouddrop free PATH...` | free up space: delete verified local copies (dirs: all synced files inside, folders are kept) |
 | `clouddrop restore PATH...` | download cloud-only files back (a dir restores all cloud-only files beneath it) |
 | `clouddrop open PATH` | open the file/folder in Drive in the browser |
@@ -185,7 +236,7 @@ failures exit non-zero with the message on stderr.
 | `clouddrop auto-free never\|now\|DAYS` | set automatic space saving (restarts the service) |
 | `clouddrop keep PATH...` / `unkeep PATH...` | add/remove "always keep on this computer" folders |
 | `clouddrop ls-cloud DIR [--json]` | list cloud-only entries directly inside DIR |
-| `clouddrop reset-cloud --yes` | after the Drive folder was permanently deleted: forget Drive ids and upload everything again |
+| `clouddrop reset-cloud --yes` | after the cloud folder was permanently deleted, or to switch provider: forget cloud ids, bind the database to the configured provider and upload everything again |
 
 Drive URLs: files `https://drive.google.com/file/d/<id>/view`, folders
 `https://drive.google.com/drive/folders/<id>`.

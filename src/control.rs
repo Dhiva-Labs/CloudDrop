@@ -2,7 +2,8 @@
 //! and the systemd service / autostart plumbing.
 
 use crate::config::{self, Config};
-use crate::db::Db;
+use crate::db::{Db, Kind};
+use crate::remote::{FieldKind, Provider, SignIn};
 use crate::util::now_ms;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,10 @@ pub enum Phase {
     /// The top folder in Drive was trashed or deleted.
     DriveFolderMissing,
 }
+
+/// `message` while a free check downloads files to prove them (providers without a content
+/// hash); the phase stays what it would be (`idle`, `waiting` or `uploading`).
+pub const VERIFYING: &str = "Verifying…";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Upload {
@@ -220,8 +225,109 @@ pub fn apply_setup(p: &SetupParams) -> Result<Config> {
     Ok(cfg)
 }
 
+/// What `clouddrop setup --provider <id>` writes, for providers other than Google Drive.
+pub struct ProviderSetup {
+    pub provider: Provider,
+    pub sync_dir: PathBuf,
+    pub drive_folder: String,
+    /// `--set key=value`: the provider's `[<id>]` config section.
+    pub settings: Vec<(String, String)>,
+    /// `--secret key=value`: the credentials store, never config.toml.
+    pub secrets: Vec<(String, String)>,
+}
+
+/// Makes `provider` the configured one. A state database bound to another provider with
+/// nothing uploaded is unbound, so the engine binds it to the new one when it starts. One that
+/// holds uploads stays bound until `clouddrop reset-cloud --yes` starts over in the new cloud
+/// (the engine refuses to run until then): see [`bound_elsewhere`].
+pub fn switch_provider(cfg: &mut Config, provider: Provider) -> Result<()> {
+    let db = Db::open_default()?;
+    if let Some(bound) = db.meta_get("provider")?
+        && bound != provider.as_str()
+        && !db.has_cloud_ids()?
+    {
+        db.meta_delete("provider")?;
+        db.meta_delete("root_id")?;
+    }
+    cfg.provider = provider;
+    Ok(())
+}
+
+/// The name of the provider the state database still belongs to, when it isn't `provider`
+/// (switched in the config; `clouddrop reset-cloud --yes` moves the database over).
+pub fn bound_elsewhere(provider: Provider) -> Option<String> {
+    let db = Db::open_default().ok()?;
+    let bound = db.meta_get("provider").ok()??;
+    (bound != provider.as_str())
+        .then(|| Provider::parse(&bound).map_or(bound.clone(), |p| p.display_name().to_string()))
+}
+
+/// Writes the config for a provider other than Google Drive: its section (through the
+/// provider's own section struct) and its secrets, after checking the form's required fields.
+pub fn apply_provider_setup(p: &ProviderSetup) -> Result<Config> {
+    let path = config::config_path();
+    let mut cfg = Config::load_from(&path).unwrap_or_default();
+    let (id, name) = (p.provider.as_str(), p.provider.display_name());
+    let sync_dir = std::path::absolute(&p.sync_dir)?;
+    if let Ok(db_root) = Db::open_default().and_then(|db| db.meta_get("sync_root"))
+        && let Some(root) = db_root
+        && Path::new(&root) != sync_dir
+    {
+        bail!("CloudDrop already uses {root}; the folder can't be changed after setup");
+    }
+    let fields: &[crate::remote::Field] = match p.provider.info().sign_in {
+        SignIn::Form(fields) => fields,
+        _ => &[],
+    };
+    let field = |key: &str| fields.iter().find(|f| f.key == key);
+    switch_provider(&mut cfg, p.provider)?;
+    cfg.sync_dir = sync_dir;
+    cfg.drive_folder = p.drive_folder.trim().to_string();
+    for (key, value) in &p.settings {
+        if field(key).is_some_and(|f| f.kind == FieldKind::Secret) {
+            bail!("{key} is a secret: pass it with --secret {key}=…, so it stays out of config.toml");
+        }
+        let known = field(key).is_some() || key == "client_id";
+        cfg.set_provider_value(p.provider, key, value, known)?;
+    }
+    let mut secrets = crate::credentials::load(id)?.unwrap_or_default();
+    for (key, value) in &p.secrets {
+        secrets.insert(key.clone(), serde_json::Value::String(value.clone()));
+    }
+    let section = cfg.provider_section(p.provider);
+    let missing: Vec<String> = fields
+        .iter()
+        .filter(|f| f.required && f.kind != FieldKind::Number)
+        .filter(|f| {
+            let set = match f.kind {
+                FieldKind::Secret => secrets.get(f.key).and_then(|v| v.as_str()),
+                _ => section.get(f.key).and_then(|v| v.as_str()),
+            };
+            set.is_none_or(|v| v.trim().is_empty())
+        })
+        .map(|f| {
+            let flag = if f.kind == FieldKind::Secret { "--secret" } else { "--set" };
+            format!("{flag} {}=… ({})", f.key, f.label)
+        })
+        .collect();
+    if !missing.is_empty() {
+        bail!("{name} needs {}", missing.join(", "));
+    }
+    cfg.validate()?;
+    std::fs::create_dir_all(&cfg.sync_dir)
+        .with_context(|| format!("cannot create {}", cfg.sync_dir.display()))?;
+    cfg.save_to(&path)?;
+    if !p.secrets.is_empty() {
+        crate::credentials::save(id, secrets)?;
+    }
+    Ok(cfg)
+}
+
+/// Set up: the config loads, and Google Drive (whose client is in the config) has a client.
 pub fn is_configured() -> bool {
-    Config::load().is_ok_and(|c| !c.client_id.is_empty() && !c.client_secret.is_empty())
+    Config::load().is_ok_and(|c| {
+        c.provider != Provider::GoogleDrive || (!c.client_id.is_empty() && !c.client_secret.is_empty())
+    })
 }
 
 /// How to start the background service, for messages.
@@ -231,15 +337,103 @@ pub const START_HINT: &str = if cfg!(windows) {
     "systemctl --user start clouddrop"
 };
 
-pub fn is_signed_in() -> bool {
-    crate::auth::token_path().exists()
+/// The file holding a provider's sign-in in `data_dir`: Google's token.json, an OAuth
+/// provider's `token-<id>.json`, otherwise the credentials file. The engine watches it to
+/// resume once `clouddrop login` or `setup` writes it.
+pub fn sign_in_file(provider: Provider, data_dir: &Path) -> PathBuf {
+    match provider.info().sign_in {
+        SignIn::Google => data_dir.join("token.json"),
+        SignIn::OAuth(_) => crate::oauth::token_path_in(data_dir, provider.as_str()),
+        SignIn::NextcloudLoginFlow | SignIn::Form(_) => data_dir.join("credentials.json"),
+    }
 }
 
-pub fn sign_out() -> Result<()> {
-    match std::fs::remove_file(crate::auth::token_path()) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-        _ => Ok(()),
+/// The provider has what it needs to connect: a token for browser sign-ins, saved
+/// credentials for providers with secrets (forms without secret fields need none).
+pub fn signed_in(provider: Provider, data_dir: &Path) -> bool {
+    let has_credentials = || {
+        crate::credentials::load_from(&data_dir.join("credentials.json"), provider.as_str())
+            .ok()
+            .flatten()
+            .is_some()
+    };
+    match provider.info().sign_in {
+        SignIn::Google | SignIn::OAuth(_) => sign_in_file(provider, data_dir).exists(),
+        SignIn::NextcloudLoginFlow => has_credentials(),
+        SignIn::Form(fields) => !fields.iter().any(|f| f.kind == FieldKind::Secret) || has_credentials(),
     }
+}
+
+fn configured_provider() -> Provider {
+    Config::load().map(|c| c.provider).unwrap_or_default()
+}
+
+pub fn is_signed_in() -> bool {
+    signed_in(configured_provider(), &config::data_dir())
+}
+
+/// Forgets the configured provider's sign-in (its token, or its saved credentials).
+pub fn sign_out() -> Result<()> {
+    let provider = configured_provider();
+    match provider.info().sign_in {
+        SignIn::Google | SignIn::OAuth(_) => {
+            match std::fs::remove_file(sign_in_file(provider, &config::data_dir())) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(()),
+            }
+        }
+        SignIn::NextcloudLoginFlow | SignIn::Form(_) => crate::credentials::forget(provider.as_str()),
+    }
+}
+
+/// Ids shaped like each provider's, to ask a provider's `web_url` whether it links files or
+/// folders at all: opaque (Google Drive, MEGA) and OneDrive's "<drive id>!<n>".
+const SAMPLE_IDS: &[&str] = &["sample", "0123456789ABCDEF!101"];
+
+/// The provider has web pages for its files or folders ("Open in …" in the apps). The apps ask
+/// `web_url` with a real id where they have one.
+pub fn has_web_links(provider: Provider) -> bool {
+    [Kind::File, Kind::Dir]
+        .iter()
+        .any(|k| SAMPLE_IDS.iter().any(|id| provider.web_url(*k, id).is_some()))
+}
+
+/// Every provider for setup assistants (`clouddrop providers --json`): id, name, whether
+/// freeing space downloads files to verify them, whether files have web pages, and how to
+/// sign in (`google`, `oauth`, `nextcloud`, or a `form` with its fields).
+pub fn providers_json() -> serde_json::Value {
+    let field_kind = |k: FieldKind| match k {
+        FieldKind::Text => "text",
+        FieldKind::Url => "url",
+        FieldKind::Number => "number",
+        FieldKind::Secret => "secret",
+        FieldKind::File => "file",
+    };
+    Provider::ALL
+        .iter()
+        .map(|p| {
+            let info = p.info();
+            let sign_in = match &info.sign_in {
+                SignIn::Google => serde_json::json!({"kind": "google"}),
+                SignIn::OAuth(_) => serde_json::json!({"kind": "oauth"}),
+                SignIn::NextcloudLoginFlow => serde_json::json!({"kind": "nextcloud"}),
+                SignIn::Form(fields) => serde_json::json!({
+                    "kind": "form",
+                    "fields": fields.iter().map(|f| serde_json::json!({
+                        "key": f.key, "label": f.label, "kind": field_kind(f.kind),
+                        "required": f.required, "hint": f.hint,
+                    })).collect::<Vec<_>>(),
+                }),
+            };
+            serde_json::json!({
+                "id": info.id,
+                "name": info.name,
+                "verify_by_download": info.caps.hash.is_none(),
+                "web_links": has_web_links(*p),
+                "sign_in": sign_in,
+            })
+        })
+        .collect()
 }
 
 // ---------- background service (systemd on Linux, login item on Windows) ----------
@@ -666,6 +860,40 @@ mod tests {
         assert!(looks_like_client_id("12-ab.apps.googleusercontent.com"));
         assert!(!looks_like_client_id(".apps.googleusercontent.com"));
         assert!(!looks_like_client_id("not-a-client-id"));
+    }
+
+    #[test]
+    fn providers_listing_has_the_contract_shape() {
+        let all = providers_json();
+        let google = all.as_array().unwrap().iter().find(|p| p["id"] == "gdrive").unwrap();
+        assert_eq!(
+            *google,
+            serde_json::json!({"id": "gdrive", "name": "Google Drive", "verify_by_download": false,
+                               "web_links": true, "sign_in": {"kind": "google"}})
+        );
+        assert_eq!(all.as_array().unwrap().len(), Provider::ALL.len());
+    }
+
+    #[test]
+    fn web_links_by_id_shape_and_kind() {
+        assert!(has_web_links(Provider::GoogleDrive));
+        let onedrive = |_: Kind, id: &str| id.split_once('!').map(|(cid, _)| format!("https://onedrive.live.com/?cid={cid}"));
+        let folders_only = |k: Kind, id: &str| (k == Kind::Dir).then(|| format!("https://mega.nz/fm/{id}"));
+        let none = |_: Kind, _: &str| None::<String>;
+        let any = |f: &dyn Fn(Kind, &str) -> Option<String>| {
+            [Kind::File, Kind::Dir].iter().any(|k| SAMPLE_IDS.iter().any(|id| f(*k, id).is_some()))
+        };
+        assert!(any(&onedrive) && any(&folders_only) && !any(&none));
+    }
+
+    #[test]
+    fn sign_in_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Provider::GoogleDrive;
+        assert_eq!(sign_in_file(p, dir.path()), dir.path().join("token.json"));
+        assert!(!signed_in(p, dir.path()));
+        std::fs::write(dir.path().join("token.json"), "{}").unwrap();
+        assert!(signed_in(p, dir.path()));
     }
 
     #[test]

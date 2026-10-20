@@ -1,5 +1,6 @@
 use crate::remote::Provider;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -239,6 +240,28 @@ impl Config {
         })
     }
 
+    /// The provider's `[<id>]` section as it is written to config.toml (empty when it has none).
+    pub fn provider_section(&self, provider: Provider) -> toml::Table {
+        toml::Table::try_from(self)
+            .ok()
+            .and_then(|mut t| t.remove(provider.as_str()))
+            .and_then(|v| match v {
+                toml::Value::Table(t) => Some(t),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// Sets `key` in the provider's `[<id>]` section (`clouddrop setup --set key=value`), through
+    /// the provider's own section struct so its types and checks apply. `known`: the key is one
+    /// of the provider's (a form field, or `client_id`), so it is accepted even when it equals
+    /// the default and isn't written.
+    pub fn set_provider_value(&mut self, provider: Provider, key: &str, value: &str, known: bool) -> Result<()> {
+        *self = set_in_section(&*self, provider.as_str(), key, value, known)
+            .with_context(|| format!("cannot set {key} for {}", provider.display_name()))?;
+        Ok(())
+    }
+
     /// Writes the config with owner-only permissions (it holds the OAuth client secret).
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
@@ -249,9 +272,89 @@ impl Config {
     }
 }
 
+/// `whole` with `[section] key = value`. The value is tried as text, then as what it reads as in
+/// TOML (a number, true/false) for fields of other types. Fails when neither fits, or when the
+/// section has no such setting (it would be silently dropped) unless the key is `known`.
+fn set_in_section<T: Serialize + DeserializeOwned>(
+    whole: &T,
+    section: &str,
+    key: &str,
+    value: &str,
+    known: bool,
+) -> Result<T> {
+    let table = toml::Table::try_from(whole)?;
+    let mut tries = vec![toml::Value::String(value.to_string())];
+    if let Ok(t) = toml::from_str::<toml::Table>(&format!("v = {value}"))
+        && let Some(v) = t.get("v").filter(|v| !v.is_str())
+    {
+        tries.push(v.clone());
+    }
+    let mut last_err = None;
+    for v in tries {
+        let mut t = table.clone();
+        let sec = t
+            .entry(section)
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let Some(sec) = sec.as_table_mut() else {
+            bail!("{section} is a setting, not a section");
+        };
+        sec.insert(key.to_string(), v);
+        match t.try_into::<T>() {
+            Ok(back) => {
+                let kept = toml::Table::try_from(&back)?
+                    .get(section)
+                    .and_then(|s| s.get(key))
+                    .is_some();
+                if !kept && !known {
+                    bail!("there is no setting {key:?} in [{section}]");
+                }
+                return Ok(back);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(anyhow!("invalid value {value:?}: {}", last_err.map(|e| e.to_string()).unwrap_or_default().trim()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sections_are_set_through_their_struct() {
+        #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
+        #[serde(default)]
+        struct Sftp {
+            host: String,
+            port: u16,
+            #[serde(skip_serializing_if = "String::is_empty")]
+            path: String,
+        }
+        #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
+        #[serde(default)]
+        struct Whole {
+            sync_dir: String,
+            sftp: Sftp,
+        }
+        let w = Whole::default();
+        let w = set_in_section(&w, "sftp", "host", "example.com", false).unwrap();
+        let w = set_in_section(&w, "sftp", "port", "2222", false).unwrap();
+        assert_eq!((w.sftp.host.as_str(), w.sftp.port), ("example.com", 2222));
+        let w = set_in_section(&w, "sftp", "host", "1234", false).unwrap();
+        assert_eq!(w.sftp.host, "1234", "text first, for text fields that look like numbers");
+        assert!(set_in_section(&w, "sftp", "port", "many", false).is_err());
+        assert!(set_in_section(&w, "sftp", "hots", "typo", false).is_err(), "unknown settings are refused");
+        assert!(set_in_section(&w, "sftp", "path", "", false).is_err(), "dropped as the default…");
+        assert!(set_in_section(&w, "sftp", "path", "", true).is_ok(), "…which is fine for a known key");
+        assert!(set_in_section(&w, "sync_dir", "x", "y", false).is_err());
+    }
+
+    #[test]
+    fn google_drive_has_no_section() {
+        let mut c = Config::default();
+        assert!(c.provider_section(Provider::GoogleDrive).is_empty());
+        assert!(c.set_provider_value(Provider::GoogleDrive, "url", "x", false).is_err());
+    }
 
     #[test]
     fn set_key_validates_and_maps() {
