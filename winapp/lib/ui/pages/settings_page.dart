@@ -88,8 +88,10 @@ class _SettingsPageState extends State<SettingsPage> {
               _autoFree(context, app, cfg),
               const SizedBox(height: 4),
               _keepFolders(context, app, cfg),
-              const SectionTitle('Google account'),
+              SectionTitle(app.provider.isGoogle ? 'Google account' : 'Account'),
               _account(context, app),
+              const SizedBox(height: 4),
+              _switchProvider(context, app),
               const SectionTitle('Folders'),
               _SettingCard(
                 icon: FluentIcons.pc1,
@@ -105,16 +107,19 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
               const SizedBox(height: 4),
               _SettingCard(
-                icon: FluentIcons.cloud,
-                title: 'In Google Drive',
-                subtitle: 'My Drive → ${cfg.driveFolder}',
-                trailing: Tooltip(
-                  message: 'Open in Google Drive',
-                  child: IconButton(
-                    icon: const Icon(FluentIcons.open_in_new_window, size: 14),
-                    onPressed: app.openRootInDrive,
-                  ),
-                ),
+                icon: providerIcon(app.provider.id),
+                title: 'In ${app.provider.name}',
+                subtitle: '${app.provider.rootLabel} → ${cfg.driveFolder}',
+                // Providers without web pages (WebDAV, S3, SFTP) have nothing to open.
+                trailing: app.provider.webLinks
+                    ? Tooltip(
+                        message: 'Open in ${app.provider.name}',
+                        child: IconButton(
+                          icon: const Icon(FluentIcons.open_in_new_window, size: 14),
+                          onPressed: app.openRootInDrive,
+                        ),
+                      )
+                    : null,
               ),
               const SectionTitle('Uploading'),
               _uploading(context, app, cfg),
@@ -139,7 +144,8 @@ class _SettingsPageState extends State<SettingsPage> {
       title: 'Free up space automatically',
       stack: true,
       subtitle:
-          'Local copies are removed only after CloudDrop checks Google Drive has an identical copy',
+          'Local copies are removed only after CloudDrop checks ${app.provider.name} has an '
+          'identical copy${app.provider.verifyByDownload ? ', by downloading it once' : ''}',
       trailing: SizedBox(
         width: 190,
         child: ComboBox<int>(
@@ -275,10 +281,11 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _account(BuildContext context, AppController app) {
     final signedIn = app.snapshot.signedIn;
     final theme = FluentTheme.of(context);
+    final p = app.provider;
     return _SettingCard(
-      icon: FluentIcons.contact,
-      title: 'Google Drive',
-      subtitle: signedIn ? 'Signed in' : 'Not signed in',
+      icon: p.isGoogle ? FluentIcons.contact : providerIcon(p.id),
+      title: p.name,
+      subtitle: signedIn ? (app.engineStatus?.account ?? 'Signed in') : 'Not signed in',
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -302,7 +309,26 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _signOut(BuildContext context, AppController app) async {
-    if (await confirmSignOut(context)) await app.signOut();
+    if (await confirmSignOut(context, cloud: app.provider.name)) await app.signOut();
+  }
+
+  Widget _switchProvider(BuildContext context, AppController app) {
+    final cloud = app.provider.name;
+    return _SettingCard(
+      icon: FluentIcons.switch_widget,
+      title: 'Upload somewhere else',
+      subtitle:
+          'Switch to another cloud. Everything is uploaded again; nothing is deleted '
+          'from $cloud.',
+      trailing: Button(
+        onPressed: () async {
+          if (await confirmSwitchProvider(context, cloud: cloud)) {
+            app.beginSetup(switching: true);
+          }
+        },
+        child: const Text('Switch Provider…'),
+      ),
+    );
   }
 
   // ---------- uploading ----------

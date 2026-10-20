@@ -337,12 +337,15 @@ class FilesController extends ChangeNotifier {
       return s;
     }
     final st = stats;
+    final cloud = app.provider.name;
+    var s = '';
     if (st != null && st.files > 0) {
-      var s = '${fmt.files(st.files)} · ${fmt.humanBytes(st.bytes < 0 ? 0 : st.bytes)}';
-      if (st.cloudOnly > 0) s += ' · ${fmt.groupDigits(st.cloudOnly)} only in Google Drive';
-      return s;
+      s = '${fmt.files(st.files)} · ${fmt.humanBytes(st.bytes < 0 ? 0 : st.bytes)}';
+      if (st.cloudOnly > 0) s += ' · ${fmt.groupDigits(st.cloudOnly)} only in $cloud';
     }
-    return '';
+    // Providers without a content hash download cloud copies once to prove them.
+    if (app.snapshot.verifying) s = s.isEmpty ? 'Verifying…' : '$s · Verifying…';
+    return s;
   }
 
   /// Icon-less title/description for the empty list.
@@ -355,13 +358,13 @@ class FilesController extends ChangeNotifier {
       );
     }
     if (_filter != Filter.all) {
-      final (t, d) = emptyText(_filter);
+      final (t, d) = emptyText(_filter, cloud: app.provider.name);
       return (title: t, text: d, canAdd: false);
     }
     if (_dir.isEmpty) {
       return (
         title: 'CloudDrop Is Empty',
-        text: 'Drop files here or click Add Files to start uploading to Google Drive.',
+        text: 'Drop files here or click Add Files to start uploading to ${app.provider.name}.',
         canAdd: true,
       );
     }
@@ -430,7 +433,7 @@ class FilesController extends ChangeNotifier {
       app.openLocal(it.path);
     } else {
       final path = it.path;
-      app.sayWithAction('“${it.name}” is only in Google Drive', 'Download', () {
+      app.sayWithAction('“${it.name}” is only in ${app.provider.name}', 'Download', () {
         app.restore([path], '“${it.name}”').then((_) => reload());
       });
     }

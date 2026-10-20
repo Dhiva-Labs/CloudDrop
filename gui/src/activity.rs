@@ -73,6 +73,11 @@ pub struct Described {
 }
 
 pub fn describe(a: &Activity) -> Described {
+    describe_in(a, "Google Drive")
+}
+
+/// [`describe`], naming where CloudDrop uploads (`cloud`).
+pub fn describe_in(a: &Activity, cloud: &str) -> Described {
     let name = util::name_of(&a.path);
     let mk = |icon, tone, title: String, detail| Described { icon, tone, title, detail };
     match a.kind {
@@ -88,7 +93,7 @@ pub fn describe(a: &Activity) -> Described {
         ActivityKind::KeptInCloud => mk(
             "weather-overcast-symbolic",
             "info",
-            format!("Kept {name} in Google Drive"),
+            format!("Kept {name} in {cloud}"),
             Some("Removed from this computer".into()),
         ),
         ActivityKind::Freed => mk(FREED_ICON, "info", format!("Freed up {name}"), None),
@@ -120,7 +125,7 @@ pub fn subtitle(a: &Activity, time: Civil) -> String {
 
 /// One row of the list: icon, what happened, where and when. Opens the file in Files.
 pub fn activity_row(ops: &Rc<Ops>, a: &Activity) -> adw::ActionRow {
-    let d = describe(a);
+    let d = describe_in(a, &ops.provider().name);
     let row = adw::ActionRow::builder()
         .title(&d.title)
         .subtitle(subtitle(a, fmt::civil_from_ms(a.at_ms)))

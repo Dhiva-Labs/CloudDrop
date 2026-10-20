@@ -1,7 +1,8 @@
-//! Things every tab can do: run Drive actions, copy files in, edit the config, show toasts,
+//! Things every tab can do: run cloud actions, copy files in, edit the config, show toasts,
 //! jump to another tab.
 
 use crate::model::Filter;
+use crate::providers::Choice;
 use crate::snapshot::Snapshot;
 use crate::window::Hooks;
 use crate::{fsops, rt, ui};
@@ -31,6 +32,7 @@ pub struct Ops {
     toasts: adw::ToastOverlay,
     hooks: Rc<Hooks>,
     cfg: RefCell<Option<Config>>,
+    provider: RefCell<Choice>,
     paused: Cell<bool>,
     busy: Cell<u32>,
     nav: RefCell<Option<NavHandler>>,
@@ -45,6 +47,7 @@ impl Ops {
             toasts: toasts.clone(),
             hooks,
             cfg: RefCell::default(),
+            provider: RefCell::new(Choice::current(None)),
             paused: Cell::new(false),
             busy: Cell::new(0),
             nav: RefCell::default(),
@@ -66,7 +69,13 @@ impl Ops {
 
     pub fn set_snapshot(&self, s: &Snapshot) {
         *self.cfg.borrow_mut() = s.cfg.clone();
+        *self.provider.borrow_mut() = s.provider.clone();
         self.paused.set(s.paused);
+    }
+
+    /// The cloud CloudDrop uploads to, for names and "Open in …".
+    pub fn provider(&self) -> Choice {
+        self.provider.borrow().clone()
     }
 
     pub fn cfg(&self) -> Option<Config> {
@@ -81,7 +90,7 @@ impl Ops {
         self.paused.get()
     }
 
-    /// A Drive action (free up space, download) is running.
+    /// A cloud action (free up space, download) is running.
     pub fn busy(&self) -> bool {
         self.busy.get() > 0
     }
@@ -197,7 +206,7 @@ impl Ops {
         );
     }
 
-    // ---------- Drive actions ----------
+    // ---------- cloud actions ----------
 
     /// Removes verified local copies under each path.
     pub fn free(self: &Rc<Self>, rels: Vec<String>, done: impl FnOnce() + 'static) {

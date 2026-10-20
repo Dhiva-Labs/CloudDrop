@@ -1,8 +1,9 @@
 # Plan: more clouds than Google Drive
 
-Status: **phase 0 is done** (the provider seam, below); everything after it is still a plan.
-Target: OneDrive, Dropbox, MEGA, Proton Drive, and self-hosted storage (Nextcloud/ownCloud and
-other WebDAV servers, S3-compatible buckets, SFTP).
+Status: **OneDrive, Dropbox, WebDAV, Nextcloud, S3-compatible storage, SFTP and MEGA are built**
+and tested against fake servers (SFTP against a real OpenSSH); none has been tried with a real
+account yet. Proton Drive waits for Proton's SDK, and several clouds at once (phase 5) isn't
+started. See [The providers](#the-providers) and [Phases](#phases).
 
 ## What must not change
 
@@ -24,11 +25,11 @@ Least privilege wherever the provider allows it: today CloudDrop only sees the f
 | **Google Drive** (today) | OAuth, browser | `drive.file` | resumable session | `md5Checksum` | `keepForever` | `about.get` | — |
 | **OneDrive** (personal + work) | OAuth + PKCE, browser, no client secret | `Files.ReadWrite.AppFolder` → `Apps/CloudDrop` | upload session, `nextExpectedRanges` | `quickXorHash` | versions are automatic, cannot be pinned → keep-aside copy | `/me/drive` quota | M |
 | **Dropbox** | OAuth + PKCE, browser, offline refresh token | "App folder" app → `Apps/CloudDrop` | upload session (start / append / finish), resume by offset | `content_hash` (SHA-256 of 4 MiB block hashes) | history is 30–180 days, cannot be pinned → keep-aside copy | `get_space_usage` | M |
-| **Nextcloud / ownCloud** | Login Flow v2 (browser hands back an app password) | the user's own account, one folder | chunked upload v2 | `oc:checksums` (SHA1 / MD5) | versions app; keep-aside copy | `quota-*-bytes` | M |
+| **Nextcloud / ownCloud** | Login Flow v2 (browser hands back an app password) | the user's own account, one folder | chunked upload v2 | verify by download (`oc:checksums` SHA1 as an extra check) | versions app; keep-aside copy | `quota-*-bytes` | M |
 | **Other WebDAV** | URL, user, app password | one folder | none: a failed upload starts over | none → verify by download | keep-aside copy (`COPY`) | `quota-*-bytes` if offered | S (after Nextcloud) |
 | **S3-compatible** (AWS, Backblaze B2, Wasabi, R2, MinIO, Garage) | endpoint, bucket, access key | a key scoped to one bucket + prefix | multipart, resume via `ListParts` | `x-amz-checksum-sha256` where supported, else single-part ETag (MD5), else verify by download | bucket versioning, else keep-aside copy | none ("CloudDrop holds …") | M |
 | **SFTP** | host-key check (shown, trust on first use), SSH key or agent | one directory | write at offset | none → `sha256sum` over SSH if allowed, else verify by download | keep-aside copy | `statvfs@openssh.com` | M |
-| **MEGA** | email + password (+2FA) → session | whole account (no app folder), one folder used | via SDK | none server-side (end-to-end encrypted) → verify by download | MEGA versioning; keep-aside copy | account quota | L |
+| **MEGA** (built, see [MEGA](#mega)) | email + password (+2FA) → session | whole account (no app folder), one folder used | upload URL + local record of confirmed chunks | none server-side (end-to-end encrypted) → verify by download (plus MEGA's MAC) | keep-aside copy (server-side); MEGA versioning too | account quota | L |
 | **Proton Drive** | Proton login (SRP, 2FA, maybe a second password) → session | whole account, one folder used | via SDK (encrypted blocks) | via SDK (signed manifests; plaintext digest in encrypted attributes) or verify by download | revisions; keep-aside copy | account quota | XL, blocked (below) |
 
 S/M/L/XL are relative sizes once the provider seam (phase 0) exists.
@@ -60,11 +61,8 @@ change it to "trust a completed upload" (size check only), with a clear warning.
   setup.
 - **SFTP.** Upload to `.clouddrop-<id>.part` and rename into place, so a half-written file never
   looks complete. Pin the host key in the config.
-- **MEGA.** The official C++ SDK is BSD-2 licensed and does the crypto, transfers and resume,
-  but it is a large C++ build (SWIG bindings, its own dependencies) that has to be vendored for
-  the offline PPA build and cross-built for Windows. The other option is a native Rust client of
-  MEGA's protocol (community crates exist, maturity varies). **Decide with a one-week spike**:
-  resume after a crash, 10 GB files, 2FA, session reuse.
+- **MEGA.** Decided by the spike: a native Rust client of MEGA's API, not the C++ SDK. See
+  [MEGA](#mega) below.
 - **Proton Drive.** Proton's SDK (JavaScript and C#, with Swift and Kotlin bindings) is **not
   yet supported for third-party integrations**. Authentication isn't in it yet, and general
   availability with a new cryptographic model is targeted for end 2026 / early 2027. Proton has
@@ -73,6 +71,373 @@ change it to "trust a completed upload" (size check only), with a clear warning.
   and ship Proton as "experimental" once the official SDK supports third-party sign-in**,
   through a small sidecar process if no C ABI is offered. Follow Proton's naming and branding
   rules for third-party apps. Never store the Proton password, only the session.
+
+## The providers
+
+What each client does, how it was tested, and what a release still needs. All of them are
+tested against fake servers (and SFTP against a real OpenSSH), not yet against real accounts.
+
+### OneDrive
+
+**Built**: `src/onedrive.rs` (Microsoft Graph v1.0, personal and work or school accounts), a fake
+Graph in `tests/common/onedrive_mock.rs`, and the client's tests against it in `tests/onedrive.rs`.
+`remote_for` gives it the browser sign-in's tokens (`token-onedrive.json`, from `clouddrop login`);
+without a client id in the build or the config, every call asks to sign in.
+
+- **Sign-in**: `Files.ReadWrite.AppFolder` + `offline_access` on the `common` endpoints.
+  `[onedrive] client_id` (empty = the build's) and `tenant` (`common` by default; `consumers`,
+  `organizations` or one organisation's tenant), whose endpoints `onedrive::oauth_endpoints` gives.
+- **Folders**: `top_parent` is the app folder (`special/approot`, Apps/CloudDrop). Lookups go by
+  path (`items/{parent}:/{name}`), so `find_child` returns at most one item. A recycled item
+  answers 404, so `get` reports NotFound, never `trashed`.
+- **Uploads**: `createUploadSession` (`replace` for an existing file, after a PATCH that names and
+  places it; `fail` for a new one; `fileSize` so a file that won't fit is refused before any of
+  it is sent). The session is JSON with the upload URL and the target. Fragments go to the
+  upload URL without the token, at most 191 × 320 KiB (Graph wants less than 60 MiB). An
+  expired or finished session is NotFound; 416 asks where to go on from. Empty files skip the
+  session (one `PUT …/content`). An item without `quickXorHash` is fetched once more.
+- **Keep version**: a server-side copy `<stem> (replaced YYYY-MM-DD).<ext>` (UTC date, ` (2)` and
+  up when taken). The monitor URL is polled without the token until `completed`.
+- **Downloads** go through `/content`, which redirects to a pre-authenticated URL that is
+  followed without the token, keeping the `Range`.
+- **Errors**: 401 refreshes once, then Auth; 429/503 are RateLimited (`Retry-After`); 507 or
+  `quotaLimitReached` (also as an inner code) is Quota; 423 and 5xx are Transient.
+- **Web links**: personal accounts only, built from the cid that starts their ids
+  (`https://onedrive.live.com/?cid=…&id=…`). Work and school ids don't name the SharePoint site,
+  so they get none. Check the links in the live smoke test.
+
+**A release needs**:
+
+- An app registration in Microsoft Entra ID for "personal Microsoft accounts and accounts in any
+  organizational directory", as a **public client** (no secret, "Allow public client flows"),
+  platform "Mobile and desktop applications" with the **loopback redirect** `http://localhost`
+  (Entra ignores the port for loopback; register the host name the sign-in actually uses), and
+  delegated Graph permissions `Files.ReadWrite.AppFolder` and `offline_access`. Its client id
+  goes into the build.
+- **Publisher verification** (a verified Microsoft partner account on the registration), so work
+  and school accounts see a verified publisher and can consent where their organisation only
+  allows verified apps. Some organisations still need an admin to consent.
+- A live smoke test with a personal and a work account: the app folder's name in other
+  languages, hashes right after upload on work accounts, the copy monitor, web links.
+
+### Dropbox
+
+**Built** (phase 1), tested against the mock only; no real account has been used yet.
+
+- **`src/dropbox.rs`** is an API v2 client for an *App folder* app. The app folder is
+  `top_parent` (id `"root"`), and every other id is Dropbox's `id:…`, which survives renames and
+  moves. Calls that only take paths (making a folder, where a move or copy goes, where a new file
+  goes) look the parent's path up first. `get` makes a second call to find the parent's id.
+- **Uploads** use `upload_session/start`, `append_v2` and `finish`, with the last chunk sent in
+  `finish`. The session string is JSON (`session_id`, parent, name, and for a replacement the
+  file's id and `rev`). `query_upload` sends an empty append at offset 0, and Dropbox's
+  `incorrect_offset` gives the real one. A forgotten session, or one this client can't read, is
+  NotFound.
+- **Nothing in the cloud is overwritten blindly.** A replacement commits `update` with the `rev`
+  seen when the upload started (after moving the file to its new name and place). If someone
+  changed the file meanwhile, Dropbox keeps both and names the new one "name (1)". New files
+  commit `add` with autorename, so a different file with that name stays as it is. The same
+  content at the same name is no conflict, so a lost reply to `finish` doesn't duplicate the file.
+- **`keep_version`** copies the file to `<stem> (replaced YYYY-MM-DD).<ext>` (UTC date) with
+  `copy_v2`; a second copy on the same day becomes `… (1)`. **Moves** use `move_v2` with
+  autorename. Case-only renames go through a temporary name, because `move_v2` can't do them.
+- **`find_child`** asks `get_metadata` for the composed path, so matches ignore case and the
+  result carries Dropbox's own spelling. A deleted item is NotFound (no trash flag).
+- **Errors:** 401 → refresh once, then `Auth`; 429 (and 503 with `Retry-After`) → `RateLimited`;
+  `insufficient_space` / `insufficient_quota` → `Quota`; any `…/not_found` → `NotFound`;
+  `too_many_write_operations` → `RateLimited`; 5xx → `Transient`. A 404 means a wrong URL, not a
+  missing file, so it is `Permanent`.
+- **Other details:** `Dropbox-API-Arg` headers escape everything non-ASCII as `\uXXXX`.
+  `forbidden_chars` is `\` and DEL. Names Dropbox refuses for other reasons (`disallowed_name`,
+  trailing spaces) become a `Permanent` error. There are no web links (Dropbox's pages go by
+  path), and quota comes from `users/get_space_usage`.
+- **Config:** `[dropbox] app_key` (`client_id` is read too), plus `api_base` / `content_base`,
+  which only tests change.
+- **`tests/common/dropbox_mock.rs`** fakes both hosts: the API host (RPC calls, `oauth2/token`,
+  `oauth2/authorize`) and the content host (uploads, downloads). It supports injected faults
+  (`Status`, `RateLimited`, `LostReply`), expiring tokens and sessions, deletes on "dropbox.com"
+  and a storage limit. It uses nothing from CloudDrop, so `src/dropbox.rs` includes it for its
+  unit tests with `#[path]`.
+- **Wiring:** `remote_for` gives it the browser sign-in's tokens (`token-dropbox.json`); without
+  an app key, every call asks to sign in. The engine hashes in `DropboxContent` and rounds upload
+  chunks to 4 MiB.
+
+**What a release needs:**
+
+1. An app in the Dropbox App Console: *Scoped access*, *App folder* (named `CloudDrop`, so the
+   folder is `Apps/CloudDrop`), with the permissions `files.metadata.read`, `files.content.read`,
+   `files.content.write` and `account_info.read`. Allow public clients (PKCE), so the build ships
+   only the app key and no secret.
+2. The redirect URI `http://localhost:53691/`: Dropbox matches it exactly, port included, so the
+   sign-in always listens on that port (`dropbox::REDIRECT_PORT`).
+3. **Production approval.** A new app is in development status: it can link up to 500 accounts,
+   and once it reaches 50, it has two weeks to be approved for production or its linking freezes.
+   Dropbox reviews only after 50 users, and checks its branding guidelines (the app name must not
+   contain "Dropbox"). Plan a beta that gets there.
+4. A live run of the conformance suite with `CLOUDDROP_LIVE_DROPBOX` before release. It should
+   check the guesses the mock encodes: the error for committing to a deleted file's id, whether
+   `move_v2` changes `rev`, and that an identical `add` isn't a conflict.
+
+### WebDAV / Nextcloud
+
+One client (`src/webdav.rs`) for two providers, because Login Flow v2 exists only on Nextcloud
+and capabilities are static:
+
+| | `webdav` ("WebDAV") | `nextcloud` ("Nextcloud") |
+| --- | --- | --- |
+| Sign-in | `Form`: `url`, `user`, `password` (secret), `folder` | `NextcloudLoginFlow` |
+| Config / credentials | `[webdav]`, `credentials.json` › `webdav.password` | `[nextcloud]`, `credentials.json` › `nextcloud.password` |
+| `resumable` | false | true (chunks stay on the server) |
+
+Both: `hash: None`, `pin_versions: false`, `stable_ids: false`, `forbidden_chars: "\"`,
+`chunk_unit` 1 MiB, no web links. ownCloud and Nextcloud servers set up as `webdav` still get
+chunked uploads and checksums: the client looks at the server, whatever the provider.
+
+- **The server.** `status.php` says whether it's Nextcloud/ownCloud. If it is, files are at
+  `remote.php/dav/files/<user id>` (the id comes from the DAV principal and may differ from the
+  login name), and chunked uploads are on when OCS reports `dav.chunking`. Anything else is
+  plain WebDAV at `url`. `WebDav::probe()` does this and checks the password;
+  `clouddrop setup` and `check` should save its `ServerInfo` as the section's `server`, so later
+  starts skip it (without it, the client looks once per start).
+- **Ids** are paths below the files' top level: `/`, `/Backups/CloudDrop/a.txt`. A child's id
+  is its parent's id + `/` + name, so after a folder move the engine swaps the prefix
+  `old + "/"` for `new + "/"` beneath it. `top_parent` is `/<folder>`, made if missing.
+- **Uploads.** The whole file in one chunk: one PUT. More chunks on Nextcloud: chunked upload
+  v2 (MKCOL `uploads/<id>/<session>`, PUT `00001`…, MOVE `.file` with `Destination`,
+  `OC-Total-Length` and `OC-Checksum: SHA1:`). `query_upload` lists the chunks the server
+  holds, so another process continues there. Chunks under 5 MiB (Nextcloud on S3 needs that)
+  and other servers get one PUT with a known length whose body is fed chunk by chunk;
+  `query_upload` answers `Next(0)` for those.
+- **Proof.** Freeing verifies by download. `oc:checksums` is whatever the uploading client
+  said, so it's only an extra check: after an upload (with Nextcloud's own `X-Hash-SHA1` of the
+  bytes it received) and on downloads (`OC-Checksum` must match the content).
+- **Never overwriting.** `keep_version` COPYs to `<stem> (replaced YYYY-MM-DD).<ext>`. MOVE and
+  COPY send `Overwrite: F`; a file CloudDrop doesn't know that sits where an upload or a rename
+  has to go is first moved aside under that same name. A folder in the way is an error.
+- **Errors.** 401 `Auth`; 404 and 409 (missing parent) `NotFound`; 429, and 503 with
+  `Retry-After`, `RateLimited`; 507 `Quota`; 408, 423 and other 5xx `Transient`.
+- **`clouddrop login`** for `SignIn::NextcloudLoginFlow`: `webdav::nextcloud_login_start(url)`,
+  show `flow.login_url` (open the browser), then `webdav::nextcloud_login_poll(&flow)`, which
+  waits (every 2 s, up to 20 minutes) and returns the server, login name and app password.
+  `login.settings(&cfg.nextcloud)` is the new `[nextcloud]` section and
+  `credentials::save("nextcloud", login.secrets())` stores the password.
+- **Tests:** `tests/webdav.rs` against `tests/common/webdav_mock.rs`, in plain and Nextcloud
+  mode.
+
+### S3-compatible storage
+
+**Built**: `src/s3.rs` for Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, MinIO and Garage. It
+signs requests with AWS Signature Version 4 itself (no AWS SDK, no new crates). A fake S3 in
+`tests/common/s3_mock.rs` checks every signature with its own implementation. The client's tests
+run against it, and against AWS's published SigV4 examples, in `src/s3.rs`.
+
+- **Settings**: `[s3] endpoint` (empty = Amazon S3 in `region`), `region` (`us-east-1` when
+  empty, `auto` for R2), `bucket`, `prefix` (the folder in the bucket that holds `CloudDrop/`),
+  `access_key_id`, and `addressing`: `path`, `virtual`, or empty, which means virtual-hosted for
+  Amazon S3 and path-style elsewhere. The secret key is `secret_access_key` in the credentials store.
+- **Ids** are keys relative to the prefix: `CloudDrop/sub/a.txt`. Folders end in `/` and have a
+  zero-byte marker object (`CloudDrop/sub/`), so empty folders exist. A prefix with objects under
+  it counts as a folder even without a marker. `top_parent` is `""`, and `stable_ids` is false.
+- **Uploads**: a file of one part (8 MiB) is one PUT with `Content-MD5` and
+  `x-amz-checksum-sha256`. Bigger files are multipart uploads. Parts are 8 MiB, or a multiple of
+  8 MiB for files that would need more than 10,000 parts; chunks smaller than a part are held in
+  memory until a part is full. `ListParts` says where to continue after a crash. The session is
+  JSON: key, upload id, part size, and a nonce that is also written to the object, so a session
+  that completed just before a crash still answers Done. Starting an upload aborts earlier
+  unfinished uploads of the same key, since their parts cost storage.
+- **Proof before freeing** is SHA-256. A file sent in one PUT gets it from the service
+  (`x-amz-checksum-sha256`, read with `x-amz-checksum-mode: ENABLED`). Where the service doesn't
+  keep checksums, or refuses the header (asked once), the proof is the SHA-256 recorded in the
+  object's metadata at upload. It counts only when the MD5 recorded with it equals the object's
+  ETag, which the service computes, so it is the same proof as Drive's `md5Checksum`. A multipart
+  object only has a checksum of its parts' checksums, and objects under SSE-KMS or SSE-C have
+  ETags that aren't MD5s. For those, `get` reports no hash, so **the engine verifies them by
+  download, per object**, even though `caps.hash` is SHA-256.
+- **Renames and moves** are the one place CloudDrop deletes. Every object under the old key or
+  prefix is copied (CopyObject, or UploadPartCopy part by part above 5 GiB), and each copy's
+  SHA-256 or ETag and size are checked against the original. The old keys are then deleted only
+  when GetBucketVersioning says `Enabled` (asked at most once an hour): the delete just hides them,
+  and the content stays as noncurrent versions. With no versioning, `Suspended`, a service without
+  the call, or a key that may not delete, the old keys stay where they were and the log says
+  "kept …". Different content already at the destination (left behind by such a rename) is kept
+  aside first. An upload that also renames a file treats its old key the same way.
+- **Keep version** always makes a copy, `<stem> (replaced YYYY-MM-DD).<ext>` (UTC date, ` 2` and
+  up when that name is taken), versioned bucket or not, because lifecycle rules can expire
+  noncurrent versions.
+- **Quota**: S3 has none. `storage_quota` reports (no limit, bytes under the prefix, the same),
+  added up from listings at most once an hour. Above 20,000 objects it reports (None, 0, 0)
+  instead and checks again a day later, since every 1,000 objects listed is a paid request.
+  Noncurrent versions and unfinished uploads aren't counted.
+- **Errors**: `SignatureDoesNotMatch`, `InvalidAccessKeyId` and `ExpiredToken` are Auth (a HEAD's
+  403 has no body, so a listing explains it). `SlowDown`, 429 and 503 are RateLimited
+  (`Retry-After` when sent). `NoSuchKey`, `NoSuchUpload` and 404 are NotFound. A full bucket (507,
+  `XMinioStorageFull`, `QuotaExceeded`, B2's "storage cap exceeded") is Quota. 5xx, and errors
+  inside a 200 (CopyObject, CompleteMultipartUpload), are Transient. `NoSuchBucket`, a wrong
+  region and a wrong clock are Permanent, each with a sentence.
+- **Web links**: none.
+
+**Bucket permissions**: CloudDrop needs these, on one bucket and prefix (AWS IAM shown; other
+services have equivalents, e.g. B2's `listFiles`, `readFiles`, `writeFiles`, `deleteFiles`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": ["s3:ListBucket", "s3:ListBucketMultipartUploads"],
+     "Resource": "arn:aws:s3:::my-bucket", "Condition": {"StringLike": {"s3:prefix": ["laptop/*"]}}},
+    {"Effect": "Allow", "Action": "s3:GetBucketVersioning", "Resource": "arn:aws:s3:::my-bucket"},
+    {"Effect": "Allow",
+     "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts"],
+     "Resource": "arn:aws:s3:::my-bucket/laptop/*"}
+  ]
+}
+```
+
+`s3:DeleteObject` is only used for renames in a versioned bucket. Leave it out and renames keep
+the old keys there too. `s3:GetBucketVersioning` can't take the prefix condition, so it gets a
+statement of its own. A lifecycle rule that aborts incomplete multipart uploads after a week
+cleans up after uploads that were never finished. R2 and Garage don't have bucket versioning, so
+renames there always keep the old keys.
+
+**Left for the live tests** (MinIO in CI, phase 2): checksum support on each service, B2's
+versioning answer, and virtual-hosted addressing.
+
+### SFTP
+
+- **Client**: pure Rust (`russh` on the `aws-lc-rs` backend reqwest already builds, plus
+  `russh-sftp`); one SSH connection per client, reconnected on the next call after a drop.
+- **Config** `[sftp] host port user path key_file host_key`; the password and key passphrase are
+  in `credentials.json` ("sftp"). With neither a key nor a password it signs in with ssh-agent.
+- **Host key**: `host_key` is a `SHA256:…` fingerprint (`sftp::fetch_host_key` shows it). Empty:
+  the first key seen is trusted and written into config.toml. A different key is refused
+  (Permanent).
+- **Ids** are paths relative to `path` (`""` = `path` itself), so `stable_ids: false`.
+- **Uploads** write `.clouddrop-<random>.part` beside the target at the given offsets, and are
+  renamed into place (`posix-rename@openssh.com`, else a temporary name). `query_upload`
+  resumes 2 MiB (the most data in flight) before the partial file's end, at a 1 MiB boundary,
+  since writes in flight at a cut may leave holes.
+- **Never overwrites what it didn't upload**: a taken name (upload, rename, new folder) first
+  moves aside as `<stem> (replaced YYYY-MM-DD).<ext>`.
+- **keep_version** copies on the server with OpenSSH's `copy-data` extension (9.0+), else reads
+  and writes the file through the client. No shell or exec channel is used.
+- **Quota** from `statvfs@openssh.com`, else `(None, 0, 0)`. A write "Failure" with under 4 MiB
+  free is `Quota`.
+- **Tests** (`tests/sftp.rs`) run against a real `sshd` started as the current user, and skip
+  with a note where there is none (`CLOUDDROP_REQUIRE_SSHD=1` makes that a failure).
+
+### MEGA
+
+Status: **built** (`src/mega.rs`), tested against a fake MEGA, **not yet tried against a real
+account** (none was created for this). Needs the engine's verify-by-download for freeing space.
+
+#### Decision: a native client of MEGA's API
+
+MEGA encrypts everything on the client, so CloudDrop has to do MEGA's cryptography itself. The
+spike compared:
+
+| | Sign-in, 2FA, session reuse | Resume after a crash | Ranges (placeholders) | Copy (keep_version) | Build |
+| --- | --- | --- | --- | --- | --- |
+| MEGA's C++ SDK (BSD-2) | yes | yes | yes | yes | large C++ build to vendor for the PPA and cross-build for Windows |
+| `mega` crate 0.8.0 (MIT/Apache, last release Oct 2024) | yes | no: one request per file | no: whole files | no | ~30 crates, several a second version of ours (reqwest 0.12, rand 0.8, sha2 0.10, base64 0.22, thiserror 1) |
+| **Native client (chosen)** | yes | yes | yes | yes | three pure-Rust crates: `aes`, `pbkdf2`, `num-bigint` |
+
+The native client is the dozen API commands CloudDrop needs (`us0`/`us` sign-in, `f` tree, `u`
+upload URL, `p` create nodes, `a` rename, `m` move, `g` download URL, `uq` quota). It follows
+MEGA's C++ SDK, which is BSD-2 and has unit-test vectors. MEGA's web client source is under a
+review-only licence, so it was not used. The new crates are the versions the SFTP session's
+`russh` already pulls (`aes` 0.9.3, `pbkdf2` 0.13 with `hmac` 0.13, `num-bigint` 0.5.1), and
+the PPA's `crates-*.tar.xz` needs regenerating (`packaging/vendor/make-crates.sh`).
+
+#### How it fits the contract
+
+- **Sign-in** is a form: e-mail (`[mega] email`), password and an optional 2FA code (both
+  secrets). The first connection, such as `clouddrop check`, signs in and **replaces them with the
+  session**: `sid`, the account's master key and user handle, in `credentials.json` (readable
+  only by you). The password is never kept. It is also dropped after a rejected sign-in, so a
+  wrong password or code means running setup again. The master key is what decrypts names and
+  file keys, so it is as sensitive as the session. Ending sessions on mega.nz ("log out of other
+  devices") revokes it; CloudDrop then asks for sign-in. MEGA sometimes asks for a proof of work
+  at sign-in (HTTP 402 with `X-Hashcash`), which the client does (a few seconds of SHA-256).
+- **Capabilities:** `hash: None`, because MEGA's fingerprint (a sparse CRC plus the mtime) is no
+  proof, so freeing space verifies by download, and the download also checks MEGA's own MAC.
+  `pin_versions: false`, `stable_ids: true` (node handles), `resumable: true`, case-sensitive,
+  no forbidden characters, `chunk_unit` 1 MiB.
+- **Ids:** handles survive renames and moves. **Replacing content makes a new node** with a new
+  handle (MEGA has no in-place update); `Done(meta)` carries it.
+- **keep_version** makes a server-side copy, `<stem> (replaced YYYY-MM-DD).<ext>` (UTC date),
+  with the same key, so nothing is uploaded again. A copy already there for that key is not made
+  twice.
+- **MEGA's own versioning:** the replacing upload names the old file as its previous version
+  (`ov`). With versioning on (MEGA's default), the old content also stays in the file's version
+  history, which counts towards storage. With it off, MEGA drops the old content on replace. The
+  keep-aside copy is what CloudDrop relies on, so the setting doesn't matter for its promises.
+- **Uploads:** `start_upload` gets an upload URL and picks the file's AES key and nonce. The
+  session string is JSON with the URL, key, nonce, size, target and name. Each `put_chunk`
+  encrypts (AES-CTR), computes MEGA's chunk MACs, and POSTs up to the last MEGA chunk boundary in
+  the data (128 KiB, 256 KiB … then every 1 MiB), returning `Next(boundary)`; the engine re-reads
+  the tail. The server doesn't say what it holds, so after each confirmed POST the client records
+  the offset and the MAC so far in `mega-uploads/<id>.json` in the data directory: that is what
+  `query_upload` answers after a crash. The last POST answers a completion token, then `p`
+  creates the node. A retry of that step first looks for a node with the file's key, so a lost
+  answer doesn't make a second file. Records of abandoned uploads are removed after 30 days. An
+  upload server that can't continue (`-4`) or an expired URL is `NotFound`, so the engine starts
+  over.
+- **Downloads:** `download` decrypts, checks the MAC (a mismatch is a Permanent error) and
+  returns the SHA-256. `download_range` decrypts CTR from the 16-byte block holding the start.
+  Download URLs are reused for 5 minutes.
+- **The tree:** `f` fetches the whole tree, cached for 30 seconds; the client's own changes update
+  the cache at once, and an unknown handle fetches again, at most every 5 seconds. So changes made
+  elsewhere, such as a file moved to the rubbish bin on the web, show up within 30 seconds.
+  Anything under the rubbish bin is `trashed`.
+- **Quota:** `uq` (limit, usage including versions, usage of the cloud drive).
+- **web_url:** `https://mega.nz/fm/<handle>` for folders. Files get none: MEGA's web app has no
+  address for a single file of your own, only share links.
+- **Errors:** `-15` ESID and `-26` (2FA) → Auth; `-3` EAGAIN (retried twice first), `-4`, `-6`,
+  `-19`, HTTP 429/509 → RateLimited; `-17`, `-24`, `-29` → Quota; `-9` ENOENT → NotFound; `-18`,
+  5xx, network → Transient; anything else → Permanent, with a short sentence.
+
+#### Not done yet
+
+- **A real account.** Everything was checked against the SDK's sources and a fake, not MEGA
+  itself. The likeliest to need a fix: the upload servers' answers (empty or `"0"`, text or
+  binary token), `ov` details, the hashcash header, and `f` for very large accounts.
+- **Incremental updates.** No `sc` action packets: the tree is fetched whole, which is heavy for
+  accounts with hundreds of thousands of items.
+- No fingerprint attribute (`c`) on uploads, so MEGA's apps can't deduplicate against them, and no
+  thumbnails. Uploads don't send the SDK's `d=` checksum; they rely on HTTPS.
+- Items the client can't decrypt (in folders shared with the account, or keyed with keys it
+  doesn't hold) are skipped. Accounts without an RSA key pair are refused with a message.
+- The master key is kept as is (file permissions only). The SDK can also wrap it with a key the
+  server holds; not done.
+- Chunks must be at least 1 MiB (anything smaller is a clear Permanent error, not a stall).
+
+#### How it was tested
+
+- **Cryptography** (`src/mega.rs` unit tests): AES-CTR and chunk MACs against the SDK's
+  `CtrCrypt_RegressionVectors`; the v2 PBKDF2 keys against OpenSSL (Node and Python); the v1 key
+  derivation, the MAC fold, attributes and hashcash nonces (on the SDK's test tokens) against
+  independent Python ports of the SDK's code. Those last ones are self-consistency only: MEGA
+  publishes no vectors for them. Also round trips, chunk boundaries, RSA (CRT) decryption and
+  error mapping.
+- **A fake MEGA** (`tests/common/mega_mock.rs`) does the server side with its own small crypto
+  (salted sign-in, RSA-wrapped session id, hashcash, 2FA), accepts only whole MEGA chunks, and
+  can decrypt what was uploaded and check its MAC independently. `tests/mega.rs` covers: sign-in
+  with a proof of work, keeping only the session, session reuse and ended sessions; wrong
+  password and 2FA codes; an upload resumed by a new process after a simulated crash (only the
+  rest is sent); whole and ranged downloads; empty files; keep_version, then replacing (old
+  content kept twice: copy and version); renames, moves, rubbish bin, missing parents; EAGAIN,
+  rate limits, full storage, an upload server giving up, chunks too small; and the engine
+  uploading a folder into the fake.
+- Not run here: real MEGA, clippy (CI runs it), the Windows build (no new C code; the crates are
+  pure Rust).
+
+### Proton Drive
+
+Not built. Proton's SDK doesn't support third-party apps or their sign-in yet (general
+availability is targeted for the end of 2026 or early 2027), and an unofficial client could
+break with Proton's coming change of cryptography or put people's accounts at risk. It gets its
+`Provider` variant when the official SDK lets third-party apps sign in.
 
 ## Engine changes (phase 0, no visible change)
 
@@ -262,24 +627,26 @@ The engine reads `Capabilities` and does the rest; providers don't touch `engine
 
 ## Phases
 
-| Phase | What | Done when |
-| --- | --- | --- |
-| 0 | `Remote` seam, `ContentHash`, DB v3, provider-neutral strings, `provider` in status. Google Drive only. | All current tests pass unchanged; Drive behaviour identical. |
-| 1 | **OneDrive** and **Dropbox**. Mock servers for both in `tests/common`, like the Drive one. Setup provider picker. | e2e suite green against all three mocks; live smoke test with real accounts. |
-| 2 | **Self-hosted**: Nextcloud (first-class), generic WebDAV, S3-compatible, SFTP. Verify-by-download and keep-aside copy land here. | e2e against real servers in CI containers: Nextcloud, MinIO, OpenSSH. |
-| 3 | **MEGA** (SDK or native, from the spike). | Resume, 2FA and verify-by-download tested; PPA and Windows builds reproducible. |
-| 4 | **Proton Drive**, experimental, when third-party sign-in exists in the official SDK. | Proton's third-party terms met; their review if they require one. |
-| 5 | **Several clouds at once**: one engine per connection (own folder, config section, `state-<id>.db`, `status-<id>.json`); the apps get a connection switcher. | Two providers syncing side by side. |
+| Phase | What | Done when | Status |
+| --- | --- | --- | --- |
+| 0 | `Remote` seam, `ContentHash`, DB v3, provider-neutral strings, `provider` in status. Google Drive only. | All current tests pass unchanged; Drive behaviour identical. | done |
+| 1 | **OneDrive** and **Dropbox**. Mock servers for both in `tests/common`, like the Drive one. Setup provider picker. | e2e suite green against all three mocks; live smoke test with real accounts. | built; live accounts still to try |
+| 2 | **Self-hosted**: Nextcloud (first-class), generic WebDAV, S3-compatible, SFTP. Verify-by-download and keep-aside copy land here. | e2e against real servers in CI containers: Nextcloud, MinIO, OpenSSH. | built; tested on fakes and a real OpenSSH, not yet in CI containers |
+| 3 | **MEGA** (SDK or native, from the spike). | Resume, 2FA and verify-by-download tested; PPA and Windows builds reproducible. | built (native client); live account still to try |
+| 4 | **Proton Drive**, experimental, when third-party sign-in exists in the official SDK. | Proton's third-party terms met; their review if they require one. | waiting for Proton's SDK |
+| 5 | **Several clouds at once**: one engine per connection (own folder, config section, `state-<id>.db`, `status-<id>.json`); the apps get a connection switcher. | Two providers syncing side by side. | not started |
 
 ## Testing
 
-- **One conformance suite for every `Remote`**: create, upload and resume after a cut, rename and
-  move, keep version, ranged download, hash agreement, 401 then refresh, 429/503 backoff, quota
-  full, folder deleted remotely. It runs against each mock, and against real backends when
-  `CLOUDDROP_LIVE_<PROVIDER>` credentials are set.
-- **The existing e2e tests (`tests/e2e.rs`) run once per provider.**
-- **Self-hosted backends run for real in CI** (Nextcloud, MinIO and OpenSSH containers), which is
-  cheap and catches more than a mock.
+- **Each client against its fake server**: `tests/onedrive.rs`, `tests/webdav.rs`, `tests/sftp.rs` (a
+  real local OpenSSH), `tests/mega.rs`, and the unit tests in `src/dropbox.rs` and `src/s3.rs`.
+- **The whole engine with every provider**: `tests/providers.rs` uploads a folder, renames it,
+  edits a file, frees space (proved by the provider's hash, or by downloading) and downloads a file
+  back, against each fake server.
+- **The engine's rules for other providers on the Drive mock**: `tests/e2e.rs` with
+  `Harness::with_caps` (verify by download, path ids, forbidden characters, case-only clashes).
+- **Still to do**: live smoke tests with real accounts (`CLOUDDROP_LIVE_<PROVIDER>`), and real
+  Nextcloud and MinIO servers in CI.
 
 ## Open questions
 

@@ -1,4 +1,4 @@
-use crate::remote::Provider;
+use crate::remote::{ContentHash, HashKind, Provider};
 use crate::util::{LocalMeta, now_ms};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -81,6 +81,9 @@ pub struct Entry {
     pub error: Option<String>,
     /// Unix ms when the current Drive content was uploaded (drives automatic freeing).
     pub uploaded_at: Option<i64>,
+    /// Which hash `md5` holds (the `hash_kind` column, where NULL means MD5). None when there is
+    /// no hash, or it is of a kind this version doesn't know (it then never matches).
+    pub hash_kind: Option<HashKind>,
 }
 
 impl Entry {
@@ -105,9 +108,21 @@ impl Entry {
             retry_at: None,
             error: None,
             uploaded_at: None,
+            hash_kind: None,
         };
         e.set_local(meta);
         e
+    }
+
+    /// The hash of the content last uploaded, with its kind.
+    pub fn content_hash(&self) -> Option<ContentHash> {
+        Some(ContentHash { kind: self.hash_kind?, value: self.md5.clone()? })
+    }
+
+    /// Records the hash of the content now in the cloud (None: there is none).
+    pub fn set_content_hash(&mut self, hash: Option<ContentHash>) {
+        self.hash_kind = hash.as_ref().map(|h| h.kind);
+        self.md5 = hash.map(|h| h.value);
     }
 
     pub fn local(&self) -> Option<LocalMeta> {
@@ -140,6 +155,8 @@ impl Entry {
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
         let kind: String = r.get("kind")?;
         let state: String = r.get("state")?;
+        let md5: Option<String> = r.get("md5")?;
+        let hash_kind: Option<String> = r.get("hash_kind")?;
         Ok(Entry {
             path: r.get("path")?,
             kind: if kind == "dir" { Kind::Dir } else { Kind::File },
@@ -147,7 +164,8 @@ impl Entry {
             drive_id: r.get("drive_id")?,
             cloud_name: r.get("cloud_name")?,
             cloud_parent: r.get("cloud_parent")?,
-            md5: r.get("md5")?,
+            hash_kind: md5.as_ref().and_then(|_| HashKind::from_db(hash_kind.as_deref())),
+            md5,
             cloud_size: r.get("cloud_size")?,
             local_size: r.get("local_size")?,
             local_mtime_ns: r.get("local_mtime_ns")?,
@@ -191,6 +209,7 @@ CREATE TABLE IF NOT EXISTS entries (
 CREATE INDEX IF NOT EXISTS entries_state ON entries(state);
 CREATE INDEX IF NOT EXISTS entries_inode ON entries(inode);
 CREATE INDEX IF NOT EXISTS entries_drive_id ON entries(drive_id);
+CREATE INDEX IF NOT EXISTS entries_cloud_parent ON entries(cloud_parent);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS activity (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,7 +250,7 @@ pub const SCHEMA_VERSION: &str = "3";
 
 const COLS: &str = "path, kind, state, drive_id, cloud_name, cloud_parent, md5, cloud_size, \
     local_size, local_mtime_ns, inode, upload_url, upload_md5, pin_prev, move_pending, attempts, \
-    retry_at, error, uploaded_at";
+    retry_at, error, uploaded_at, hash_kind";
 
 /// SQL condition selecting `prefix` and everything beneath it (params ?1 = prefix, ?2 = prefix/, ?3 = prefix0).
 const SUBTREE: &str = "(path = ?1 OR (path >= ?2 AND path < ?3))";
@@ -296,9 +315,10 @@ impl Db {
             None => self.meta_set("provider", provider.as_str()),
             Some(p) if p == provider.as_str() => Ok(()),
             Some(p) => bail!(
-                "the state database belongs to {p}, but the config says {}; \
-                 switch back or start with a fresh CLOUDDROP_DATA_DIR",
-                provider.as_str()
+                "the state database belongs to {p}, but the config says {}; switch back, or run \
+                 `clouddrop reset-cloud --yes` to upload everything to {} (nothing is deleted from {p})",
+                provider.as_str(),
+                provider.display_name()
             ),
         }
     }
@@ -436,6 +456,72 @@ impl Db {
         tx.commit()?;
         tracing::debug!("moved {n} entries {from} -> {to}");
         Ok(())
+    }
+
+    /// Records `e`, whose cloud id changed from `old_id` to its `drive_id` (a rename or move where
+    /// ids are paths), and moves every id beneath `old_id` along with it, in one transaction.
+    /// "Beneath" means starting with `old_id` and a '/' (S3 folder ids already end in one).
+    /// Upload sessions aimed beneath the old path (entries beneath it in the cloud, or locally
+    /// beneath `e`) are dropped, so they start again at the new one. Returns how many other
+    /// entries changed.
+    pub fn put_with_new_id(&self, e: &Entry, old_id: &str) -> Result<usize> {
+        let Some(new_id) = e.drive_id.as_deref() else {
+            bail!("{} has no cloud id", e.path);
+        };
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        put_with(&tx, e)?;
+        let (a, b, c) = subtree_params(&e.path);
+        let dir = |id: &str| if id.ends_with('/') { id.to_string() } else { format!("{id}/") };
+        let (old_dir, new_dir) = (dir(old_id), dir(new_id));
+        let old_end = format!("{}0", &old_dir[..old_dir.len() - 1]);
+        let n = tx.execute(
+            &format!(
+                "UPDATE entries SET \
+                   drive_id = CASE WHEN drive_id >= ?4 AND drive_id < ?5 \
+                                   THEN ?6 || substr(drive_id, ?7) ELSE drive_id END, \
+                   cloud_parent = CASE WHEN cloud_parent = ?8 THEN ?9 \
+                                       WHEN cloud_parent >= ?4 AND cloud_parent < ?5 \
+                                       THEN ?6 || substr(cloud_parent, ?7) ELSE cloud_parent END, \
+                   upload_url = NULL, upload_md5 = NULL, updated_at = ?10 \
+                 WHERE path <> ?1 AND ((drive_id >= ?4 AND drive_id < ?5) OR cloud_parent = ?8 \
+                   OR (cloud_parent >= ?4 AND cloud_parent < ?5) \
+                   OR (upload_url IS NOT NULL AND {SUBTREE}))"
+            ),
+            params![
+                a,
+                b,
+                c,
+                old_dir,
+                old_end,
+                new_dir,
+                old_dir.len() as i64 + 1,
+                old_id,
+                new_id,
+                now_ms()
+            ],
+        )?;
+        tx.commit()?;
+        tracing::debug!("{}: id {old_id} -> {new_id}, {n} entries beneath", e.path);
+        Ok(n)
+    }
+
+    /// (path, cloud name) of the entries placed directly inside the cloud folder `parent_id`.
+    pub fn cloud_names_in(&self, parent_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT path, cloud_name FROM entries WHERE cloud_parent = ?1 AND cloud_name IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([parent_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Something was uploaded: some entry has a cloud id.
+    pub fn has_cloud_ids(&self) -> Result<bool> {
+        Ok(self
+            .conn()
+            .prepare("SELECT 1 FROM entries WHERE drive_id IS NOT NULL LIMIT 1")?
+            .exists([])?)
     }
 
     pub fn counts(&self) -> Result<Vec<(String, String, i64)>> {
@@ -746,7 +832,7 @@ fn put_with(conn: &Connection, e: &Entry) -> Result<()> {
     conn.execute(
         &format!(
             "INSERT OR REPLACE INTO entries ({COLS}, updated_at) VALUES \
-             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)"
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"
         ),
         params![
             e.path,
@@ -768,6 +854,7 @@ fn put_with(conn: &Connection, e: &Entry) -> Result<()> {
             e.retry_at,
             e.error,
             e.uploaded_at,
+            e.md5.as_ref().and(e.hash_kind).and_then(HashKind::db_value),
             now_ms(),
         ],
     )?;
@@ -810,6 +897,77 @@ mod tests {
             all,
             ["docs2/c.txt", "papers/docs", "papers/docs/a.txt", "papers/docs/sub/b.txt"]
         );
+    }
+
+    #[test]
+    fn hash_kind_round_trips_and_null_is_md5() {
+        let (_d, db) = db();
+        let mut e = Entry::new("a", Kind::File, None);
+        e.set_content_hash(Some(ContentHash { kind: HashKind::Sha256, value: "ab".into() }));
+        db.put(&e).unwrap();
+        assert_eq!(db.get("a").unwrap().unwrap().content_hash(), e.content_hash());
+        e.set_content_hash(Some(ContentHash::md5("cd")));
+        db.put(&e).unwrap();
+        let raw: Option<String> = db
+            .conn()
+            .query_row("SELECT hash_kind FROM entries WHERE path = 'a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw, None, "MD5 is written as NULL, as older versions expect");
+        assert_eq!(db.get("a").unwrap().unwrap().content_hash(), Some(ContentHash::md5("cd")));
+        db.conn().execute("UPDATE entries SET hash_kind = 'blake9' WHERE path = 'a'", []).unwrap();
+        let unknown = db.get("a").unwrap().unwrap();
+        assert_eq!((unknown.md5.as_deref(), unknown.content_hash()), (Some("cd"), None));
+        e.set_content_hash(None);
+        db.put(&e).unwrap();
+        assert_eq!(db.get("a").unwrap().unwrap().hash_kind, None);
+    }
+
+    #[test]
+    fn new_id_moves_the_ids_beneath_it() {
+        let (_d, db) = db();
+        let put = |path: &str, kind: Kind, id: &str, parent: &str, session: Option<&str>| {
+            let mut e = Entry::new(path, kind, None);
+            e.drive_id = Some(id.into());
+            e.cloud_parent = Some(parent.into());
+            e.upload_url = session.map(str::to_string);
+            db.put(&e).unwrap();
+            e
+        };
+        let mut docs = put("docs", Kind::Dir, "C/docs", "C", None);
+        put("docs/a.txt", Kind::File, "C/docs/a.txt", "C/docs", Some("s1"));
+        put("docs/sub", Kind::Dir, "C/docs/sub", "C/docs", None);
+        put("docs/sub/b.txt", Kind::File, "C/docs/sub/b.txt", "C/docs/sub", None);
+        // Moved out locally, not yet in the cloud: still inside the old folder there.
+        put("elsewhere.txt", Kind::File, "C/docs/c.txt", "C/docs", None);
+        put("docs2/d.txt", Kind::File, "C/docs2/d.txt", "C/docs2", Some("s2"));
+        let mut fresh = Entry::new("docs/new.txt", Kind::File, None);
+        fresh.upload_url = Some("s3".into());
+        db.put(&fresh).unwrap();
+
+        docs.drive_id = Some("C/papers".into());
+        assert_eq!(db.put_with_new_id(&docs, "C/docs").unwrap(), 5);
+        let ids = |p: &str| {
+            let e = db.get(p).unwrap().unwrap();
+            (e.drive_id, e.cloud_parent, e.upload_url)
+        };
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(ids("docs"), (s("C/papers"), s("C"), None));
+        assert_eq!(ids("docs/a.txt"), (s("C/papers/a.txt"), s("C/papers"), None));
+        assert_eq!(ids("docs/sub/b.txt"), (s("C/papers/sub/b.txt"), s("C/papers/sub"), None));
+        assert_eq!(ids("elsewhere.txt"), (s("C/papers/c.txt"), s("C/papers"), None));
+        assert_eq!(ids("docs/new.txt"), (None, None, None), "its session aimed at the old folder");
+        assert_eq!(ids("docs2/d.txt"), (s("C/docs2/d.txt"), s("C/docs2"), s("s2")), "a sibling, not beneath");
+        assert_eq!(db.cloud_names_in("C/papers").unwrap().len(), 0, "no cloud names were set");
+        assert!(db.has_cloud_ids().unwrap());
+
+        // Folder ids that end in '/' (S3 prefixes).
+        let mut sub = put("s3", Kind::Dir, "CloudDrop/sub/", "CloudDrop/", None);
+        put("s3/a.txt", Kind::File, "CloudDrop/sub/a.txt", "CloudDrop/sub/", None);
+        put("s3/subway.txt", Kind::File, "CloudDrop/subway.txt", "CloudDrop/", None);
+        sub.drive_id = Some("CloudDrop/moved/".into());
+        assert_eq!(db.put_with_new_id(&sub, "CloudDrop/sub/").unwrap(), 1);
+        assert_eq!(ids("s3/a.txt"), (s("CloudDrop/moved/a.txt"), s("CloudDrop/moved/"), None));
+        assert_eq!(ids("s3/subway.txt").0, s("CloudDrop/subway.txt"));
     }
 
     #[test]

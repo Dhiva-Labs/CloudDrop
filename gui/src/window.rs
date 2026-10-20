@@ -15,7 +15,8 @@ use std::sync::Arc;
 /// What the window asks the application to do.
 pub struct Hooks {
     pub sign_in: Box<dyn Fn()>,
-    pub setup: Box<dyn Fn()>,
+    /// Opens the setup assistant: from the start, at its sign-in step, or to switch providers.
+    pub setup: Box<dyn Fn(crate::setup::Start)>,
     pub set_tray: Box<dyn Fn(bool)>,
     pub refresh: Box<dyn Fn()>,
     /// The shared state database (opened on first use).

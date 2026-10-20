@@ -27,6 +27,9 @@ abstract class SystemActions {
   /// A Google client JSON file, or null when cancelled.
   Future<String?> pickJsonFile({String? initial});
 
+  /// Any one file (an SSH key for a provider's form), or null when cancelled.
+  Future<String?> pickFile({String? title});
+
   /// Where the Downloads folder is, for the key-file picker.
   String? get downloadsDir;
 }
@@ -74,6 +77,12 @@ class DesktopSystemActions implements SystemActions {
       ],
       initialDirectory: initial,
     );
+    return f?.path;
+  }
+
+  @override
+  Future<String?> pickFile({String? title}) async {
+    final f = await openFile(confirmButtonText: 'Choose');
     return f?.path;
   }
 

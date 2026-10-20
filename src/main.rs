@@ -1,11 +1,12 @@
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use clouddrop::actions::{self, Ctx};
 use clouddrop::config::{self, Config};
 use clouddrop::db::{Db, Kind, State};
 use clouddrop::notifier::Notifier;
 use clouddrop::control::{self, Phase};
-use clouddrop::{auth, engine, remote_for, util};
+use clouddrop::remote::{Provider, Remote, RemoteError, SignIn};
+use clouddrop::{auth, engine, oauth, remote_for, util};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use std::sync::Arc;
 #[command(
     name = "clouddrop",
     version,
-    about = "Upload-only Google Drive folder: files added here are uploaded; deleting them locally keeps them in Drive."
+    about = "Upload-only cloud folder (Google Drive and others): files added here are uploaded; deleting them locally keeps them in the cloud."
 )]
 struct Cli {
     /// Also report the outcome as a desktop notification (used by the Files integration).
@@ -25,8 +26,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Write the config, create the folder and sign in to Google.
+    /// Write the config, create the folder and sign in (to Google Drive unless --provider says otherwise).
     Setup {
+        /// Where to upload: an id from `clouddrop providers` (default: Google Drive, or the one set up before).
+        #[arg(long)]
+        provider: Option<String>,
+        /// A setting of the provider (its config section), e.g. --set url=https://cloud.example.com/remote.php/dav/files/me
+        #[arg(long = "set", value_name = "KEY=VALUE", value_parser = key_value)]
+        settings: Vec<(String, String)>,
+        /// A secret of the provider (password, key), kept in the credentials file, never in the config.
+        #[arg(long = "secret", value_name = "KEY=VALUE", value_parser = key_value)]
+        secrets: Vec<(String, String)>,
         #[arg(long, requires = "client_secret")]
         client_id: Option<String>,
         #[arg(long, requires = "client_id")]
@@ -37,7 +47,7 @@ enum Cmd {
         /// Local folder to upload from (default ~/CloudDrop).
         #[arg(long)]
         folder: Option<PathBuf>,
-        /// Name of the top folder in My Drive.
+        /// Name of the top folder in the cloud (in My Drive for Google Drive).
         #[arg(long, default_value = "CloudDrop")]
         drive_folder: String,
         /// Skip the sign-in step.
@@ -47,11 +57,21 @@ enum Cmd {
         #[arg(long)]
         no_bookmark: bool,
     },
-    /// Sign in to Google (again).
+    /// Sign in again, for providers that sign in through the browser.
     Login {
         /// Print the sign-in link instead of opening a browser.
         #[arg(long)]
         no_browser: bool,
+    },
+    /// List the clouds CloudDrop can upload to, and how each signs in.
+    Providers {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Connect with the saved settings and say whether it works.
+    Check {
+        #[arg(long)]
+        json: bool,
     },
     /// Run the upload daemon (normally started by systemd).
     Run,
@@ -76,7 +96,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Free up space: delete local copies that are safely in Drive.
+    /// Free up space: delete local copies that are safely in the cloud.
     Free {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
@@ -86,9 +106,9 @@ enum Cmd {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
-    /// Open a file or folder in Google Drive in the browser.
+    /// Open a file or folder in the cloud's web page (Google Drive, …).
     Open { path: PathBuf },
-    /// Print the Google Drive link of a file or folder.
+    /// Print the web link of a file or folder in the cloud.
     Url { path: PathBuf },
     /// Re-queue failed uploads (all, or under the given paths).
     Retry { paths: Vec<PathBuf> },
@@ -110,9 +130,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Sign out of Google: stops the service and forgets the sign-in.
+    /// Sign out: stops the service and forgets the sign-in.
     Logout,
-    /// Start over in Drive after the CloudDrop folder there was deleted.
+    /// Start over in the cloud after the CloudDrop folder there was deleted.
     ResetCloud {
         #[arg(long)]
         yes: bool,
@@ -171,16 +191,87 @@ fn main() {
     }
 }
 
+/// Parses `key=value` (--set, --secret).
+fn key_value(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((k, v)) if !k.trim().is_empty() => Ok((k.trim().to_string(), v.to_string())),
+        _ => Err("expected KEY=VALUE".into()),
+    }
+}
 
-async fn login(cfg: &Config, browser: bool) -> Result<()> {
-    auth::login(cfg, &auth::token_path(), |url| {
-        println!("Sign in to Google to let CloudDrop upload to your Drive:\n\n  {url}\n");
+/// Runs the provider's browser sign-in. None: it has none (its setup saved what it needs);
+/// the text says what to do instead.
+async fn login(cfg: &Config, browser: bool) -> Result<Option<String>> {
+    let p = cfg.provider;
+    let (id, name) = (p.as_str(), p.display_name());
+    let show = |url: &str, intro: String| {
+        println!("{intro}\n\n  {url}\n");
         if browser {
             control::open_uri(url);
         }
         println!("Waiting for the browser…");
-    })
-    .await
+    };
+    match &p.info().sign_in {
+        SignIn::Google => {
+            auth::login(cfg, &auth::token_path(), |url| {
+                show(url, "Sign in to Google to let CloudDrop upload to your Drive:".into())
+            })
+            .await?;
+        }
+        SignIn::OAuth(_) => {
+            let client = oauth::client_for(cfg, p).ok_or_else(|| {
+                anyhow!("this build has no {name} client id: set one with `clouddrop setup --provider {id} --set client_id=…`")
+            })?;
+            oauth::login(&client, &oauth::token_path(id), |url| {
+                show(url, format!("Sign in to {name} to let CloudDrop upload there:"))
+            })
+            .await?;
+        }
+        SignIn::NextcloudLoginFlow => {
+            let server = cfg.nextcloud.url.trim();
+            if server.is_empty() {
+                bail!("set the server first: `clouddrop setup --provider {id} --set url=https://cloud.example.com`");
+            }
+            let flow = clouddrop::webdav::nextcloud_login_start(server).await?;
+            show(&flow.login_url, format!("Sign in to {name} and grant CloudDrop access:"));
+            let login = clouddrop::webdav::nextcloud_login_poll(&flow).await?;
+            let mut new = cfg.clone();
+            new.nextcloud = login.settings(&cfg.nextcloud);
+            new.save_to(&config::config_path())?;
+            clouddrop::credentials::save(id, login.secrets())?;
+            println!("Signed in to {} as {}.", login.server, login.login_name);
+        }
+        SignIn::Form(_) => {
+            return Ok(Some(format!(
+                "{name} has no browser sign-in, so there is nothing to do here: `clouddrop setup --provider {id}` \
+                 saves its settings (--set) and password (--secret), and `clouddrop check` tests them."
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Connects with the saved settings: (whether the top folder exists, storage).
+async fn check(remote: &Remote, cfg: &Config) -> Result<(bool, Option<clouddrop::remote::StorageQuota>), RemoteError> {
+    let top = remote.top_parent().await?;
+    let name = engine::cloud_safe_name(&cfg.drive_folder, remote.caps().forbidden_chars);
+    let exists = !remote.find_child(&name, &top, true).await?.is_empty();
+    let quota = match remote.storage_quota().await {
+        Ok(q) => Some(q),
+        Err(RemoteError::Auth(m)) => return Err(RemoteError::Auth(m)),
+        Err(_) => None,
+    };
+    Ok((exists, quota))
+}
+
+fn error_kind(e: &RemoteError) -> &'static str {
+    match e {
+        RemoteError::Auth(_) => "needs_sign_in",
+        RemoteError::Transient(_) | RemoteError::RateLimited { .. } => "offline",
+        RemoteError::Quota(_) => "storage_full",
+        RemoteError::NotFound => "not_found",
+        RemoteError::Permanent(_) => "error",
+    }
 }
 
 fn resolve_all(ctx: &Ctx, paths: &[PathBuf]) -> Result<Vec<String>> {
@@ -190,6 +281,9 @@ fn resolve_all(ctx: &Ctx, paths: &[PathBuf]) -> Result<Vec<String>> {
 async fn dispatch(cmd: Cmd) -> Result<String> {
     match cmd {
         Cmd::Setup {
+            provider,
+            settings,
+            secrets,
             client_id,
             client_secret,
             client_json,
@@ -198,21 +292,56 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             no_login,
             no_bookmark,
         } => {
-            let client = match (client_json, client_id, client_secret) {
-                (Some(f), _, _) => Some(control::parse_client_json(&std::fs::read_to_string(&f)?)?),
-                (None, Some(id), Some(secret)) => Some((id, secret)),
-                _ => None,
+            let existing = Config::load().ok();
+            let provider = match provider {
+                Some(id) => Provider::parse(&id)
+                    .ok_or_else(|| anyhow!("unknown provider {id:?}; `clouddrop providers` lists them"))?,
+                None => existing.as_ref().map(|c| c.provider).unwrap_or_default(),
             };
             let sync_dir = match folder {
                 Some(f) => std::path::absolute(f)?,
-                None => Config::load().map(|c| c.sync_dir).unwrap_or_else(|_| Config::default().sync_dir),
+                None => existing.as_ref().map(|c| c.sync_dir.clone()).unwrap_or_else(|| Config::default().sync_dir),
             };
-            let cfg = control::apply_setup(&control::SetupParams {
-                client,
-                sync_dir,
-                drive_folder,
-            })?;
+            let cfg = if provider == Provider::GoogleDrive {
+                if !settings.is_empty() || !secrets.is_empty() {
+                    bail!("Google Drive has no --set or --secret settings; use --client-id/--client-secret or --client-json");
+                }
+                if existing.as_ref().is_some_and(|c| c.provider != provider) {
+                    let path = config::config_path();
+                    let mut cfg = Config::load_from(&path)?;
+                    control::switch_provider(&mut cfg, provider)?;
+                    cfg.save_to(&path)?;
+                }
+                let client = match (client_json, client_id, client_secret) {
+                    (Some(f), _, _) => Some(control::parse_client_json(&std::fs::read_to_string(&f)?)?),
+                    (None, Some(id), Some(secret)) => Some((id, secret)),
+                    _ => None,
+                };
+                control::apply_setup(&control::SetupParams {
+                    client,
+                    sync_dir,
+                    drive_folder,
+                })?
+            } else {
+                if client_id.is_some() || client_json.is_some() {
+                    bail!("--client-id and --client-json are for Google Drive; other providers take --set client_id=…");
+                }
+                control::apply_provider_setup(&control::ProviderSetup {
+                    provider,
+                    sync_dir,
+                    drive_folder,
+                    settings,
+                    secrets,
+                })?
+            };
             println!("Config written to {}", config::config_path().display());
+            if let Some(old) = control::bound_elsewhere(cfg.provider) {
+                println!(
+                    "This folder has uploaded to {old} so far. Run `clouddrop reset-cloud --yes` to upload \
+                     everything to {} instead; nothing is deleted from {old}.",
+                    cfg.provider.display_name()
+                );
+            }
             if !no_bookmark && actions::add_bookmark(&cfg.sync_dir).unwrap_or(false) {
                 println!("Added {} to the Files sidebar", cfg.sync_dir.display());
             }
@@ -231,18 +360,76 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
         }
         Cmd::Login { no_browser } => {
             let cfg = Config::load()?;
-            login(&cfg, !no_browser).await?;
-            Ok("Signed in.".into())
+            Ok(login(&cfg, !no_browser).await?.unwrap_or_else(|| "Signed in.".into()))
         }
         Cmd::Logout => {
             if control::daemon_running() {
                 control::stop_service()?;
             }
-            match std::fs::remove_file(auth::token_path()) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                _ => {}
-            }
+            control::sign_out()?;
             Ok("Signed out. Uploads stop until you sign in again (clouddrop login).".into())
+        }
+        Cmd::Providers { json } => {
+            let all = control::providers_json();
+            if json {
+                return Ok(serde_json::to_string_pretty(&all)?);
+            }
+            Ok(Provider::ALL
+                .iter()
+                .map(|p| {
+                    let how = match p.info().sign_in {
+                        SignIn::Google | SignIn::OAuth(_) => "browser sign-in",
+                        SignIn::NextcloudLoginFlow => "app password from the server",
+                        SignIn::Form(_) => "settings and password",
+                    };
+                    let verify = if p.caps().hash.is_none() { ", verifies by download" } else { "" };
+                    format!("{:<10} {} ({how}{verify})", p.as_str(), p.display_name())
+                })
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+        Cmd::Check { json } => {
+            let cfg = Config::load()?;
+            let provider = cfg.provider;
+            let name = provider.display_name();
+            let remote = remote_for(&cfg, auth::token_path());
+            let result = check(&remote, &cfg).await;
+            let message = match &result {
+                Ok((exists, quota)) => {
+                    let folder = if *exists {
+                        format!("The \"{}\" folder is there.", cfg.drive_folder)
+                    } else {
+                        format!("CloudDrop creates the \"{}\" folder when it starts.", cfg.drive_folder)
+                    };
+                    let storage = match quota {
+                        Some((Some(limit), usage, _)) => {
+                            format!(" {} of {} used.", util::human_bytes(*usage), util::human_bytes(*limit))
+                        }
+                        Some((None, usage, _)) if *usage > 0 => format!(" {} used.", util::human_bytes(*usage)),
+                        _ => String::new(),
+                    };
+                    format!("Connected to {name}. {folder}{storage}")
+                }
+                Err(e) => engine::describe(e, provider),
+            };
+            if json {
+                let v = match &result {
+                    Ok((exists, quota)) => serde_json::json!({
+                        "ok": true, "provider": provider.as_str(), "provider_name": name,
+                        "message": message, "folder_exists": exists,
+                        "quota": quota.map(|(limit, usage, _)| serde_json::json!({"limit": limit, "usage": usage})),
+                    }),
+                    Err(e) => serde_json::json!({
+                        "ok": false, "provider": provider.as_str(), "provider_name": name,
+                        "message": message, "error_kind": error_kind(e),
+                    }),
+                };
+                return Ok(serde_json::to_string_pretty(&v)?);
+            }
+            match result {
+                Ok(_) => Ok(message),
+                Err(_) => bail!("cannot connect to {name}: {message}"),
+            }
         }
         Cmd::Run => {
             // One engine at a time (the snap's service and an app-started one could
@@ -444,9 +631,9 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
         Cmd::ResetCloud { yes } => {
             if !yes {
                 bail!(
-                    "this forgets every Drive copy CloudDrop knows about and uploads all local files again \
-                     into a new top folder; cloud-only items whose Drive copies are gone are dropped. \
-                     Re-run with --yes to continue"
+                    "this forgets every cloud copy CloudDrop knows about and uploads all local files again \
+                     into a new top folder (in the configured provider); cloud-only items are dropped from \
+                     the list, nothing is deleted in the cloud. Re-run with --yes to continue"
                 );
             }
             let ctx = Ctx::load()?;
@@ -516,7 +703,8 @@ fn status(json: bool) -> Result<String> {
     };
     let (cloud_bytes, cloud_only_bytes) = ctx.db.cloud_bytes()?;
     let errors = ctx.db.errors(20)?;
-    let signed_in = auth::token_path().exists();
+    let provider = ctx.cfg.provider;
+    let signed_in = control::signed_in(provider, &config::data_dir());
     let daemon = control::read_status(&config::data_dir()).filter(|s| s.is_live());
     let activity = match &daemon {
         None => format!("not running — {}", control::START_HINT),
@@ -527,9 +715,9 @@ fn status(json: bool) -> Result<String> {
                 Phase::Waiting => format!("{} files waiting", s.waiting),
                 Phase::Uploading => format!("uploading {} of {} waiting files", s.uploads.len(), s.waiting),
                 Phase::Paused => "paused — clouddrop resume".to_string(),
-                Phase::Offline => "can't reach Google Drive, retrying".to_string(),
+                Phase::Offline => format!("can't reach {}, retrying", provider.display_name()),
                 Phase::NeedsSignIn => "needs sign-in — clouddrop login".to_string(),
-                Phase::DriveFolderMissing => "Drive folder missing".to_string(),
+                Phase::DriveFolderMissing => format!("{} folder missing", engine::short_name(provider)),
             };
             match &s.message {
                 Some(m) => format!("{what} ({m})"),
@@ -544,7 +732,8 @@ fn status(json: bool) -> Result<String> {
         }
         let v = serde_json::json!({
             "configured": true,
-            "provider": ctx.cfg.provider.as_str(),
+            "provider": provider.as_str(),
+            "provider_name": provider.display_name(),
             "paused": control::is_paused(&ctx.db),
             "root_id": ctx.db.meta_get("root_id")?,
             "folder": ctx.cfg.sync_dir,
@@ -559,9 +748,14 @@ fn status(json: bool) -> Result<String> {
         });
         return Ok(serde_json::to_string_pretty(&v)?);
     }
+    let google = provider == Provider::GoogleDrive;
     let mut out = vec![
         format!("Folder:       {}", ctx.cfg.sync_dir.display()),
-        format!("Drive folder: My Drive/{}", ctx.cfg.drive_folder),
+        if google {
+            format!("Drive folder: My Drive/{}", ctx.cfg.drive_folder)
+        } else {
+            format!("Cloud folder: {}/{}", provider.display_name(), ctx.cfg.drive_folder)
+        },
         format!("Signed in:    {}", if signed_in { "yes" } else { "no — run `clouddrop login`" }),
         format!("Service:      {activity}"),
         String::new(),
@@ -576,7 +770,7 @@ fn status(json: bool) -> Result<String> {
             util::human_bytes(cloud_only_bytes as u64)
         ),
         format!("Failed:       {} files", count("file", State::Error)),
-        format!("In Drive:     {}", util::human_bytes(cloud_bytes as u64)),
+        format!("{}{}", if google { "In Drive:     " } else { "In the cloud: " }, util::human_bytes(cloud_bytes as u64)),
     ];
     if !errors.is_empty() {
         out.push(String::new());

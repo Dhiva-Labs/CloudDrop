@@ -11,6 +11,7 @@
 
 use crate::db::Kind;
 use crate::drive::Drive;
+use crate::webdav::WebDav;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
@@ -20,15 +21,36 @@ pub enum Provider {
     #[default]
     #[serde(rename = "gdrive")]
     GoogleDrive,
+    #[serde(rename = "onedrive")]
+    OneDrive,
+    #[serde(rename = "dropbox")]
+    Dropbox,
+    #[serde(rename = "webdav")]
+    WebDav,
+    #[serde(rename = "nextcloud")]
+    Nextcloud,
+    #[serde(rename = "s3")]
+    S3,
+    #[serde(rename = "sftp")]
+    Sftp,
+    #[serde(rename = "mega")]
+    Mega,
 }
 
 impl Provider {
     /// Every provider, for listings (setup, `clouddrop setup --provider`).
-    pub const ALL: &'static [Provider] = &[Provider::GoogleDrive];
+    pub const ALL: &'static [Provider] = &[Provider::GoogleDrive, Provider::OneDrive, Provider::Dropbox, Provider::WebDav, Provider::Nextcloud, Provider::S3, Provider::Sftp, Provider::Mega];
 
     pub fn info(self) -> &'static ProviderInfo {
         match self {
             Provider::GoogleDrive => &crate::drive::INFO,
+            Provider::OneDrive => &crate::onedrive::INFO,
+            Provider::Dropbox => &crate::dropbox::INFO,
+            Provider::WebDav => &crate::webdav::INFO,
+            Provider::Nextcloud => &crate::webdav::NEXTCLOUD_INFO,
+            Provider::S3 => &crate::s3::INFO,
+            Provider::Sftp => &crate::sftp::INFO,
+            Provider::Mega => &crate::mega::INFO,
         }
     }
 
@@ -94,6 +116,10 @@ pub struct OAuthApp {
     pub scopes: &'static [&'static str],
     /// Extra query parameters for the authorisation URL (e.g. Dropbox's token_access_type=offline).
     pub extra_auth_params: &'static [(&'static str, &'static str)],
+    /// A fixed loopback port, for providers that match the redirect address exactly (Dropbox);
+    /// the redirect is then `http://localhost:<port>/`, which the app registration must list.
+    /// None: any free port on 127.0.0.1.
+    pub redirect_port: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -143,7 +169,8 @@ pub struct Capabilities {
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum RemoteError {
     /// Sign-in is missing, expired or revoked; nothing will work until `clouddrop login`.
-    #[error("Google sign-in needed: {0}")]
+    /// (`engine::describe` names the provider in what people see.)
+    #[error("sign-in needed: {0}")]
     Auth(String),
     /// Worth retrying later (network, server error).
     #[error("{0}")]
@@ -151,7 +178,7 @@ pub enum RemoteError {
     /// The provider asked to slow down; `retry_after` seconds if it said. Retried like Transient.
     #[error("{message}")]
     RateLimited { message: String, retry_after: Option<u64> },
-    #[error("not found in Google Drive")]
+    #[error("not found in the cloud")]
     NotFound,
     /// The account's storage is full. Not retried, like Permanent.
     #[error("{0}")]
@@ -282,6 +309,13 @@ pub type StorageQuota = (Option<u64>, u64, u64);
 /// The client for the configured provider.
 pub enum Remote {
     GoogleDrive(Drive),
+    OneDrive(crate::onedrive::OneDrive),
+    Dropbox(crate::dropbox::Dropbox),
+    /// `webdav` and `nextcloud` (one client; it knows which it is).
+    WebDav(Box<WebDav>),
+    S3(Box<crate::s3::S3>),
+    Sftp(crate::sftp::Sftp),
+    Mega(crate::mega::Mega),
 }
 
 /// Runs `$body` with `$c` bound to whichever client `$remote` holds.
@@ -289,6 +323,12 @@ macro_rules! each_client {
     ($remote:expr, $c:ident => $body:expr) => {
         match $remote {
             Remote::GoogleDrive($c) => $body,
+            Remote::OneDrive($c) => $body,
+            Remote::Dropbox($c) => $body,
+            Remote::WebDav($c) => $body,
+            Remote::S3($c) => $body,
+            Remote::Sftp($c) => $body,
+            Remote::Mega($c) => $body,
         }
     };
 }
@@ -297,6 +337,12 @@ impl Remote {
     pub fn provider(&self) -> Provider {
         match self {
             Remote::GoogleDrive(_) => Provider::GoogleDrive,
+            Remote::OneDrive(_) => Provider::OneDrive,
+            Remote::Dropbox(_) => Provider::Dropbox,
+            Remote::WebDav(c) => c.provider(),
+            Remote::S3(_) => Provider::S3,
+            Remote::Sftp(_) => Provider::Sftp,
+            Remote::Mega(_) => Provider::Mega,
         }
     }
 
