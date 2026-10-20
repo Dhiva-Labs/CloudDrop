@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod onedrive_mock;
+pub mod dropbox_mock;
 
 use axum::Router;
 use axum::body::Bytes;

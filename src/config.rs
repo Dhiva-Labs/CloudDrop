@@ -39,6 +39,8 @@ pub struct Config {
     pub endpoints: Endpoints,
     #[serde(default, skip_serializing_if = "OneDriveConfig::is_default")]
     pub onedrive: OneDriveConfig,
+    #[serde(skip_serializing_if = "crate::dropbox::DropboxConfig::is_default")]
+    pub dropbox: crate::dropbox::DropboxConfig,
 }
 
 /// Google endpoints; overridable so tests can point at a local fake.
@@ -113,6 +115,7 @@ impl Default for Config {
             chunk_size: DEFAULT_CHUNK,
             endpoints: Endpoints::default(),
             onedrive: OneDriveConfig::default(),
+            dropbox: Default::default(),
         }
     }
 }
