@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import types
 import unittest
 import unittest.mock
@@ -217,6 +218,9 @@ class ExtensionTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         os.environ.pop('XDG_DATA_HOME', None)
+        # Never read the developer's own config.toml.
+        os.environ.pop('XDG_CONFIG_HOME', None)
+        os.environ.pop('CLOUDDROP_CONFIG', None)
         self.writer = None
         self.extensions = []
         self.addCleanup(self._cleanup_extensions)
@@ -234,6 +238,20 @@ class ExtensionTestCase(unittest.TestCase):
         with open(path, 'w') as handle:
             handle.write('#!/bin/sh\n')
         os.chmod(path, 0o755)
+        return path
+
+    def write_config(self, text):
+        path = os.path.join(self.tmp, 'config.toml')
+        with open(path, 'w') as f:
+            f.write(text)
+        # Distinct mtimes so the cache notices rewrites within one test.
+        os.utime(path, ns=(time.time_ns(), time.time_ns()))
+        return path
+
+    def use_config(self, text):
+        """Write config.toml and point CLOUDDROP_CONFIG at it for this test."""
+        path = self.write_config(text)
+        os.environ['CLOUDDROP_CONFIG'] = path   # setUp's patcher restores it
         return path
 
     def make_db(self, entries=(), root_id='ROOT', sync_root=None, wal=True):
