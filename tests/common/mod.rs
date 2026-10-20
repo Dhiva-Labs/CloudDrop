@@ -760,6 +760,19 @@ impl Harness {
         }
     }
 
+    /// Deletes the state database, as if it were lost, and opens a new one. The harness's own
+    /// handle is closed first: Windows can't delete a file that is open.
+    pub fn lose_db(&mut self) {
+        self.db = Arc::new(Db::open(&self.tmp.path().join("placeholder.db")).unwrap());
+        for f in ["state.db", "state.db-wal", "state.db-shm"] {
+            let p = self.data.join(f);
+            if p.exists() {
+                std::fs::remove_file(&p).unwrap_or_else(|e| panic!("cannot delete {}: {e}", p.display()));
+            }
+        }
+        self.reopen_db();
+    }
+
     /// Reopens the database (after deleting it, for example).
     pub fn reopen_db(&mut self) {
         self.db = Arc::new(Db::open(&self.data.join("state.db")).unwrap());

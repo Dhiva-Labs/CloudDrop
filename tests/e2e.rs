@@ -355,10 +355,7 @@ async fn lost_database_adopts_existing_drive_items() {
     h.stop().await;
     let before = h.stats();
 
-    for f in ["state.db", "state.db-wal", "state.db-shm"] {
-        let _ = std::fs::remove_file(h.data.join(f));
-    }
-    h.reopen_db();
+    h.lose_db();
     h.start();
     h.settle().await;
     assert_eq!(h.stats(), before, "nothing uploaded or created again");
@@ -510,10 +507,7 @@ async fn odd_names_and_empty_files() {
     );
     // Restart: adoption lookups must match these names exactly (no duplicates).
     h.stop().await;
-    for f in ["state.db", "state.db-wal", "state.db-shm"] {
-        let _ = std::fs::remove_file(h.data.join(f));
-    }
-    h.reopen_db();
+    h.lose_db();
     let before = h.stats();
     h.start();
     h.settle().await;
@@ -957,10 +951,7 @@ async fn without_hashes_a_lost_database_adopts_by_download() {
     h.settle().await;
     h.stop().await;
     let before = h.stats();
-    for f in ["state.db", "state.db-wal", "state.db-shm"] {
-        let _ = std::fs::remove_file(h.data.join(f));
-    }
-    h.reopen_db();
+    h.lose_db();
     h.start();
     h.settle().await;
     assert_eq!(h.stats(), before, "nothing uploaded or created again");
@@ -1010,6 +1001,9 @@ async fn path_ids_follow_renamed_folders() {
     h.stop().await;
 }
 
+// Not on Windows: a local name can't contain `:` or `?` there, and `Report.txt` and
+// `report.txt` are the same file.
+#[cfg(not(windows))]
 #[tokio::test(flavor = "multi_thread")]
 async fn forbidden_characters_and_case_only_clashes() {
     let caps = Capabilities { forbidden_chars: ":?", case_insensitive: true, ..drive_caps() };
@@ -1037,10 +1031,7 @@ async fn forbidden_characters_and_case_only_clashes() {
     assert!(h.cloud("c：d.txt").is_some_and(|i| i.content == b"colon"));
     h.stop().await;
     let before = h.stats();
-    for f in ["state.db", "state.db-wal", "state.db-shm"] {
-        let _ = std::fs::remove_file(h.data.join(f));
-    }
-    h.reopen_db();
+    h.lose_db();
     h.start();
     h.settle().await;
     assert_eq!(h.stats(), before, "adopted by their cloud names, nothing uploaded again");
