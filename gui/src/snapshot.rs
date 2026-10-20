@@ -352,12 +352,11 @@ pub fn summarize(s: &Snapshot) -> Summary {
 }
 
 /// "Verifying…": freeing up space proves cloud copies by downloading them, for providers
-/// without a content hash. `control::Phase` has no Verifying yet, so the daemon's `message`
-/// says so ("Verifying …") while idle or waiting. Home's hero and the Files summary line both
-/// ask here; a future `Phase::Verifying` arm in `summarize` should return
-/// [`verifying_text`] (and [`is_verifying`] should accept that phase).
+/// without a content hash. The engine says so in the daemon's `message` ("Verifying…",
+/// `control::VERIFYING`) while the phase stays idle, waiting or uploading. Home's hero and the
+/// Files summary line both ask here.
 pub fn is_verifying(d: &DaemonStatus) -> bool {
-    matches!(d.phase, Phase::Idle | Phase::Waiting)
+    matches!(d.phase, Phase::Idle | Phase::Waiting | Phase::Uploading)
         && d.message.as_deref().is_some_and(|m| m.to_lowercase().starts_with("verifying"))
 }
 
@@ -365,13 +364,15 @@ fn verifying_summary(d: &DaemonStatus, p: &Choice) -> Option<Summary> {
     is_verifying(d).then(|| verifying_text(d.message.as_deref(), p))
 }
 
-/// The Verifying summary: the daemon's message, or a sentence of its own without one.
+/// The Verifying summary: a sentence of its own for the engine's bare "Verifying…", or a
+/// longer message as it is.
 pub fn verifying_text(message: Option<&str>, p: &Choice) -> Summary {
-    let message = message.unwrap_or_default();
+    let message = message.unwrap_or_default().trim();
+    let bare = ["", "verifying", "verifying…", "verifying..."].contains(&message.to_lowercase().as_str());
     Summary {
         icon: "clouddrop-syncing-symbolic",
         title: "Verifying…".into(),
-        detail: if message.is_empty() {
+        detail: if bare {
             format!("Making sure {} holds identical copies before freeing up space.", p.name)
         } else {
             capitalize(message)
@@ -712,7 +713,12 @@ mod tests {
         assert_eq!((sum.icon, sum.tray, sum.action), ("clouddrop-syncing-symbolic", TrayIcon::Syncing, None));
         s.daemon.as_mut().unwrap().phase = Phase::Waiting;
         assert_eq!(summarize(&s).title, "Verifying…");
-        for phase in [Phase::Uploading, Phase::Paused, Phase::Offline] {
+        // Exactly what the engine writes (control::VERIFYING), also while uploading.
+        s.daemon.as_mut().unwrap().message = Some("Verifying…".into());
+        s.daemon.as_mut().unwrap().phase = Phase::Uploading;
+        let sum = summarize(&s);
+        assert_eq!((sum.title.as_str(), sum.detail.as_str()), ("Verifying…", "Making sure WebDAV holds identical copies before freeing up space."));
+        for phase in [Phase::Paused, Phase::Offline] {
             s.daemon.as_mut().unwrap().phase = phase;
             assert!(!is_verifying(s.daemon.as_ref().unwrap()), "{phase:?}");
         }

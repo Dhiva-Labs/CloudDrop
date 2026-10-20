@@ -235,20 +235,25 @@ void main() {
     expect(summarize(form).action, SummaryAction.signIn);
   });
 
-  test('verifying: the phase, or a "Verifying" message while idle or waiting', () {
-    final phase = snap(Phase.verifying, provider: webdav);
-    expect(phase.verifying, isTrue);
-    final v = summarize(phase);
+  test('verifying: the engine says "Verifying…" while idle, waiting or uploading', () {
+    // Exactly what the engine writes (control::VERIFYING); the phase stays as it is.
+    final idle = snap(Phase.idle, message: 'Verifying…', provider: webdav);
+    expect(idle.verifying, isTrue);
+    final v = summarize(idle);
     expect((v.title, v.line, v.icon), ('Verifying…', 'Verifying…', SummaryIcon.syncing));
     expect(v.detail, 'Making sure WebDAV holds identical copies before freeing up space.');
+    final up = summarize(
+      snap(Phase.uploading, waiting: 2, message: 'Verifying…', provider: webdav),
+    );
+    expect(up.title, 'Verifying…', reason: 'uploads keep their own progress card');
     final msg = summarize(snap(Phase.idle, message: 'verifying 3 files', provider: webdav));
     expect((msg.title, msg.detail), ('Verifying…', 'Verifying 3 files'));
-    expect(snap(Phase.waiting, message: 'Verifying report.pdf').verifying, isTrue);
-    expect(snap(Phase.uploading, message: 'Verifying report.pdf').verifying, isFalse);
-    expect(snap(Phase.paused, message: 'Verifying report.pdf').verifying, isFalse);
+    expect(snap(Phase.waiting, message: 'Verifying…').verifying, isTrue);
+    expect(snap(Phase.paused, message: 'Verifying…').verifying, isFalse);
+    expect(snap(Phase.offline, message: 'Verifying…').verifying, isFalse);
     expect(snap(Phase.idle).verifying, isFalse);
     expect(const Snapshot().verifying, isFalse);
-    expect(Phase.parse('verifying'), Phase.verifying);
+    expect(Phase.parse('verifying'), isNull, reason: 'not a phase: status.json keeps its shape');
     expect(Phase.parse('remote_folder_missing'), Phase.driveFolderMissing);
   });
 

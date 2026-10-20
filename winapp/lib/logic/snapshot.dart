@@ -89,12 +89,12 @@ class Snapshot {
   /// Storage of the cloud account; null until the engine has asked.
   Quota? get quota => daemon?.quota;
 
-  /// The engine is proving cloud copies by downloading them (providers without a hash).
+  /// The engine is proving cloud copies by downloading them (providers without a hash): its
+  /// message is "Verifying…" (`control::VERIFYING`) while idle, waiting or uploading.
   bool get verifying {
     final d = daemon;
     if (d == null) return false;
-    if (d.phase == Phase.verifying) return true;
-    return (d.phase == Phase.idle || d.phase == Phase.waiting) &&
+    return (d.phase == Phase.idle || d.phase == Phase.waiting || d.phase == Phase.uploading) &&
         (d.message ?? '').toLowerCase().startsWith('verifying');
   }
 
@@ -278,8 +278,6 @@ Summary summarize(Snapshot s) {
         detail: 'Connecting to $cloud.',
         line: 'Starting',
       );
-    case Phase.verifying:
-      return _verifying(s, message);
     case Phase.uploading || Phase.waiting:
       final (sent, total) = s.progress;
       final pct = total > 0 ? (sent * 100) ~/ total : 0;
@@ -316,14 +314,18 @@ Summary summarize(Snapshot s) {
 }
 
 /// "Verifying…": the engine downloads cloud copies once to prove them before freeing space.
-Summary _verifying(Snapshot s, String message) => Summary(
-  icon: SummaryIcon.syncing,
-  title: 'Verifying…',
-  detail: message.isEmpty
-      ? 'Making sure ${s.provider.name} holds identical copies before freeing up space.'
-      : _capitalize(message),
-  line: 'Verifying…',
-);
+/// The engine's bare "Verifying…" gets a sentence of its own; anything longer is shown as is.
+Summary _verifying(Snapshot s, String message) {
+  final bare = RegExp(r'^verifying(…|\.\.\.)?$', caseSensitive: false).hasMatch(message.trim());
+  return Summary(
+    icon: SummaryIcon.syncing,
+    title: 'Verifying…',
+    detail: bare || message.trim().isEmpty
+        ? 'Making sure ${s.provider.name} holds identical copies before freeing up space.'
+        : _capitalize(message.trim()),
+    line: 'Verifying…',
+  );
+}
 
 /// What Home's cloud storage card says.
 typedef StorageText = ({String headline, String note, double? fraction, bool muted});

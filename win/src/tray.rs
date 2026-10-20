@@ -55,6 +55,11 @@ fn current() -> (Look, String, bool) {
         return (Look::Syncing, "Starting…".into(), false);
     };
     let files = |n: u64| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+    // Proving cloud copies by downloading them (control::VERIFYING); the phase stays as it is.
+    let verifying = s.message.as_deref().is_some_and(|m| m.to_lowercase().starts_with("verifying"));
+    if verifying && matches!(s.phase, Phase::Idle | Phase::Waiting | Phase::Uploading) {
+        return (Look::Syncing, "Verifying…".into(), false);
+    }
     match s.phase {
         Phase::Idle => (Look::Idle, "Up to date".into(), false),
         Phase::Paused => (Look::Paused, "Paused".into(), true),

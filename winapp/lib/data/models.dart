@@ -337,10 +337,7 @@ enum Phase {
   paused('paused'),
   offline('offline'),
   needsSignIn('needs_sign_in'),
-  driveFolderMissing('drive_folder_missing'),
-
-  /// Proving cloud copies by downloading them (providers without a content hash).
-  verifying('verifying');
+  driveFolderMissing('drive_folder_missing');
 
   const Phase(this.wire);
   final String wire;

@@ -214,8 +214,8 @@ void main() {
   DaemonStatus verifyingDaemon() => DaemonStatus(
     pid: 1,
     updatedMs: nowMs,
-    phase: Phase.verifying,
-    message: 'verifying Videos/Family reunion.mp4 before freeing it',
+    phase: Phase.idle,
+    message: 'Verifying…',
     quota: const Quota(usage: 0, usageInDrive: 0),
   );
   screen('home_webdav_verifying', () => calmApp(provider: webdav, daemon: verifyingDaemon()));
