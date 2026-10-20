@@ -77,13 +77,13 @@ void main() {
 
     // 1. Welcome
     expect(find.text('Welcome to CloudDrop'), findsOneWidget);
-    expect(find.text('Step 1 of 5'), findsOneWidget);
+    expect(find.text('Step 1 of 5 · Welcome'), findsOneWidget);
     expect(find.text('Keeps your folders'), findsOneWidget);
     await tap(tester, 'Get Started');
 
     // 2. Google key: the six guided steps, each with an Open button
     expect(find.text('Connect a Google key'), findsOneWidget);
-    expect(find.text('Step 2 of 5'), findsOneWidget);
+    expect(find.text('Step 2 of 5 · Google key'), findsOneWidget);
     for (final title in [
       '1. Create a project',
       '2. Turn on the Google Drive API',
@@ -167,11 +167,11 @@ void main() {
   uiTest('with a built-in client there is no key page', (tester) async {
     final t = fresh(builtin: true);
     await pumpApp(tester, t);
-    expect(find.text('Step 1 of 4'), findsOneWidget);
+    expect(find.text('Step 1 of 4 · Welcome'), findsOneWidget);
     await tap(tester, 'Get Started');
     expect(find.text('Choose your folders'), findsOneWidget);
     expect(find.text('Connect a Google key'), findsNothing);
-    expect(find.text('Step 2 of 4'), findsOneWidget);
+    expect(find.text('Step 2 of 4 · Folders'), findsOneWidget);
     await tap(tester, 'Continue');
     expect(find.textContaining("isn't verified"), findsNothing);
     await tap(tester, 'Sign In with Google');

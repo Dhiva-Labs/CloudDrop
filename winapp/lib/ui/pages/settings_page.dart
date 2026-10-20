@@ -1,4 +1,4 @@
-/// Settings: space saving, account, folders, uploading, background
+/// Settings: space saving, account, folders, uploading, background, about
 /// (`gui/src/settings.rs`). Every change is a `clouddrop config set` / service command and
 /// takes effect at once.
 library;
@@ -10,6 +10,7 @@ import 'package:fluent_ui/fluent_ui.dart';
 import '../../data/engine_api.dart';
 import '../../data/fs_ops.dart';
 import '../../data/models.dart';
+import '../../logic/about.dart';
 import '../../logic/settings_logic.dart';
 import '../../state/app_controller.dart';
 import '../scope.dart';
@@ -119,6 +120,8 @@ class _SettingsPageState extends State<SettingsPage> {
               _uploading(context, app, cfg),
               const SectionTitle('Background'),
               _background(context, app),
+              const SectionTitle('About'),
+              _About(app: app),
             ],
           );
         },
@@ -445,6 +448,66 @@ class _SettingsPageState extends State<SettingsPage> {
               : Button(onPressed: app.startService, child: const Text('Start')),
         ),
       ],
+    );
+  }
+}
+
+/// The logo, version and the project's links.
+class _About extends StatelessWidget {
+  const _About({required this.app});
+
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FluentTheme.of(context);
+    void open(String url) => app.services.system.openUrl(url);
+    return Surface(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Image.asset(
+                'assets/icon.png',
+                width: 44,
+                height: 44,
+                filterQuality: FilterQuality.medium,
+                errorBuilder: (_, _, _) => const SizedBox(width: 44, height: 44),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('CloudDrop $appVersion', style: theme.typography.bodyStrong),
+                    const SizedBox(height: 2),
+                    Text(
+                      'An upload-only cloud folder. Free and open source (MIT) by Dhiva Labs.',
+                      style: theme.typography.caption?.copyWith(color: theme.secondaryText),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            children: [
+              HyperlinkButton(onPressed: () => open(homepageUrl), child: const Text('Website')),
+              HyperlinkButton(
+                onPressed: () => open(privacyUrl),
+                child: const Text('Privacy Policy'),
+              ),
+              HyperlinkButton(
+                onPressed: () => open(issuesUrl),
+                child: const Text('Report a Problem'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

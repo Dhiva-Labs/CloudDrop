@@ -68,42 +68,60 @@ class _StepHeader extends StatelessWidget {
     final theme = FluentTheme.of(context);
     final n = controller.stepCount;
     final i = controller.index;
+    final label = switch (controller.step) {
+      SetupStep.welcome => 'Welcome',
+      SetupStep.key => 'Google key',
+      SetupStep.folder => 'Folders',
+      SetupStep.signIn => 'Sign in',
+      SetupStep.done => 'Done',
+    };
     return Padding(
       padding: EdgeInsets.fromLTRB(gutter, 16, gutter, 8),
       child: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 640),
-          child: Row(
+          child: Column(
             children: [
-              if (controller.canGoBack)
-                Tooltip(
-                  message: 'Back',
-                  child: IconButton(
-                    icon: const Icon(FluentIcons.back, size: 14),
-                    onPressed: controller.back,
+              Row(
+                children: [
+                  if (controller.canGoBack)
+                    Tooltip(
+                      message: 'Back',
+                      child: IconButton(
+                        icon: const Icon(FluentIcons.back, size: 14),
+                        onPressed: controller.back,
+                      ),
+                    )
+                  else
+                    const SizedBox(width: 32),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text('Set up CloudDrop', style: theme.typography.bodyStrong)),
+                  Text(
+                    'Step ${i + 1} of $n · $label',
+                    style: theme.typography.caption?.copyWith(color: theme.secondaryText),
                   ),
-                )
-              else
-                const SizedBox(width: 32),
-              const SizedBox(width: 8),
-              Expanded(child: Text('Set up CloudDrop', style: theme.typography.bodyStrong)),
-              Text(
-                'Step ${i + 1} of $n',
-                style: theme.typography.caption?.copyWith(color: theme.secondaryText),
+                ],
               ),
-              const SizedBox(width: 12),
-              for (var k = 0; k < n; k++)
-                Container(
-                  width: 8,
-                  height: 8,
-                  margin: const EdgeInsets.only(left: 5),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: k <= i
-                        ? theme.accentColor.defaultBrushFor(theme.brightness)
-                        : theme.resources.controlStrongStrokeColorDefault,
-                  ),
-                ),
+              const SizedBox(height: 10),
+              // One segment per step, filled up to the current one.
+              Row(
+                children: [
+                  for (var k = 0; k < n; k++) ...[
+                    if (k > 0) const SizedBox(width: 4),
+                    Expanded(
+                      child: Container(
+                        height: 3,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(2),
+                          color: k <= i
+                              ? theme.accentColor.defaultBrushFor(theme.brightness)
+                              : theme.resources.controlStrokeColorDefault,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
             ],
           ),
         ),
@@ -160,15 +178,36 @@ class _Welcome extends StatelessWidget {
         'The same folder structure appears in My Drive.',
       ),
       (FluentIcons.sync, 'Uploads by itself', 'New and changed files go up in the background.'),
-      (FluentIcons.delete, 'Never deletes in Drive', 'Free up space here without losing anything.'),
+      (FluentIcons.shield, 'Never deletes in Drive', 'Free up space here without losing anything.'),
     ];
     final theme = FluentTheme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // The logo on a soft glow of its own sky.
+        SizedBox(
+          height: 150,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Container(
+                width: 190,
+                height: 150,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      Brand.blue.withValues(alpha: theme.isDark ? 0.30 : 0.22),
+                      Brand.blue.withValues(alpha: 0),
+                    ],
+                  ),
+                ),
+              ),
+              const _Logo(104),
+            ],
+          ),
+        ),
         const SizedBox(height: 8),
-        const Center(child: _Logo(104)),
-        const SizedBox(height: 18),
         _title(
           context,
           'Welcome to CloudDrop',
@@ -178,30 +217,38 @@ class _Welcome extends StatelessWidget {
           center: true,
         ),
         const SizedBox(height: 24),
-        for (final (icon, title, text) in points) ...[
-          Surface(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Row(
-              children: [
-                IconBadge(icon: icon, tint: theme.accent, size: 36),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+        Surface(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Column(
+            children: [
+              for (var k = 0; k < points.length; k++) ...[
+                if (k > 0)
+                  const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: Divider()),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  child: Row(
                     children: [
-                      Text(title, style: theme.typography.bodyStrong),
-                      Text(
-                        text,
-                        style: theme.typography.caption?.copyWith(color: theme.secondaryText),
+                      IconBadge(icon: points[k].$1, tint: theme.accent, size: 36),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(points[k].$2, style: theme.typography.bodyStrong),
+                            Text(
+                              points[k].$3,
+                              style: theme.typography.caption?.copyWith(color: theme.secondaryText),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
                 ),
               ],
-            ),
+            ],
           ),
-          const SizedBox(height: 8),
-        ],
+        ),
         const SizedBox(height: 16),
         Center(
           child: FilledButton(

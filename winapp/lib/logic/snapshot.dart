@@ -60,6 +60,7 @@ class Snapshot {
     this.cloudOnlyBytes = 0,
     this.root = const FolderStats(),
     this.rootId,
+    this.rate,
   });
 
   /// null until the app is set up.
@@ -76,6 +77,9 @@ class Snapshot {
   /// Totals over everything in the CloudDrop folder.
   final FolderStats root;
   final String? rootId;
+
+  /// Upload speed in bytes per second, once it has been measured.
+  final double? rate;
 
   /// Google Drive storage of the account; null until the engine has asked.
   Quota? get quota => daemon?.quota;
@@ -94,6 +98,13 @@ class Snapshot {
     return (sent, total);
   }
 
+  /// Bytes still to send: the rest of the uploads running now and every file waiting.
+  int get remaining {
+    final (sent, _) = progress;
+    final left = root.waitingBytes - sent;
+    return left < 0 ? 0 : left;
+  }
+
   @override
   bool operator ==(Object other) =>
       other is Snapshot &&
@@ -105,11 +116,22 @@ class Snapshot {
       other.cloudBytes == cloudBytes &&
       other.cloudOnlyBytes == cloudOnlyBytes &&
       other.root == root &&
-      other.rootId == rootId;
+      other.rootId == rootId &&
+      other.rate == rate;
 
   @override
-  int get hashCode =>
-      Object.hash(cfg, signedIn, daemon, paused, counts, cloudBytes, cloudOnlyBytes, root, rootId);
+  int get hashCode => Object.hash(
+    cfg,
+    signedIn,
+    daemon,
+    paused,
+    counts,
+    cloudBytes,
+    cloudOnlyBytes,
+    root,
+    rootId,
+    rate,
+  );
 }
 
 enum SummaryAction { setup, signIn, startService, resume }
@@ -125,11 +147,19 @@ class Summary {
     required this.detail,
     required this.line,
     this.action,
+    this.fraction,
+    this.speed,
   });
 
   final SummaryIcon icon;
   final String title;
   final String detail;
+
+  /// How far the uploads running now are (0..1), while uploading.
+  final double? fraction;
+
+  /// "2.4 MB/s · about 3 minutes left", once the speed is known.
+  final String? speed;
 
   /// Short line for the window title area / tooltips.
   final String line;
@@ -142,10 +172,12 @@ class Summary {
       other.title == title &&
       other.detail == detail &&
       other.line == line &&
-      other.action == action;
+      other.action == action &&
+      other.fraction == fraction &&
+      other.speed == speed;
 
   @override
-  int get hashCode => Object.hash(icon, title, detail, line, action);
+  int get hashCode => Object.hash(icon, title, detail, line, action, fraction, speed);
 }
 
 Summary summarize(Snapshot s) {
@@ -229,6 +261,8 @@ Summary summarize(Snapshot s) {
             ? '${humanBytes(sent)} of ${humanBytes(total)} sent for the current files.'
             : 'Waiting for a moment to upload.',
         line: total > 0 ? 'Uploading ${files(n)} — $pct%' : '${files(d.waiting)} waiting',
+        fraction: total > 0 ? sent / total : null,
+        speed: _speed(s),
       );
     case Phase.idle:
       if (s.counts.failed > 0) {
@@ -249,6 +283,15 @@ Summary summarize(Snapshot s) {
         line: 'Up to date',
       );
   }
+}
+
+/// "2.4 MB/s · about 3 minutes left"; just the speed when nothing is known to be waiting.
+String? _speed(Snapshot s) {
+  final rate = s.rate;
+  if (rate == null || rate < 1) return null;
+  final left = s.remaining;
+  if (left == 0) return speed(rate);
+  return '${speed(rate)} · ${timeLeft((left / rate).ceil())}';
 }
 
 String _capitalize(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);

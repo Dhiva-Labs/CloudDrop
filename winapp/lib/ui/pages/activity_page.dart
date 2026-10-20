@@ -1,4 +1,5 @@
-/// Activity: what CloudDrop did, newest first, grouped by day (`gui/src/activity.rs`).
+/// Activity: what CloudDrop did, newest first, grouped by day, with a filter by kind
+/// (`gui/src/activity.rs`).
 library;
 
 import 'package:fluent_ui/fluent_ui.dart';
@@ -21,12 +22,37 @@ class ActivityPage extends StatelessWidget {
     final c = scope.activity;
     return ScaffoldPage(
       padding: const EdgeInsets.only(top: 14),
-      header: const AppPageHeader('Activity'),
+      header: AppPageHeader(
+        'Activity',
+        trailing: ListenableBuilder(
+          listenable: c,
+          builder: (context, _) => c.items.isEmpty
+              ? const SizedBox.shrink()
+              : SizedBox(
+                  width: 170,
+                  child: ComboBox<ActivityFilter>(
+                    isExpanded: true,
+                    value: c.filter,
+                    items: [
+                      for (final f in ActivityFilter.values)
+                        ComboBoxItem<ActivityFilter>(
+                          value: f,
+                          child: Text(f.label, overflow: TextOverflow.ellipsis),
+                        ),
+                    ],
+                    onChanged: (f) {
+                      if (f != null) c.filter = f;
+                    },
+                  ),
+                ),
+        ),
+      ),
       content: ListenableBuilder(
         listenable: c,
         builder: (context, _) {
           if (!c.loaded) return const Center(child: ProgressRing());
-          if (c.items.isEmpty) return const _Empty();
+          if (c.items.isEmpty) return const _Empty(filter: ActivityFilter.all);
+          if (c.visibleItems.isEmpty) return _Empty(filter: c.filter);
           return _List(
             controller: c,
             onOpen: (a) => scope.app.showFiles(dir: parentOf(a.path), select: a.path),
@@ -38,7 +64,9 @@ class ActivityPage extends StatelessWidget {
 }
 
 class _Empty extends StatelessWidget {
-  const _Empty();
+  const _Empty({required this.filter});
+
+  final ActivityFilter filter;
 
   @override
   Widget build(BuildContext context) {
@@ -47,12 +75,19 @@ class _Empty extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(FluentIcons.history, size: 44, color: theme.secondaryText),
+          Icon(
+            filter == ActivityFilter.all ? FluentIcons.history : FluentIcons.filter,
+            size: 44,
+            color: theme.secondaryText,
+          ),
           const SizedBox(height: 14),
-          Text('No Activity Yet', style: theme.typography.subtitle),
+          Text(
+            filter == ActivityFilter.all ? 'No Activity Yet' : 'Nothing to Show',
+            style: theme.typography.subtitle,
+          ),
           const SizedBox(height: 6),
           Text(
-            'Uploads, downloads and other changes will be listed here.',
+            filter.emptyText,
             style: theme.typography.body?.copyWith(color: theme.secondaryText),
             textAlign: TextAlign.center,
           ),
@@ -88,7 +123,7 @@ class _List extends StatelessWidget {
                 for (var i = 0; i < g.items.length; i++) ...[
                   if (i > 0)
                     const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: Divider()),
-                  _Row(activity: g.items[i], onOpen: onOpen),
+                  ActivityRow(activity: g.items[i], onOpen: onOpen),
                 ],
               ],
             ),
@@ -105,53 +140,6 @@ class _List extends StatelessWidget {
             ),
           ),
       ],
-    );
-  }
-}
-
-class _Row extends StatelessWidget {
-  const _Row({required this.activity, required this.onOpen});
-
-  final Activity activity;
-  final void Function(Activity a) onOpen;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = FluentTheme.of(context);
-    final d = describe(activity);
-    final sub = subtitle(activity, fmt.civilFromMs(activity.atMs));
-    return Tooltip(
-      message: activity.path,
-      child: HoverButton(
-        onPressed: () => onOpen(activity),
-        builder: (context, states) => Container(
-          color: states.isHovered ? theme.resources.subtleFillColorSecondary : Colors.transparent,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Row(
-            children: [
-              IconBadge(icon: activityIcon(d.icon), tint: tintFor(theme, d.tone), size: 34),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(d.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: 2),
-                    Text(
-                      sub,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.typography.caption?.copyWith(color: theme.secondaryText),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Icon(FluentIcons.chevron_right, size: 11, color: theme.secondaryText),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

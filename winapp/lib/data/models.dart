@@ -119,6 +119,7 @@ class FolderStats {
     this.waiting = 0,
     this.failed = 0,
     this.cloudOnlyBytes = 0,
+    this.waitingBytes = 0,
   });
 
   final int files;
@@ -135,6 +136,9 @@ class FolderStats {
   /// Bytes kept only in Drive.
   final int cloudOnlyBytes;
 
+  /// Size of the files waiting to upload or uploading now.
+  final int waitingBytes;
+
   @override
   bool operator ==(Object other) =>
       other is FolderStats &&
@@ -144,15 +148,18 @@ class FolderStats {
       other.cloudOnly == cloudOnly &&
       other.waiting == waiting &&
       other.failed == failed &&
-      other.cloudOnlyBytes == cloudOnlyBytes;
+      other.cloudOnlyBytes == cloudOnlyBytes &&
+      other.waitingBytes == waitingBytes;
 
   @override
-  int get hashCode => Object.hash(files, bytes, local, cloudOnly, waiting, failed, cloudOnlyBytes);
+  int get hashCode =>
+      Object.hash(files, bytes, local, cloudOnly, waiting, failed, cloudOnlyBytes, waitingBytes);
 
   @override
   String toString() =>
       'FolderStats(files: $files, bytes: $bytes, local: $local, cloudOnly: $cloudOnly, '
-      'waiting: $waiting, failed: $failed, cloudOnlyBytes: $cloudOnlyBytes)';
+      'waiting: $waiting, failed: $failed, cloudOnlyBytes: $cloudOnlyBytes, '
+      'waitingBytes: $waitingBytes)';
 }
 
 /// A row for the file browser.

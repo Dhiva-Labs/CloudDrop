@@ -65,7 +65,7 @@ void main() {
   });
 
   // ---------- Home ----------
-  screen('home_busy', busyApp);
+  screen('home_busy', busyApp, act: (tester, t) => t.measureSpeed(3 * mb));
   screen('home_idle', calmApp);
   screen('home_paused', () {
     final t = busyApp(

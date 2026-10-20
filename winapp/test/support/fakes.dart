@@ -320,4 +320,30 @@ class TestApp {
     await controller.poll(forceEngine: true);
     return controller;
   }
+
+  /// Plays the three heartbeats before the current status (a second apart, the uploads
+  /// [bytesPerSecond] behind each time), so Home has measured a speed.
+  Future<void> measureSpeed(int bytesPerSecond) async {
+    final last = statusSource.value!;
+    final share = bytesPerSecond ~/ last.uploads.length;
+    // The app has already read [last]: a moment without the engine starts the meter over.
+    statusSource.value = null;
+    await controller.poll();
+    for (var k = 3; k >= 1; k--) {
+      statusSource.value = DaemonStatus(
+        pid: last.pid,
+        updatedMs: last.updatedMs - k * 1000,
+        phase: last.phase,
+        waiting: last.waiting,
+        quota: last.quota,
+        uploads: [
+          for (final u in last.uploads)
+            Upload(path: u.path, sent: u.sent - k * share, total: u.total),
+        ],
+      );
+      await controller.poll();
+    }
+    statusSource.value = last;
+    await controller.poll();
+  }
 }

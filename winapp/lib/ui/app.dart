@@ -9,6 +9,7 @@ import 'package:fluent_ui/fluent_ui.dart';
 import '../state/activity_controller.dart';
 import '../state/app_controller.dart';
 import '../state/files_controller.dart';
+import '../logic/snapshot.dart';
 import '../state/setup_controller.dart';
 import 'pages/activity_page.dart';
 import 'pages/files_page.dart';
@@ -370,6 +371,8 @@ class MainView extends StatelessWidget {
                       ],
                     ),
                   ),
+            // The status, on every screen (the pane's search slot, when the pane is open).
+            autoSuggestBox: mode == PaneDisplayMode.expanded ? _StatusChip(app: app) : null,
             items: [
               PaneItem(
                 icon: const Icon(FluentIcons.home),
@@ -409,6 +412,59 @@ class MainView extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// "● Up to date" under the pane header; opens Home.
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({required this.app});
+
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FluentTheme.of(context);
+    final sum = summarize(app.snapshot);
+    final dot = switch (sum.icon) {
+      SummaryIcon.idle => theme.success.fg,
+      SummaryIcon.syncing => theme.accent.fg,
+      SummaryIcon.paused => theme.secondaryText,
+      SummaryIcon.attention => theme.caution.fg,
+    };
+    return Tooltip(
+      message: sum.title,
+      child: HoverButton(
+        onPressed: () => app.pane.value = AppPane.home,
+        builder: (context, states) => Container(
+          height: 30,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: states.isHovered
+                ? theme.resources.subtleFillColorTertiary
+                : theme.resources.subtleFillColorSecondary,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  sum.line,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.typography.caption,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
