@@ -1,5 +1,10 @@
 //! In-process fake of the Google OAuth token endpoint and the Drive v3 subset
 //! CloudDrop uses, plus a harness that runs the engine against it.
+//!
+//! Switches on `MockState` make it behave like other providers (no content hashes, ids that
+//! are paths, forbidden characters, names unique regardless of case), and `Harness::with_caps`
+//! runs the engine with that provider's capabilities, so the engine's handling of them is
+//! tested without a second provider.
 
 #![allow(dead_code)]
 
@@ -9,10 +14,11 @@ use axum::extract::{Path as AxPath, Query, State as AxState};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
-use clouddrop::actions::Ctx;
+use clouddrop::actions::{self, Ctx, FreeReport, RestoreReport};
 use clouddrop::auth::{Token, save_token};
 use clouddrop::config::{Config, Endpoints};
 use clouddrop::db::{Db, Entry, State};
+use clouddrop::remote::Capabilities;
 use md5::{Digest, Md5};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -89,6 +95,21 @@ pub struct MockState {
     /// Slows every chunk PUT down (to act while an upload is in flight).
     pub put_delay_ms: u64,
     pub base: String,
+    /// Like a provider without content hashes: no md5Checksum in metadata.
+    pub no_hashes: bool,
+    /// Like WebDAV/S3/SFTP: an item's id is its path ("root/CloudDrop/a/b.txt"), so a rename or
+    /// move changes its id and the ids of everything beneath it; old ids answer 404.
+    pub path_ids: bool,
+    /// Characters names may not contain (400).
+    pub forbidden: String,
+    /// Names in a folder are unique ignoring case (409 for a clash).
+    pub case_insensitive: bool,
+    /// File content downloads (`alt=media`).
+    pub downloads: u64,
+    /// Slows every content download down (to watch a verify-by-download happen).
+    pub media_delay_ms: u64,
+    /// Every token request's form, in order.
+    pub token_forms: Vec<HashMap<String, String>>,
 }
 
 impl MockState {
@@ -143,6 +164,56 @@ impl MockState {
     pub fn invalidate_tokens(&mut self) {
         self.tokens.clear();
     }
+
+    /// An item as the API shows it.
+    fn view(&self, item: &Item) -> Value {
+        let mut v = item.json();
+        if self.no_hashes {
+            v.as_object_mut().unwrap().remove("md5Checksum");
+        }
+        v
+    }
+
+    /// The id for a new item: a path where ids are paths.
+    fn new_id(&mut self, prefix: &str, parent: &str, name: &str) -> String {
+        if self.path_ids { format!("{parent}/{name}") } else { self.id(prefix) }
+    }
+
+    /// Refuses a name the provider wouldn't take for `parent` (`except` = the item being renamed).
+    fn name_problem(&self, name: &str, parent: &str, except: Option<&str>) -> Option<Response> {
+        if name.contains(|c| self.forbidden.contains(c)) {
+            return Some((StatusCode::BAD_REQUEST, format!("invalid name {name:?}")).into_response());
+        }
+        let clash = self.children(parent).into_iter().any(|i| {
+            Some(i.id.as_str()) != except
+                && if self.case_insensitive { i.name.to_lowercase() == name.to_lowercase() } else { self.path_ids && i.name == name }
+        });
+        clash.then(|| (StatusCode::CONFLICT, format!("{name:?} already exists")).into_response())
+    }
+
+    /// Where ids are paths: gives `old` (named `name` in `parent` now) its new id, and moves the
+    /// ids beneath it along. Returns the new id.
+    fn rekey(&mut self, old: &str) -> String {
+        if !self.path_ids {
+            return old.to_string();
+        }
+        let item = &self.items[old];
+        let new = format!("{}/{}", item.parents[0], item.name);
+        let prefix = format!("{old}/");
+        let moved = |s: &str| if s == old || s.starts_with(&prefix) { Some(format!("{new}{}", &s[old.len()..])) } else { None };
+        let keys: Vec<String> = self.items.keys().filter(|k| moved(k).is_some()).cloned().collect();
+        for k in keys {
+            let mut item = self.items.remove(&k).unwrap();
+            item.id = moved(&k).unwrap();
+            for p in item.parents.iter_mut() {
+                if let Some(np) = moved(p) {
+                    *p = np;
+                }
+            }
+            self.items.insert(item.id.clone(), item);
+        }
+        new
+    }
 }
 
 pub type Shared = Arc<Mutex<MockState>>;
@@ -165,6 +236,7 @@ fn not_found() -> Response {
 async fn token(AxState(s): AxState<Shared>, body: String) -> Response {
     let form: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
     let mut st = s.lock().unwrap();
+    st.token_forms.push(form.clone());
     let tok = st.id("tok");
     st.tokens.push(tok.clone());
     match form.get("grant_type").map(String::as_str) {
@@ -214,8 +286,11 @@ async fn list(AxState(s): AxState<Shared>, h: HeaderMap, Query(q): Query<HashMap
     let files: Vec<Value> = st
         .children(parent)
         .into_iter()
-        .filter(|i| &i.name == name && mime.is_none_or(|m| &i.mime == m))
-        .map(|i| i.json())
+        .filter(|i| {
+            let same = if st.case_insensitive { i.name.to_lowercase() == name.to_lowercase() } else { &i.name == name };
+            same && mime.is_none_or(|m| &i.mime == m)
+        })
+        .map(|i| st.view(&i))
         .collect();
     axum::Json(json!({ "files": files })).into_response()
 }
@@ -225,45 +300,76 @@ async fn create(AxState(s): AxState<Shared>, h: HeaderMap, axum::Json(body): axu
     if !authed(&st, &h) {
         return unauthorized();
     }
-    let id = st.id("F");
+    let name = body["name"].as_str().unwrap().to_string();
+    let parents: Vec<String> = body["parents"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()).collect();
+    if let Some(refused) = st.name_problem(&name, &parents[0], None) {
+        return refused;
+    }
+    let id = st.new_id("F", &parents[0], &name);
     let item = Item {
         id: id.clone(),
-        name: body["name"].as_str().unwrap().to_string(),
+        name,
         mime: body["mimeType"].as_str().unwrap_or("application/octet-stream").to_string(),
-        parents: body["parents"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()).collect(),
+        parents,
         content: vec![],
         trashed: false,
         revisions: vec![],
     };
     st.folders_created += 1;
-    let v = item.json();
+    let v = st.view(&item);
     st.items.insert(id, item);
     axum::Json(v).into_response()
 }
 
+/// GET files/{id} (ids may contain '/' where they are paths).
 async fn get_file(
     AxState(s): AxState<Shared>,
     h: HeaderMap,
     AxPath(id): AxPath<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let st = s.lock().unwrap();
+    let delay = s.lock().unwrap().media_delay_ms;
+    if delay > 0 && q.get("alt").map(String::as_str) == Some("media") {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+    let mut st = s.lock().unwrap();
     if !authed(&st, &h) {
         return unauthorized();
     }
-    let Some(item) = st.items.get(&id) else {
+    let Some(item) = st.items.get(&id).cloned() else {
         return not_found();
     };
     if q.get("alt").map(String::as_str) == Some("media") {
-        return item.content.clone().into_response();
+        st.downloads += 1;
+        if let Some(range) = h.get(header::RANGE).and_then(|v| v.to_str().ok()).and_then(|r| r.strip_prefix("bytes=")) {
+            let (a, b) = range.split_once('-').unwrap();
+            let (a, b): (usize, usize) = (a.parse().unwrap(), b.parse().unwrap());
+            let end = (b + 1).min(item.content.len());
+            return item.content[a.min(end)..end].to_vec().into_response();
+        }
+        return item.content.into_response();
     }
-    axum::Json(item.json()).into_response()
+    axum::Json(st.view(&item)).into_response()
+}
+
+/// PATCH files/{id} and files/{id}/revisions/{rev}.
+async fn patch_any(
+    s: AxState<Shared>,
+    h: HeaderMap,
+    AxPath(rest): AxPath<String>,
+    q: Query<HashMap<String, String>>,
+    body: axum::Json<Value>,
+) -> Response {
+    match rest.rsplit_once("/revisions/") {
+        Some((id, rev)) => update_revision(s, h, id.to_string(), rev.to_string(), body).await,
+        None => update_file(s, h, rest, q, body).await,
+    }
 }
 
 async fn update_file(
     AxState(s): AxState<Shared>,
     h: HeaderMap,
-    AxPath(id): AxPath<String>,
+    id: String,
     Query(q): Query<HashMap<String, String>>,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
@@ -271,23 +377,29 @@ async fn update_file(
     if !authed(&st, &h) {
         return unauthorized();
     }
-    let Some(item) = st.items.get_mut(&id) else {
+    let Some(item) = st.items.get(&id) else {
         return not_found();
     };
-    if let Some(n) = body["name"].as_str() {
-        item.name = n.to_string();
+    let name = body["name"].as_str().map_or(item.name.clone(), str::to_string);
+    let parent = q.get("addParents").cloned().unwrap_or_else(|| item.parents[0].clone());
+    if let Some(refused) = st.name_problem(&name, &parent, Some(&id)) {
+        return refused;
     }
+    let item = st.items.get_mut(&id).unwrap();
+    item.name = name;
     if let (Some(add), Some(rm)) = (q.get("addParents"), q.get("removeParents")) {
         item.parents.retain(|p| p != rm);
         item.parents.push(add.clone());
     }
-    axum::Json(item.json()).into_response()
+    let id = st.rekey(&id);
+    axum::Json(st.view(&st.items[&id])).into_response()
 }
 
 async fn update_revision(
     AxState(s): AxState<Shared>,
     h: HeaderMap,
-    AxPath((id, rev)): AxPath<(String, String)>,
+    id: String,
+    rev: String,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
     let mut st = s.lock().unwrap();
@@ -313,6 +425,16 @@ fn start_session(st: &mut MockState, h: &HeaderMap, file_id: Option<String>, q: 
         && !st.items.contains_key(id)
     {
         return not_found();
+    }
+    let name = body["name"].as_str().unwrap_or_default();
+    let parent = match &file_id {
+        Some(id) => q.get("addParents").cloned().unwrap_or_else(|| st.items[id].parents[0].clone()),
+        None => body["parents"][0].as_str().unwrap_or_default().to_string(),
+    };
+    if !name.is_empty()
+        && let Some(refused) = st.name_problem(name, &parent, file_id.as_deref())
+    {
+        return refused;
     }
     let total: usize = h
         .get("X-Upload-Content-Length")
@@ -353,7 +475,7 @@ async fn upload_create(
 async fn upload_update(
     AxState(s): AxState<Shared>,
     h: HeaderMap,
-    AxPath(id): AxPath<String>,
+    AxPath(id): AxPath<String>, // may contain '/' where ids are paths
     Query(q): Query<HashMap<String, String>>,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
@@ -417,7 +539,9 @@ async fn session_put(AxState(s): AxState<Shared>, h: HeaderMap, AxPath(sid): AxP
     let rev = Rev { id: format!("R{next_id}"), md5: hex::encode(Md5::digest(&content)), keep_forever: false };
     let item = match file_id {
         Some(id) => {
-            let item = st.items.get_mut(&id).unwrap();
+            let Some(item) = st.items.get_mut(&id) else {
+                return not_found(); // renamed away (ids are paths) while uploading
+            };
             item.content = content;
             if !name.is_empty() {
                 item.name = name;
@@ -427,10 +551,14 @@ async fn session_put(AxState(s): AxState<Shared>, h: HeaderMap, AxPath(sid): AxP
                 item.parents.push(add);
             }
             item.revisions.push(rev);
-            item.clone()
+            let id = st.rekey(&id);
+            st.items[&id].clone()
         }
         None => {
-            let id = st.id("D");
+            let id = st.new_id("D", &parents[0], &name);
+            if st.items.contains_key(&id) {
+                return (StatusCode::CONFLICT, "exists").into_response();
+            }
             let item = Item {
                 id: id.clone(),
                 name,
@@ -444,7 +572,7 @@ async fn session_put(AxState(s): AxState<Shared>, h: HeaderMap, AxPath(sid): AxP
             item
         }
     };
-    let v = item.json();
+    let v = st.view(&item);
     st.sessions.get_mut(&sid).unwrap().result = Some(v.clone());
     (StatusCode::CREATED, axum::Json(v)).into_response()
 }
@@ -482,10 +610,9 @@ pub async fn start_mock_at(addr: &str) -> Shared {
         .route("/auth", get(auth))
         .route("/drive/v3/about", get(about))
         .route("/drive/v3/files", get(list).post(create))
-        .route("/drive/v3/files/{id}", get(get_file).patch(update_file))
-        .route("/drive/v3/files/{id}/revisions/{rev}", patch(update_revision))
+        .route("/drive/v3/files/{*id}", get(get_file).patch(patch_any))
         .route("/upload/drive/v3/files", post(upload_create))
-        .route("/upload/drive/v3/files/{id}", patch(upload_update))
+        .route("/upload/drive/v3/files/{*id}", patch(upload_update))
         .route("/session/{sid}", put(session_put))
         .with_state(shared.clone());
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -503,12 +630,42 @@ pub struct Harness {
     pub cfg: Config,
     pub mock: Shared,
     pub db: Arc<Db>,
+    /// Run the engine and the CLI actions as if the provider had these capabilities.
+    pub caps: Option<Capabilities>,
     engine: Option<(watch::Sender<bool>, tokio::task::JoinHandle<anyhow::Result<()>>)>,
+}
+
+/// Google Drive's capabilities, to change for a test (`Capabilities { hash: None, ..drive_caps() }`).
+pub fn drive_caps() -> Capabilities {
+    clouddrop::drive::INFO.caps.clone()
 }
 
 impl Harness {
     pub async fn new() -> Self {
         Self::with(|_| {}).await
+    }
+
+    /// The engine and actions apply `caps` (another provider's rules) to the Drive mock.
+    pub async fn with_caps(caps: Capabilities, tweak: impl FnOnce(&mut Config)) -> Self {
+        let mut h = Self::with(tweak).await;
+        h.caps = Some(caps);
+        h
+    }
+
+    pub fn caps(&self) -> Capabilities {
+        self.caps.clone().unwrap_or_else(|| self.remote().caps().clone())
+    }
+
+    /// `clouddrop free`, with the harness's capabilities.
+    pub async fn free(&self, rels: &[&str]) -> anyhow::Result<FreeReport> {
+        let rels: Vec<String> = rels.iter().map(|r| r.to_string()).collect();
+        actions::free_with(&self.ctx(), &self.remote(), &self.caps(), &rels).await
+    }
+
+    /// `clouddrop restore`, with the harness's capabilities.
+    pub async fn restore(&self, rels: &[&str]) -> anyhow::Result<RestoreReport> {
+        let rels: Vec<String> = rels.iter().map(|r| r.to_string()).collect();
+        actions::restore_with(&self.ctx(), &self.remote(), &self.caps(), &rels).await
     }
 
     pub async fn with(tweak: impl FnOnce(&mut Config)) -> Self {
@@ -540,7 +697,7 @@ impl Harness {
         )
         .unwrap();
         let db = Arc::new(Db::open(&data.join("state.db")).unwrap());
-        Self { tmp, root, data, cfg, mock, db, engine: None }
+        Self { tmp, root, data, cfg, mock, db, caps: None, engine: None }
     }
 
     pub fn token_path(&self) -> PathBuf {
@@ -564,9 +721,10 @@ impl Harness {
         assert!(self.engine.is_none());
         let (tx, rx) = watch::channel(false);
         let opts = clouddrop::engine::RunOptions { config_file: None, store };
-        let handle = tokio::spawn(clouddrop::engine::run_with_options(
+        let handle = tokio::spawn(clouddrop::engine::run_with_caps(
             self.cfg.clone(),
             opts,
+            self.caps(),
             self.db.clone(),
             self.remote(),
             self.data.clone(),

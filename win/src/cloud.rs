@@ -1,12 +1,13 @@
 //! The File Explorer cloud folder (Cloud Files API): registering the sync root,
 //! and the callbacks Windows makes when a placeholder is opened, freed, deleted
 //! or renamed. Upload-only rules hold here too: deletes and renames are allowed
-//! locally and never touch Drive; freeing is allowed only for files whose Drive
-//! copy is verified.
+//! locally and never touch the cloud; freeing is allowed only for files whose cloud
+//! copy is verified (the provider's hash, or a download where it reports none).
 
 use anyhow::{Result, bail};
 use clouddrop::config::{self, Config};
 use clouddrop::db::{Db, State};
+use clouddrop::jobs::{local_kind, proven};
 use clouddrop::remote::Remote;
 use clouddrop::store::LocalStore;
 use clouddrop::winstore::{WinStore, is_sync_root};
@@ -118,7 +119,8 @@ impl Filter {
         })
     }
 
-    /// The file's content is in Drive, identical to what was uploaded.
+    /// The file's content is in the cloud, identical to what was uploaded: the provider's
+    /// hash matches, or, where it reports none, a download of the cloud copy does.
     fn verified_in_drive(&self, path: &Path) -> bool {
         let Some(rel) = self.rel(path) else {
             return false;
@@ -129,19 +131,39 @@ impl Filter {
         let Ok(Some(e)) = db.get(&rel) else {
             return false;
         };
-        let (Some(id), Some(md5)) = (e.drive_id.clone(), e.md5.clone()) else {
+        let caps = self.remote.caps();
+        let (Some(id), Some(hash), Some(size)) = (e.drive_id.clone(), e.content_hash(), e.cloud_size) else {
             return false;
         };
-        if e.state != State::Synced {
+        if e.state != State::Synced || hash.kind != local_kind(caps) {
             return false;
         }
-        match self.rt.block_on(self.remote.get(&id)) {
-            Ok(m) => !m.trashed && m.md5() == Some(md5.as_str()) && m.size == e.cloud_size.map(|s| s as u64),
+        let tmp_dir = config::data_dir();
+        let remote: &Remote = &self.remote;
+        let check = async {
+            match remote.get(&id).await {
+                Ok(m) if !m.trashed => proven(remote, caps, &m, &hash, size as u64, &tmp_dir).await,
+                Ok(_) => Ok(false),
+                Err(err) => Err(err),
+            }
+        };
+        match self.rt.block_on(check) {
+            Ok(same) => same,
             Err(err) => {
-                tracing::warn!("cannot check {rel} in Drive: {err}");
+                tracing::warn!("cannot check {rel} in the cloud: {err}");
                 false
             }
         }
+    }
+
+    /// The cloud id the database has for `path`. Where ids are paths, renaming a folder leaves
+    /// the ids kept in the placeholders beneath it out of date; the database has the new ones.
+    fn current_id(&self, path: &Path) -> Option<String> {
+        if self.remote.caps().stable_ids {
+            return None;
+        }
+        let rel = self.rel(path)?;
+        Db::open(&self.db_path).ok()?.get(&rel).ok()??.drive_id
     }
 }
 
@@ -153,9 +175,10 @@ impl SyncFilter for Filter {
         ticket: ticket::FetchData,
         info: info::FetchData,
     ) -> CResult<()> {
-        let id = std::str::from_utf8(request.file_blob())
+        let blob = std::str::from_utf8(request.file_blob())
             .map_err(|_| CloudErrorKind::InvalidRequest)?
             .to_string();
+        let id = self.current_id(&request.path()).unwrap_or(blob);
         if id.is_empty() {
             return Err(CloudErrorKind::InvalidRequest);
         }
@@ -184,7 +207,7 @@ impl SyncFilter for Filter {
         Ok(())
     }
 
-    /// "Free up space" in Explorer: only once Drive's checksum matches.
+    /// "Free up space" in Explorer: only once the cloud copy is verified.
     fn dehydrate(
         &self,
         request: Request,
@@ -195,7 +218,7 @@ impl SyncFilter for Filter {
         if self.verified_in_drive(&path) {
             ticket.pass().map_err(|_| CloudErrorKind::Unsuccessful)
         } else {
-            tracing::warn!("kept {}: its Drive copy couldn't be verified", path.display());
+            tracing::warn!("kept {}: its cloud copy couldn't be verified", path.display());
             Err(CloudErrorKind::DehydrationDisallowed)
         }
     }

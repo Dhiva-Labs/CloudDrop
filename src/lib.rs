@@ -9,6 +9,7 @@ pub mod engine;
 pub mod hash;
 pub mod jobs;
 pub mod notifier;
+pub mod oauth;
 pub mod remote;
 pub mod store;
 #[cfg(windows)]
