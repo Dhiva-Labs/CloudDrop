@@ -27,7 +27,11 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
             let auth = Arc::new(auth::Auth::new(http.clone(), cfg, token_file));
             Arc::new(remote::Remote::GoogleDrive(drive::Drive::new(http, cfg.endpoints.clone(), auth)))
         }
-        // Wired once the generic OAuth sign-in (the TokenSource it needs) lands.
-        remote::Provider::OneDrive => unimplemented!("OneDrive is not wired up yet"),
+        // Until the generic OAuth sign-in is wired up, every call asks for sign-in.
+        remote::Provider::OneDrive => Arc::new(remote::Remote::OneDrive(onedrive::OneDrive::new(
+            drive::http_client(),
+            onedrive::GRAPH_BASE,
+            Arc::new(onedrive::NotSignedIn),
+        ))),
     }
 }

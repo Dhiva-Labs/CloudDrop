@@ -12,6 +12,7 @@ use crate::remote::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures_util::StreamExt;
+use futures_util::future::BoxFuture;
 use reqwest::header::{CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE, RETRY_AFTER};
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,20 @@ fn web_url(_kind: Kind, id: &str) -> Option<String> {
         return None;
     }
     Some(format!("https://onedrive.live.com/?cid={}&id={id}", cid.to_ascii_lowercase()))
+}
+
+/// Stands in for the OAuth sign-in until it is wired up: every call asks for sign-in, so a
+/// config saying `provider = "onedrive"` shows "sign in needed" instead of failing harder.
+pub struct NotSignedIn;
+
+impl TokenSource for NotSignedIn {
+    fn token(&self) -> BoxFuture<'_, RemoteResult<String>> {
+        Box::pin(async { Err(RemoteError::Auth("OneDrive sign-in isn't available in this build yet".into())) })
+    }
+
+    fn refresh(&self) -> BoxFuture<'_, RemoteResult<String>> {
+        self.token()
+    }
 }
 
 /// Largest fragment sent in one request: Graph takes less than 60 MiB, in multiples of 320 KiB.
@@ -788,6 +803,15 @@ mod tests {
         assert_eq!(day(11_016), "2000-02-29");
         assert_eq!(day(20_088), "2024-12-31");
         assert_eq!(day(20_747), "2026-10-21");
+    }
+
+    #[tokio::test]
+    async fn configured_without_sign_in_asks_for_it() {
+        let cfg = Config { provider: crate::remote::Provider::OneDrive, ..Config::default() };
+        let remote = crate::remote_for(&cfg, "unused-token.json".into());
+        assert_eq!(remote.provider(), crate::remote::Provider::OneDrive);
+        assert!(matches!(remote.top_parent().await, Err(RemoteError::Auth(_))));
+        assert!(matches!(remote.storage_quota().await, Err(RemoteError::Auth(_))));
     }
 
     #[test]
