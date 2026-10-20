@@ -549,6 +549,8 @@ pub struct FolderStats {
     pub failed: i64,
     /// Bytes kept only in Drive.
     pub cloud_only_bytes: i64,
+    /// Size of the files waiting to upload or uploading now.
+    pub waiting_bytes: i64,
 }
 
 /// A row for the file browser.
@@ -652,7 +654,8 @@ impl Db {
                count(*) FILTER (WHERE state = 'cloud_only'), \
                count(*) FILTER (WHERE state IN ('pending', 'uploading')), \
                count(*) FILTER (WHERE state = 'error'), \
-               coalesce(sum(cloud_size) FILTER (WHERE state = 'cloud_only'), 0) \
+               coalesce(sum(cloud_size) FILTER (WHERE state = 'cloud_only'), 0), \
+               coalesce(sum(local_size) FILTER (WHERE state IN ('pending', 'uploading')), 0) \
              FROM entries WHERE kind = 'file' AND path >= ?1 AND path < ?2",
             params![lo, hi],
             |r| {
@@ -664,6 +667,7 @@ impl Db {
                     waiting: r.get(4)?,
                     failed: r.get(5)?,
                     cloud_only_bytes: r.get(6)?,
+                    waiting_bytes: r.get(7)?,
                 })
             },
         )?)
@@ -812,16 +816,18 @@ mod tests {
         db.put(&file("Photos/b.jpg", State::CloudOnly, 20)).unwrap();
         db.put(&file("Photos/c.jpg", State::Error, 5)).unwrap();
         db.put(&file("zeta.txt", State::Pending, 1)).unwrap();
+        db.put(&file("Photos/d.jpg", State::Uploading, 7)).unwrap();
         let top = db.list_dir("").unwrap();
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].entry.path, "Photos");
         let st = top[0].stats.unwrap();
-        assert_eq!((st.files, st.bytes, st.local, st.cloud_only, st.failed), (3, 35, 2, 1, 1));
-        assert_eq!(st.cloud_only_bytes, 20);
+        assert_eq!((st.files, st.bytes, st.local, st.cloud_only, st.failed), (4, 42, 3, 1, 1));
+        assert_eq!((st.cloud_only_bytes, st.waiting_bytes), (20, 7));
         assert_eq!(top[1].bytes, 1);
-        assert_eq!(db.folder_stats("").unwrap().files, 4);
+        let all = db.folder_stats("").unwrap();
+        assert_eq!((all.files, all.waiting, all.waiting_bytes), (5, 2, 8));
         let hits: Vec<_> = db.search("JPG", 10).unwrap().into_iter().map(|i| i.entry.path).collect();
-        assert_eq!(hits, ["Photos/a.jpg", "Photos/b.jpg", "Photos/c.jpg"]);
+        assert_eq!(hits, ["Photos/a.jpg", "Photos/b.jpg", "Photos/c.jpg", "Photos/d.jpg"]);
         assert!(db.search("photos/a", 10).unwrap().is_empty(), "matches names, not paths");
     }
 
