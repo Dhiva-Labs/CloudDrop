@@ -242,6 +242,48 @@ The engine reads `Capabilities` and does the rest; providers don't touch `engine
 
 `status --json` gains `"provider_name"` (e.g. `"OneDrive"`) next to `"provider"`.
 
+## OneDrive
+
+**Built**: `src/onedrive.rs` (Microsoft Graph v1.0, personal and work or school accounts), a fake
+Graph in `tests/common/onedrive_mock.rs`, and the client's tests against it in `tests/onedrive.rs`.
+It isn't wired into `remote_for` yet: that needs the generic OAuth `TokenSource`.
+
+- **Sign-in**: `Files.ReadWrite.AppFolder` + `offline_access` on the `common` endpoints.
+  `[onedrive] client_id` (empty = the build's) and `tenant` (`common` by default; `consumers`,
+  `organizations` or one organisation's tenant), whose endpoints `onedrive::oauth_endpoints` gives.
+- **Folders**: `top_parent` is the app folder (`special/approot`, Apps/CloudDrop). Lookups go by
+  path (`items/{parent}:/{name}`), so `find_child` returns at most one item. A recycled item
+  answers 404, so `get` reports NotFound, never `trashed`.
+- **Uploads**: `createUploadSession` (`replace` for an existing file, after a PATCH that names and
+  places it; `fail` for a new one; `fileSize` so a file that won't fit is refused before any of
+  it is sent). The session is JSON with the upload URL and the target. Fragments go to the
+  upload URL without the token, at most 191 × 320 KiB (Graph wants less than 60 MiB). An
+  expired or finished session is NotFound; 416 asks where to go on from. Empty files skip the
+  session (one `PUT …/content`). An item without `quickXorHash` is fetched once more.
+- **Keep version**: a server-side copy `<stem> (replaced YYYY-MM-DD).<ext>` (UTC date, ` (2)` and
+  up when taken). The monitor URL is polled without the token until `completed`.
+- **Downloads** go through `/content`, which redirects to a pre-authenticated URL that is
+  followed without the token, keeping the `Range`.
+- **Errors**: 401 refreshes once, then Auth; 429/503 are RateLimited (`Retry-After`); 507 or
+  `quotaLimitReached` (also as an inner code) is Quota; 423 and 5xx are Transient.
+- **Web links**: personal accounts only, built from the cid that starts their ids
+  (`https://onedrive.live.com/?cid=…&id=…`). Work and school ids don't name the SharePoint site,
+  so they get none. Check the links in the live smoke test.
+
+**A release needs**:
+
+- An app registration in Microsoft Entra ID for "personal Microsoft accounts and accounts in any
+  organizational directory", as a **public client** (no secret, "Allow public client flows"),
+  platform "Mobile and desktop applications" with the **loopback redirect** `http://localhost`
+  (Entra ignores the port for loopback; register the host name the sign-in actually uses), and
+  delegated Graph permissions `Files.ReadWrite.AppFolder` and `offline_access`. Its client id
+  goes into the build.
+- **Publisher verification** (a verified Microsoft partner account on the registration), so work
+  and school accounts see a verified publisher and can consent where their organisation only
+  allows verified apps. Some organisations still need an admin to consent.
+- A live smoke test with a personal and a work account: the app folder's name in other
+  languages, hashes right after upload on work accounts, the copy monitor, web links.
+
 ## App changes
 
 - **Setup assistant**: a new first step, *Choose where to upload*, with a card per provider

@@ -20,15 +20,18 @@ pub enum Provider {
     #[default]
     #[serde(rename = "gdrive")]
     GoogleDrive,
+    #[serde(rename = "onedrive")]
+    OneDrive,
 }
 
 impl Provider {
     /// Every provider, for listings (setup, `clouddrop setup --provider`).
-    pub const ALL: &'static [Provider] = &[Provider::GoogleDrive];
+    pub const ALL: &'static [Provider] = &[Provider::GoogleDrive, Provider::OneDrive];
 
     pub fn info(self) -> &'static ProviderInfo {
         match self {
             Provider::GoogleDrive => &crate::drive::INFO,
+            Provider::OneDrive => &crate::onedrive::INFO,
         }
     }
 
@@ -282,6 +285,7 @@ pub type StorageQuota = (Option<u64>, u64, u64);
 /// The client for the configured provider.
 pub enum Remote {
     GoogleDrive(Drive),
+    OneDrive(crate::onedrive::OneDrive),
 }
 
 /// Runs `$body` with `$c` bound to whichever client `$remote` holds.
@@ -289,6 +293,7 @@ macro_rules! each_client {
     ($remote:expr, $c:ident => $body:expr) => {
         match $remote {
             Remote::GoogleDrive($c) => $body,
+            Remote::OneDrive($c) => $body,
         }
     };
 }
@@ -297,6 +302,7 @@ impl Remote {
     pub fn provider(&self) -> Provider {
         match self {
             Remote::GoogleDrive(_) => Provider::GoogleDrive,
+            Remote::OneDrive(_) => Provider::OneDrive,
         }
     }
 
