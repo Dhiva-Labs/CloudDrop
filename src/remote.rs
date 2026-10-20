@@ -29,11 +29,13 @@ pub enum Provider {
     WebDav,
     #[serde(rename = "nextcloud")]
     Nextcloud,
+    #[serde(rename = "s3")]
+    S3,
 }
 
 impl Provider {
     /// Every provider, for listings (setup, `clouddrop setup --provider`).
-    pub const ALL: &'static [Provider] = &[Provider::GoogleDrive, Provider::OneDrive, Provider::Dropbox, Provider::WebDav, Provider::Nextcloud];
+    pub const ALL: &'static [Provider] = &[Provider::GoogleDrive, Provider::OneDrive, Provider::Dropbox, Provider::WebDav, Provider::Nextcloud, Provider::S3];
 
     pub fn info(self) -> &'static ProviderInfo {
         match self {
@@ -42,6 +44,7 @@ impl Provider {
             Provider::Dropbox => &crate::dropbox::INFO,
             Provider::WebDav => &crate::webdav::INFO,
             Provider::Nextcloud => &crate::webdav::NEXTCLOUD_INFO,
+            Provider::S3 => &crate::s3::INFO,
         }
     }
 
@@ -300,6 +303,7 @@ pub enum Remote {
     Dropbox(crate::dropbox::Dropbox),
     /// `webdav` and `nextcloud` (one client; it knows which it is).
     WebDav(WebDav),
+    S3(Box<crate::s3::S3>),
 }
 
 /// Runs `$body` with `$c` bound to whichever client `$remote` holds.
@@ -310,6 +314,7 @@ macro_rules! each_client {
             Remote::OneDrive($c) => $body,
             Remote::Dropbox($c) => $body,
             Remote::WebDav($c) => $body,
+            Remote::S3($c) => $body,
         }
     };
 }
@@ -321,6 +326,7 @@ impl Remote {
             Remote::OneDrive(_) => Provider::OneDrive,
             Remote::Dropbox(_) => Provider::Dropbox,
             Remote::WebDav(c) => c.provider(),
+            Remote::S3(_) => Provider::S3,
         }
     }
 

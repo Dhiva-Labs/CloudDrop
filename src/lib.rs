@@ -13,6 +13,7 @@ pub mod notifier;
 pub mod oauth;
 pub mod onedrive;
 pub mod remote;
+pub mod s3;
 pub mod store;
 #[cfg(windows)]
 pub mod winstore;
@@ -46,5 +47,8 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
         remote::Provider::WebDav | remote::Provider::Nextcloud => Arc::new(remote::Remote::WebDav(
             webdav::WebDav::from_config(cfg, &token_file.with_file_name("credentials.json")),
         )),
+        remote::Provider::S3 => {
+            Arc::new(remote::Remote::S3(Box::new(s3::S3::with_saved_secret(drive::http_client(), &cfg.s3))))
+        }
     }
 }

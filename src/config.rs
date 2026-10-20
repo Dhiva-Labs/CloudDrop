@@ -48,6 +48,8 @@ pub struct Config {
     /// `[nextcloud]`: a Nextcloud server, signed in through the browser.
     #[serde(default, skip_serializing_if = "WebDavConfig::is_unset")]
     pub nextcloud: WebDavConfig,
+    #[serde(default, skip_serializing_if = "crate::s3::S3Config::is_default")]
+    pub s3: crate::s3::S3Config,
 }
 
 /// Google endpoints; overridable so tests can point at a local fake.
@@ -125,6 +127,7 @@ impl Default for Config {
             dropbox: Default::default(),
             webdav: WebDavConfig::default(),
             nextcloud: WebDavConfig::default(),
+            s3: Default::default(),
         }
     }
 }
