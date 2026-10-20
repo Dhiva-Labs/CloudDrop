@@ -116,7 +116,7 @@ async fn app_folder_folders_and_lookups() {
     let f = s.upload(None, odd, &root.id, b"hello", UNIT).await;
     assert_eq!(f.name, odd);
     let hits = s.od.find_child(odd, &root.id, false).await.unwrap();
-    assert_eq!(hits, [f.clone()]);
+    assert_eq!(hits, std::slice::from_ref(&f));
     assert!(s.od.find_child(odd, &root.id, true).await.unwrap().is_empty(), "not a folder");
     assert_eq!(s.od.get(&f.id).await.unwrap(), f);
 
@@ -125,7 +125,7 @@ async fn app_folder_folders_and_lookups() {
     let renamed = s.od.move_rename(&f.id, Some("b.txt"), None).await.unwrap();
     assert_eq!((renamed.id.as_str(), renamed.name.as_str()), (f.id.as_str(), "b.txt"));
     let moved = s.od.move_rename(&f.id, None, Some((&sub.id, &root.id))).await.unwrap();
-    assert_eq!(moved.parents, [sub.id.clone()]);
+    assert_eq!(moved.parents, std::slice::from_ref(&sub.id));
     assert_eq!(s.mock.lock().unwrap().lookup("CloudDrop/Sub/b.txt").unwrap().id, f.id);
     assert_eq!(s.od.move_rename(&f.id, None, None).await.unwrap(), moved);
 

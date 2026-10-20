@@ -103,9 +103,9 @@ async fn files_and_folders_round_trip() {
         let meta = upload(&c, None, &root.id, "a.txt", b"hello world", MIB).await;
         assert_eq!(meta.id, "/Backups/Laptop/CloudDrop/a.txt");
         assert_eq!((meta.size, meta.hash.as_ref(), meta.folder), (Some(11), None, false));
-        assert_eq!(meta.parents, [root.id.clone()]);
+        assert_eq!(meta.parents, std::slice::from_ref(&root.id));
         assert_eq!(c.get(&meta.id).await.unwrap(), meta);
-        assert_eq!(c.find_child("a.txt", &root.id, false).await.unwrap(), [meta.clone()]);
+        assert_eq!(c.find_child("a.txt", &root.id, false).await.unwrap(), std::slice::from_ref(&meta));
         assert!(c.find_child("a.txt", &root.id, true).await.unwrap().is_empty(), "not a folder");
         assert!(c.find_child("b.txt", &root.id, false).await.unwrap().is_empty());
         assert_eq!(c.get("/Backups/Laptop/CloudDrop/b.txt").await, Err(RemoteError::NotFound));

@@ -116,6 +116,10 @@ pub struct OAuthApp {
     pub scopes: &'static [&'static str],
     /// Extra query parameters for the authorisation URL (e.g. Dropbox's token_access_type=offline).
     pub extra_auth_params: &'static [(&'static str, &'static str)],
+    /// A fixed loopback port, for providers that match the redirect address exactly (Dropbox);
+    /// the redirect is then `http://localhost:<port>/`, which the app registration must list.
+    /// None: any free port on 127.0.0.1.
+    pub redirect_port: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -308,7 +312,7 @@ pub enum Remote {
     OneDrive(crate::onedrive::OneDrive),
     Dropbox(crate::dropbox::Dropbox),
     /// `webdav` and `nextcloud` (one client; it knows which it is).
-    WebDav(WebDav),
+    WebDav(Box<WebDav>),
     S3(Box<crate::s3::S3>),
     Sftp(crate::sftp::Sftp),
     Mega(crate::mega::Mega),

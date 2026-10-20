@@ -505,7 +505,7 @@ async fn upload(AxState(s): AxState<Shared>, method: Method, h: HeaderMap, AxPat
     if body.len() >= MAX_FRAGMENT {
         return error(413, "requestTooLarge", "Fragments must be under 60 MiB.");
     }
-    if b + 1 < total && body.len() % UNIT != 0 {
+    if b + 1 < total && !body.len().is_multiple_of(UNIT) {
         return error(400, "invalidRange", "Fragments must be multiples of 320 KiB.");
     }
     sess.received.extend_from_slice(&body);

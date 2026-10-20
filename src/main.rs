@@ -218,23 +218,28 @@ async fn login(cfg: &Config, browser: bool) -> Result<Option<String>> {
             })
             .await?;
         }
-        SignIn::OAuth(app) => {
-            let client_id = oauth::client_id(cfg, p).ok_or_else(|| {
+        SignIn::OAuth(_) => {
+            let client = oauth::client_for(cfg, p).ok_or_else(|| {
                 anyhow!("this build has no {name} client id: set one with `clouddrop setup --provider {id} --set client_id=…`")
             })?;
-            let client = oauth::OAuthClient::new(app, client_id);
             oauth::login(&client, &oauth::token_path(id), |url| {
                 show(url, format!("Sign in to {name} to let CloudDrop upload there:"))
             })
             .await?;
         }
         SignIn::NextcloudLoginFlow => {
-            return Ok(Some(format!(
-                "{name} connects with an app password from your server: the CloudDrop app's setup asks \
-                 the server for one in the browser. From the command line, save the server address and \
-                 an app password with `clouddrop setup --provider {id} --set … --secret …`, then run \
-                 `clouddrop check`."
-            )));
+            let server = cfg.nextcloud.url.trim();
+            if server.is_empty() {
+                bail!("set the server first: `clouddrop setup --provider {id} --set url=https://cloud.example.com`");
+            }
+            let flow = clouddrop::webdav::nextcloud_login_start(server).await?;
+            show(&flow.login_url, format!("Sign in to {name} and grant CloudDrop access:"));
+            let login = clouddrop::webdav::nextcloud_login_poll(&flow).await?;
+            let mut new = cfg.clone();
+            new.nextcloud = login.settings(&cfg.nextcloud);
+            new.save_to(&config::config_path())?;
+            clouddrop::credentials::save(id, login.secrets())?;
+            println!("Signed in to {} as {}.", login.server, login.login_name);
         }
         SignIn::Form(_) => {
             return Ok(Some(format!(

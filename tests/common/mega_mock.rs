@@ -68,8 +68,7 @@ fn cipher(key: &[u8]) -> Aes128 {
 fn ecb(key: &[u8], data: &[u8], encrypt: bool) -> Vec<u8> {
     let c = cipher(key);
     let mut out = data.to_vec();
-    for block in out.chunks_exact_mut(16) {
-        let b: &mut [u8; 16] = block.try_into().unwrap();
+    for b in out.as_chunks_mut::<16>().0 {
         if encrypt {
             c.encrypt_block(b.into());
         } else {

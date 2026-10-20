@@ -240,7 +240,7 @@ async fn keep_version_then_replace() {
     let v2 = upload(&r, Some(&v1.id), "notes.txt", &folder, b"second draft, longer").await;
     assert_ne!(v2.id, v1.id, "new content is a new node");
     let found = r.find_child("notes.txt", &folder, false).await.unwrap();
-    assert_eq!(found.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), [v2.id.clone()]);
+    assert_eq!(found.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), std::slice::from_ref(&v2.id));
     {
         let mock = s.mock.lock().unwrap();
         assert_eq!(mock.content(&v2.id), b"second draft, longer");

@@ -153,6 +153,13 @@ pub fn short_name(provider: Provider) -> &'static str {
 /// `name` without the characters a provider forbids: each becomes its full-width look-alike
 /// (`:` → `：`, `?` → `？`), a control character its symbol (`\n` → `␊`), anything else `_`.
 /// Look-alikes keep names readable and tell the originals apart.
+/// The upload chunk for a provider: the configured size rounded down to a multiple of what the
+/// provider requires (OneDrive 320 KiB, Dropbox 4 MiB…), and at least one unit.
+pub fn upload_chunk(configured: usize, unit: usize) -> usize {
+    let unit = unit.max(1);
+    (configured - configured % unit).max(unit)
+}
+
 pub fn cloud_safe_name(name: &str, forbidden: &str) -> String {
     if !name.contains(|c| forbidden.contains(c)) {
         return name.to_string();
@@ -1367,7 +1374,7 @@ impl Engine {
             parent_id,
             placement_only,
             free,
-            chunk: self.cfg.chunk_size,
+            chunk: upload_chunk(self.cfg.chunk_size, self.caps.chunk_unit),
             entry: e,
             caps: self.caps.clone(),
             tmp_dir: self.data_dir.clone(),
@@ -1681,6 +1688,16 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_chunks_fit_each_provider() {
+        let mib = 1024 * 1024;
+        assert_eq!(upload_chunk(8 * mib, 256 * 1024), 8 * mib);
+        assert_eq!(upload_chunk(8 * mib, 320 * 1024), 25 * 320 * 1024, "OneDrive: a multiple of 320 KiB");
+        assert_eq!(upload_chunk(8 * mib, 4 * mib), 8 * mib);
+        assert_eq!(upload_chunk(mib, 4 * mib), 4 * mib, "at least one unit");
+        assert_eq!(upload_chunk(8 * mib, 0), 8 * mib);
+    }
 
     #[test]
     fn forbidden_characters_become_look_alikes() {

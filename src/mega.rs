@@ -211,16 +211,14 @@ fn xor16(a: &mut [u8; 16], b: &[u8]) {
 /// AES-ECB over whole 16-byte blocks (how MEGA wraps keys with the master key).
 fn ecb_encrypt(key: &[u8; 16], data: &mut [u8]) {
     let c = aes(key);
-    for block in data.chunks_exact_mut(16) {
-        let b: &mut [u8; 16] = block.try_into().unwrap();
+    for b in data.as_chunks_mut::<16>().0 {
         c.encrypt_block(b.into());
     }
 }
 
 fn ecb_decrypt(key: &[u8; 16], data: &mut [u8]) {
     let c = aes(key);
-    for block in data.chunks_exact_mut(16) {
-        let b: &mut [u8; 16] = block.try_into().unwrap();
+    for b in data.as_chunks_mut::<16>().0 {
         c.decrypt_block(b.into());
     }
 }
@@ -231,10 +229,10 @@ fn encrypt_attrs(key: &[u8; 16], attrs: &Map<String, Value>) -> String {
     buf.resize(buf.len().div_ceil(16) * 16, 0);
     let c = aes(key);
     let mut prev = [0u8; 16];
-    for block in buf.chunks_exact_mut(16) {
+    for block in buf.as_chunks_mut::<16>().0 {
         xor16(&mut prev, block);
         encrypt_block(&c, &mut prev);
-        block.copy_from_slice(&prev);
+        *block = prev;
     }
     b64e(&buf)
 }
@@ -246,9 +244,8 @@ fn decrypt_attrs(key: &[u8; 16], s: &str) -> Option<Map<String, Value>> {
     }
     let c = aes(key);
     let mut prev = [0u8; 16];
-    for block in buf.chunks_exact_mut(16) {
-        let cur: [u8; 16] = (*block).try_into().unwrap();
-        let b: &mut [u8; 16] = block.try_into().unwrap();
+    for b in buf.as_chunks_mut::<16>().0 {
+        let cur = *b;
         c.decrypt_block(b.into());
         xor16(b, &prev);
         prev = cur;

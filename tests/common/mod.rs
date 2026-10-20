@@ -640,6 +640,8 @@ pub struct Harness {
     pub db: Arc<Db>,
     /// Run the engine and the CLI actions as if the provider had these capabilities.
     pub caps: Option<Capabilities>,
+    /// Another provider's client (pointed at its fake) instead of the Drive mock's.
+    client: Option<Arc<clouddrop::remote::Remote>>,
     engine: Option<(watch::Sender<bool>, tokio::task::JoinHandle<anyhow::Result<()>>)>,
 }
 
@@ -705,7 +707,7 @@ impl Harness {
         )
         .unwrap();
         let db = Arc::new(Db::open(&data.join("state.db")).unwrap());
-        Self { tmp, root, data, cfg, mock, db, caps: None, engine: None }
+        Self { tmp, root, data, cfg, mock, db, caps: None, client: None, engine: None }
     }
 
     pub fn token_path(&self) -> PathBuf {
@@ -713,7 +715,17 @@ impl Harness {
     }
 
     pub fn remote(&self) -> Arc<clouddrop::remote::Remote> {
-        clouddrop::remote_for(&self.cfg, self.token_path())
+        match &self.client {
+            Some(c) => c.clone(),
+            None => clouddrop::remote_for(&self.cfg, self.token_path()),
+        }
+    }
+
+    /// Runs the engine and the actions with `client`, another provider's, instead of the Drive
+    /// mock's (the config says that provider, so the database is bound to it).
+    pub fn use_client(&mut self, client: Arc<clouddrop::remote::Remote>) {
+        self.cfg.provider = client.provider();
+        self.client = Some(client);
     }
 
     /// A second database handle, like a separate `clouddrop` CLI process.

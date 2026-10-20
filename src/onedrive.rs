@@ -44,6 +44,8 @@ pub static INFO: ProviderInfo = ProviderInfo {
         token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
         scopes: &["Files.ReadWrite.AppFolder", "offline_access"],
         extra_auth_params: &[],
+        // Entra accepts any port for a loopback redirect.
+        redirect_port: None,
     }),
     web_url,
 };
@@ -86,7 +88,7 @@ impl TokenSource for NotSignedIn {
 
 /// Largest fragment sent in one request: Graph takes less than 60 MiB, in multiples of 320 KiB.
 const MAX_FRAGMENT: usize = 191 * 320 * 1024;
-const _: () = assert!(MAX_FRAGMENT < 60 * 1024 * 1024 && MAX_FRAGMENT % (320 * 1024) == 0);
+const _: () = assert!(MAX_FRAGMENT < 60 * 1024 * 1024 && MAX_FRAGMENT.is_multiple_of(320 * 1024));
 /// How long `keep_version` waits for OneDrive to finish copying the old content.
 const COPY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 

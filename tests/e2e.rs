@@ -1056,6 +1056,7 @@ async fn generic_oauth_sign_in_has_no_client_secret() {
         token_url: "https://unused.example/token",
         scopes: &["files", "offline_access"],
         extra_auth_params: &[("token_access_type", "offline")],
+        redirect_port: None,
     };
     let h = Harness::new().await;
     let base = h.mock.lock().unwrap().base.clone();

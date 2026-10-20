@@ -2,7 +2,18 @@
 
 ## Unreleased
 
-A new look, and ARM64.
+A new look, ARM64, and more clouds.
+
+- **More clouds (preview)**: besides Google Drive, CloudDrop can upload to OneDrive, Dropbox,
+  a WebDAV server, Nextcloud, S3-compatible storage (AWS, Backblaze B2, Wasabi, R2, MinIO…),
+  an SFTP server and MEGA. Choose one in the setup assistant. The same promises hold for every
+  one: upload-only, nothing deleted in the cloud, and space freed only after the cloud copy is
+  proved identical, by the provider's own hash or by downloading it. They are tested against
+  fake servers (SFTP against a real OpenSSH) but not yet with real accounts, and OneDrive and
+  Dropbox need app registrations before release builds can sign in
+  ([docs/PROVIDERS.md](docs/PROVIDERS.md)).
+- Command line: `clouddrop providers`, `setup --provider <id> --set … --secret …`, `check`;
+  `login` signs in to whichever provider is set up.
 
 - New logo: a cloud on a sky-blue tile with a drop cut through it, on Linux, Windows, the
   Microsoft Store and the notification-area icons.

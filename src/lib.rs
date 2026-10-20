@@ -33,22 +33,21 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
             let auth = Arc::new(auth::Auth::new(http.clone(), cfg, token_file));
             Arc::new(remote::Remote::GoogleDrive(drive::Drive::new(http, cfg.endpoints.clone(), auth)))
         }
-        // Until the generic OAuth sign-in is wired up, every call asks for sign-in.
-        remote::Provider::OneDrive => Arc::new(remote::Remote::OneDrive(onedrive::OneDrive::new(
-            drive::http_client(),
-            onedrive::GRAPH_BASE,
-            Arc::new(onedrive::NotSignedIn),
-        ))),
+        remote::Provider::OneDrive => {
+            let http = drive::http_client();
+            let tokens = oauth_tokens(cfg, &token_file, &http).unwrap_or_else(|| Arc::new(onedrive::NotSignedIn));
+            Arc::new(remote::Remote::OneDrive(onedrive::OneDrive::new(http, onedrive::GRAPH_BASE, tokens)))
+        }
         remote::Provider::Dropbox => {
-            // Until the browser sign-in is wired up: every call asks for a sign-in.
-            let tokens = Arc::new(dropbox::NotSignedIn);
+            let http = drive::http_client();
+            let tokens = oauth_tokens(cfg, &token_file, &http).unwrap_or_else(|| Arc::new(dropbox::NotSignedIn));
             let (api, content) = (&cfg.dropbox.api_base, &cfg.dropbox.content_base);
-            Arc::new(remote::Remote::Dropbox(dropbox::Dropbox::new(drive::http_client(), api, content, tokens)))
+            Arc::new(remote::Remote::Dropbox(dropbox::Dropbox::new(http, api, content, tokens)))
         }
         // The app password is in credentials.json, next to the token file in the data directory.
-        remote::Provider::WebDav | remote::Provider::Nextcloud => Arc::new(remote::Remote::WebDav(
+        remote::Provider::WebDav | remote::Provider::Nextcloud => Arc::new(remote::Remote::WebDav(Box::new(
             webdav::WebDav::from_config(cfg, &token_file.with_file_name("credentials.json")),
-        )),
+        ))),
         remote::Provider::S3 => {
             Arc::new(remote::Remote::S3(Box::new(s3::S3::with_saved_secret(drive::http_client(), &cfg.s3))))
         }
@@ -67,4 +66,16 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
             Arc::new(remote::Remote::Mega(mega::Mega::new(drive::http_client(), &cfg.mega, &data_dir)))
         }
     }
+}
+
+/// The browser sign-in of an OAuth provider: `token-<id>.json` beside `token_file`, in the data
+/// directory. None when this build has no client id for it (every call then asks to sign in).
+fn oauth_tokens(
+    cfg: &config::Config,
+    token_file: &std::path::Path,
+    http: &reqwest::Client,
+) -> Option<Arc<dyn remote::TokenSource>> {
+    let client = oauth::client_for(cfg, cfg.provider)?;
+    let path = token_file.with_file_name(format!("token-{}.json", cfg.provider.as_str()));
+    Some(Arc::new(oauth::TokenFile::new(http.clone(), &client, path)))
 }

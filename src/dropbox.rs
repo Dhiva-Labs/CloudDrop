@@ -21,6 +21,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::io::AsyncWriteExt;
 
+/// The loopback port of the browser sign-in; the app's settings on dropbox.com must list
+/// `http://localhost:53691/` as a redirect URI.
+pub const REDIRECT_PORT: u16 = 53691;
+
 pub static INFO: ProviderInfo = ProviderInfo {
     id: "dropbox",
     name: "Dropbox",
@@ -42,6 +46,8 @@ pub static INFO: ProviderInfo = ProviderInfo {
         scopes: &["files.metadata.read", "files.content.read", "files.content.write", "account_info.read"],
         // A refresh token, not just a four-hour access token.
         extra_auth_params: &[("token_access_type", "offline")],
+        // Dropbox matches redirect addresses exactly, port included.
+        redirect_port: Some(REDIRECT_PORT),
     }),
     web_url: no_web_url,
 };
@@ -1142,10 +1148,11 @@ mod tests {
         assert_eq!(mock.lock().unwrap().refreshes, 2);
 
         // The sign-in itself was revoked: Auth.
-        let mut st = mock.lock().unwrap();
-        st.expire_tokens();
-        st.refresh_token = "revoked".into();
-        drop(st);
+        {
+            let mut st = mock.lock().unwrap();
+            st.expire_tokens();
+            st.refresh_token = "revoked".into();
+        }
         assert!(matches!(db.storage_quota().await, Err(RemoteError::Auth(_))));
     }
 

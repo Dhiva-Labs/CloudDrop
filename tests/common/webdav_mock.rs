@@ -284,6 +284,8 @@ impl DavState {
     }
 
     /// Writes a file; checks the parent, room left and `OC-Checksum` (Nextcloud).
+    // The error is the answer to send back, as axum handlers return it.
+    #[allow(clippy::result_large_err)]
     fn write(&mut self, path: &str, content: Vec<u8>, h: &HeaderMap) -> Result<bool, Response> {
         if !self.parent_is_folder(path) {
             return Err(self.error(409, "Parent folder missing"));

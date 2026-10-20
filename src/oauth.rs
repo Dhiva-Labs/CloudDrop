@@ -52,15 +52,28 @@ fn client_from_list(list: &str, provider: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// The client id to sign in with: `[<id>] client_id` in the config, or the one built in.
+/// The client id to sign in with: `[<id>] client_id` (Dropbox calls it `app_key`) in the
+/// config, or the one built in.
 pub fn client_id(cfg: &Config, provider: Provider) -> Option<String> {
-    cfg.provider_section(provider)
+    let section = cfg.provider_section(provider);
+    section
         .get("client_id")
+        .or_else(|| section.get("app_key"))
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_string)
         .or_else(|| client_from_list(option_env!("CLOUDDROP_OAUTH_CLIENTS")?, provider.as_str()))
+}
+
+/// How `provider` signs in with this config: its [`OAuthApp`], the client id, and OneDrive's
+/// tenant. None: it doesn't use OAuth, or this build has no client id for it.
+pub fn client_for(cfg: &Config, provider: Provider) -> Option<OAuthClient> {
+    let mut client = OAuthClient::new(app(provider)?, client_id(cfg, provider)?);
+    if provider == Provider::OneDrive {
+        (client.auth_url, client.token_url) = crate::onedrive::oauth_endpoints(&cfg.onedrive.tenant);
+    }
+    Some(client)
 }
 
 /// Where and as whom to sign in: a provider's [`OAuthApp`] with a client id. The URLs can
@@ -72,6 +85,7 @@ pub struct OAuthClient {
     pub token_url: String,
     pub scopes: Vec<String>,
     pub extra_auth_params: Vec<(String, String)>,
+    pub redirect_port: Option<u16>,
 }
 
 impl OAuthClient {
@@ -86,6 +100,7 @@ impl OAuthClient {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            redirect_port: app.redirect_port,
         }
     }
 
@@ -120,8 +135,19 @@ pub async fn login(client: &OAuthClient, token_file: &Path, show_url: impl FnOnc
     }
     let (verifier, challenge) = pkce();
     let state = random_b64(16);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let redirect = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
+    let (listener, redirect) = match client.redirect_port {
+        Some(port) => {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .with_context(|| format!("port {port} is busy; close what uses it and sign in again"))?;
+            (listener, format!("http://localhost:{port}/"))
+        }
+        None => {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let redirect = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
+            (listener, redirect)
+        }
+    };
     show_url(client.consent_url(&redirect, &challenge, &state)?.as_str());
 
     let code = tokio::time::timeout(Duration::from_secs(300), wait_for_code(&listener, &state))
@@ -307,7 +333,27 @@ mod tests {
         token_url: "https://login.example.com/token",
         scopes: &["files.readwrite.appfolder", "offline_access"],
         extra_auth_params: &[("token_access_type", "offline")],
+        redirect_port: None,
     };
+
+    #[test]
+    fn each_provider_signs_in_its_own_way() {
+        let mut cfg = Config { provider: Provider::OneDrive, ..Config::default() };
+        cfg.onedrive.client_id = "od-client".into();
+        cfg.onedrive.tenant = "contoso.onmicrosoft.com".into();
+        let od = client_for(&cfg, Provider::OneDrive).unwrap();
+        assert_eq!(od.client_id, "od-client");
+        assert!(od.auth_url.contains("/contoso.onmicrosoft.com/oauth2/v2.0/authorize"), "{}", od.auth_url);
+        assert!(od.token_url.ends_with("/contoso.onmicrosoft.com/oauth2/v2.0/token"));
+        assert_eq!(od.redirect_port, None);
+
+        let mut cfg = Config { provider: Provider::Dropbox, ..Config::default() };
+        assert_eq!(client_for(&cfg, Provider::Dropbox).map(|c| c.client_id), client_from_list(option_env!("CLOUDDROP_OAUTH_CLIENTS").unwrap_or(""), "dropbox"));
+        cfg.dropbox.app_key = "db-key".into();
+        let db = client_for(&cfg, Provider::Dropbox).unwrap();
+        assert_eq!((db.client_id.as_str(), db.redirect_port), ("db-key", Some(crate::dropbox::REDIRECT_PORT)));
+        assert!(client_for(&cfg, Provider::GoogleDrive).is_none(), "Google signs in its own way");
+    }
 
     #[test]
     fn consent_url_has_pkce_scopes_and_extras_but_no_secret() {
