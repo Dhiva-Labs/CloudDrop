@@ -12,7 +12,7 @@ use clouddrop::onedrive::OneDrive;
 use clouddrop::remote::{Provider, Remote, RemoteResult, TokenSource};
 use clouddrop::s3::{S3, S3Config};
 use clouddrop::webdav::{WebDav, WebDavConfig};
-use clouddrop::{db::State, sftp};
+use clouddrop::db::State;
 use common::{Harness, dropbox_mock, mega_mock, onedrive_mock, read, s3_mock, webdav_mock};
 use futures_util::future::BoxFuture;
 use std::sync::{Arc, Mutex};
@@ -158,7 +158,8 @@ async fn sftp_server() {
     let Some(sshd) = common::sftp_mock::Sshd::start() else {
         return;
     };
-    let client = sftp::Sftp::new(sshd.config(sshd.port), sftp::Secrets::default(), None);
+    use clouddrop::sftp::{Secrets, Sftp};
+    let client = Sftp::new(sshd.config(sshd.port), Secrets::default(), None);
     let mut h = Harness::new().await;
     h.use_client(Arc::new(Remote::Sftp(client)));
     everyday_use(h).await;
