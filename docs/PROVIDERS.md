@@ -24,7 +24,7 @@ Least privilege wherever the provider allows it: today CloudDrop only sees the f
 | **Google Drive** (today) | OAuth, browser | `drive.file` | resumable session | `md5Checksum` | `keepForever` | `about.get` | — |
 | **OneDrive** (personal + work) | OAuth + PKCE, browser, no client secret | `Files.ReadWrite.AppFolder` → `Apps/CloudDrop` | upload session, `nextExpectedRanges` | `quickXorHash` | versions are automatic, cannot be pinned → keep-aside copy | `/me/drive` quota | M |
 | **Dropbox** | OAuth + PKCE, browser, offline refresh token | "App folder" app → `Apps/CloudDrop` | upload session (start / append / finish), resume by offset | `content_hash` (SHA-256 of 4 MiB block hashes) | history is 30–180 days, cannot be pinned → keep-aside copy | `get_space_usage` | M |
-| **Nextcloud / ownCloud** | Login Flow v2 (browser hands back an app password) | the user's own account, one folder | chunked upload v2 | `oc:checksums` (SHA1 / MD5) | versions app; keep-aside copy | `quota-*-bytes` | M |
+| **Nextcloud / ownCloud** | Login Flow v2 (browser hands back an app password) | the user's own account, one folder | chunked upload v2 | verify by download (`oc:checksums` SHA1 as an extra check) | versions app; keep-aside copy | `quota-*-bytes` | M |
 | **Other WebDAV** | URL, user, app password | one folder | none: a failed upload starts over | none → verify by download | keep-aside copy (`COPY`) | `quota-*-bytes` if offered | S (after Nextcloud) |
 | **S3-compatible** (AWS, Backblaze B2, Wasabi, R2, MinIO, Garage) | endpoint, bucket, access key | a key scoped to one bucket + prefix | multipart, resume via `ListParts` | `x-amz-checksum-sha256` where supported, else single-part ETag (MD5), else verify by download | bucket versioning, else keep-aside copy | none ("CloudDrop holds …") | M |
 | **SFTP** | host-key check (shown, trust on first use), SSH key or agent | one directory | write at offset | none → `sha256sum` over SSH if allowed, else verify by download | keep-aside copy | `statvfs@openssh.com` | M |
@@ -73,6 +73,52 @@ change it to "trust a completed upload" (size check only), with a clear warning.
   and ship Proton as "experimental" once the official SDK supports third-party sign-in**,
   through a small sidecar process if no C ABI is offered. Follow Proton's naming and branding
   rules for third-party apps. Never store the Proton password, only the session.
+
+### WebDAV / Nextcloud
+
+One client (`src/webdav.rs`) for two providers, because Login Flow v2 exists only on Nextcloud
+and capabilities are static:
+
+| | `webdav` ("WebDAV") | `nextcloud` ("Nextcloud") |
+| --- | --- | --- |
+| Sign-in | `Form`: `url`, `user`, `password` (secret), `folder` | `NextcloudLoginFlow` |
+| Config / credentials | `[webdav]`, `credentials.json` › `webdav.password` | `[nextcloud]`, `credentials.json` › `nextcloud.password` |
+| `resumable` | false | true (chunks stay on the server) |
+
+Both: `hash: None`, `pin_versions: false`, `stable_ids: false`, `forbidden_chars: "\"`,
+`chunk_unit` 1 MiB, no web links. ownCloud and Nextcloud servers set up as `webdav` still get
+chunked uploads and checksums: the client looks at the server, whatever the provider.
+
+- **The server.** `status.php` says whether it's Nextcloud/ownCloud. If it is, files are at
+  `remote.php/dav/files/<user id>` (the id comes from the DAV principal and may differ from the
+  login name), and chunked uploads are on when OCS reports `dav.chunking`. Anything else is
+  plain WebDAV at `url`. `WebDav::probe()` does this and checks the password;
+  `clouddrop setup` and `check` should save its `ServerInfo` as the section's `server`, so later
+  starts skip it (without it, the client looks once per start).
+- **Ids** are paths below the files' top level: `/`, `/Backups/CloudDrop/a.txt`. A child's id
+  is its parent's id + `/` + name, so after a folder move the engine swaps the prefix
+  `old + "/"` for `new + "/"` beneath it. `top_parent` is `/<folder>`, made if missing.
+- **Uploads.** The whole file in one chunk: one PUT. More chunks on Nextcloud: chunked upload
+  v2 (MKCOL `uploads/<id>/<session>`, PUT `00001`…, MOVE `.file` with `Destination`,
+  `OC-Total-Length` and `OC-Checksum: SHA1:`). `query_upload` lists the chunks the server
+  holds, so another process continues there. Chunks under 5 MiB (Nextcloud on S3 needs that)
+  and other servers get one PUT with a known length whose body is fed chunk by chunk;
+  `query_upload` answers `Next(0)` for those.
+- **Proof.** Freeing verifies by download. `oc:checksums` is whatever the uploading client
+  said, so it's only an extra check: after an upload (with Nextcloud's own `X-Hash-SHA1` of the
+  bytes it received) and on downloads (`OC-Checksum` must match the content).
+- **Never overwriting.** `keep_version` COPYs to `<stem> (replaced YYYY-MM-DD).<ext>`. MOVE and
+  COPY send `Overwrite: F`; a file CloudDrop doesn't know that sits where an upload or a rename
+  has to go is first moved aside under that same name. A folder in the way is an error.
+- **Errors.** 401 `Auth`; 404 and 409 (missing parent) `NotFound`; 429, and 503 with
+  `Retry-After`, `RateLimited`; 507 `Quota`; 408, 423 and other 5xx `Transient`.
+- **`clouddrop login`** for `SignIn::NextcloudLoginFlow`: `webdav::nextcloud_login_start(url)`,
+  show `flow.login_url` (open the browser), then `webdav::nextcloud_login_poll(&flow)`, which
+  waits (every 2 s, up to 20 minutes) and returns the server, login name and app password.
+  `login.settings(&cfg.nextcloud)` is the new `[nextcloud]` section and
+  `credentials::save("nextcloud", login.secrets())` stores the password.
+- **Tests:** `tests/webdav.rs` against `tests/common/webdav_mock.rs`, in plain and Nextcloud
+  mode.
 
 ## Engine changes (phase 0, no visible change)
 

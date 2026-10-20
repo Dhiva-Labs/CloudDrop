@@ -1,4 +1,5 @@
 use crate::remote::Provider;
+use crate::webdav::WebDavConfig;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,12 @@ pub struct Config {
     pub chunk_size: usize,
     #[serde(skip_serializing_if = "Endpoints::is_default")]
     pub endpoints: Endpoints,
+    /// `[webdav]`: a WebDAV server (its app password is in credentials.json).
+    #[serde(default, skip_serializing_if = "WebDavConfig::is_unset")]
+    pub webdav: WebDavConfig,
+    /// `[nextcloud]`: a Nextcloud server, signed in through the browser.
+    #[serde(default, skip_serializing_if = "WebDavConfig::is_unset")]
+    pub nextcloud: WebDavConfig,
 }
 
 /// Google endpoints; overridable so tests can point at a local fake.
@@ -86,6 +93,8 @@ impl Default for Config {
             keep_local: Vec::new(),
             chunk_size: DEFAULT_CHUNK,
             endpoints: Endpoints::default(),
+            webdav: WebDavConfig::default(),
+            nextcloud: WebDavConfig::default(),
         }
     }
 }
