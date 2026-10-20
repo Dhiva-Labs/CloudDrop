@@ -130,7 +130,9 @@ pub fn run() {
             } else if ev.id == open_drive.id() {
                 if let Ok(Some(id)) = Db::open_default().and_then(|db| db.meta_get("root_id")) {
                     let provider = Config::load().map(|c| c.provider).unwrap_or_default();
-                    open(&provider.web_url(Kind::Dir, &id));
+                    if let Some(url) = provider.web_url(Kind::Dir, &id) {
+                        open(&url);
+                    }
                 }
             } else if ev.id == show.id() {
                 show_app();

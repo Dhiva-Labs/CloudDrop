@@ -3,7 +3,11 @@
 
 use crate::auth::Auth;
 use crate::config::Endpoints;
-use crate::remote::{ContentHash, RemoteError, RemoteMeta, RemoteResult, StorageQuota, UploadStatus};
+use crate::db::Kind;
+use crate::remote::{
+    Capabilities, ContentHash, HashKind, ProviderInfo, RemoteError, RemoteMeta, RemoteResult, SignIn,
+    StorageQuota, UploadStatus,
+};
 use futures_util::StreamExt;
 use md5::{Digest, Md5};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
@@ -14,6 +18,27 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
 pub const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
+
+pub static INFO: ProviderInfo = ProviderInfo {
+    id: "gdrive",
+    name: "Google Drive",
+    caps: Capabilities {
+        hash: Some(HashKind::Md5),
+        pin_versions: true,
+        stable_ids: true,
+        resumable: true,
+        case_insensitive: false,
+        forbidden_chars: "",
+        chunk_unit: 256 * 1024,
+    },
+    sign_in: SignIn::Google,
+    web_url: |kind, id| {
+        Some(match kind {
+            Kind::Dir => format!("https://drive.google.com/drive/folders/{id}"),
+            Kind::File => format!("https://drive.google.com/file/d/{id}/view"),
+        })
+    },
+};
 const FIELDS: &str = "id,name,mimeType,parents,md5Checksum,size,trashed,headRevisionId";
 
 /// A file's metadata as Drive sends it.
@@ -121,6 +146,11 @@ impl Drive {
         Ok((num("limit"), num("usage").unwrap_or(0), num("usageInDrive").unwrap_or(0)))
     }
 
+    /// My Drive.
+    pub async fn top_parent(&self) -> RemoteResult<String> {
+        Ok("root".into())
+    }
+
     pub async fn get(&self, id: &str) -> RemoteResult<RemoteMeta> {
         Ok(self.file(id).await?.into())
     }
@@ -172,7 +202,7 @@ impl Drive {
     }
 
     /// Renames and/or moves an item. `parents` = (new, old) when moving.
-    pub async fn update_meta(
+    pub async fn move_rename(
         &self,
         id: &str,
         name: Option<&str>,
@@ -195,7 +225,7 @@ impl Drive {
     }
 
     /// Marks the current head revision "keep forever" so replacing the content never purges it.
-    pub async fn pin_head_revision(&self, id: &str) -> RemoteResult<()> {
+    pub async fn keep_version(&self, id: &str) -> RemoteResult<()> {
         let meta = self.file(id).await?;
         let Some(rev) = meta.head_revision_id else {
             return Ok(());
@@ -313,8 +343,8 @@ impl Drive {
             .map_err(|e| RemoteError::Transient(format!("download interrupted: {e}")))
     }
 
-    /// Streams a file's content into `out`; returns (md5 hex, bytes written).
-    pub async fn download(&self, id: &str, out: &mut tokio::fs::File) -> RemoteResult<(String, u64)> {
+    /// Streams a file's content into `out`; returns (its MD5, bytes written).
+    pub async fn download(&self, id: &str, out: &mut tokio::fs::File) -> RemoteResult<(ContentHash, u64)> {
         let url = format!("{}/files/{id}", self.ep.api_base);
         let resp = self
             .call(|c| c.get(&url).query(&[("alt", "media")]).timeout(Duration::from_secs(24 * 3600)))
@@ -333,7 +363,7 @@ impl Drive {
         out.flush()
             .await
             .map_err(|e| RemoteError::Permanent(format!("cannot write download: {e}")))?;
-        Ok((hex::encode(hasher.finalize()), total))
+        Ok((ContentHash::md5(hex::encode(hasher.finalize())), total))
     }
 }
 

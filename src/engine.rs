@@ -283,17 +283,18 @@ impl Engine {
                 Err(e) => {
                     let msg = e.to_string();
                     tracing::warn!("Drive folder unavailable: {msg}");
-                    if msg != last_msg && !matches!(e, RemoteError::Transient(_)) {
+                    if msg != last_msg && !e.is_transient() {
                         self.notifier.send("CloudDrop is paused", &msg);
                     }
                     let phase = match e {
                         RemoteError::Auth(_) => Phase::NeedsSignIn,
-                        RemoteError::Transient(_) => Phase::Offline,
+                        _ if e.is_transient() => Phase::Offline,
                         _ => Phase::DriveFolderMissing,
                     };
                     last_msg = msg.clone();
                     let wait = match e {
-                        RemoteError::Transient(_) | RemoteError::Auth(_) => 30,
+                        RemoteError::Auth(_) => 30,
+                        _ if e.is_transient() => 30,
                         _ => 120,
                     };
                     // Retry early when `clouddrop login` writes a new token.
@@ -329,9 +330,10 @@ impl Engine {
             };
         }
         let name = &self.cfg.drive_folder;
-        let id = match self.remote.find_child(name, "root", true).await?.into_iter().next() {
+        let top = self.remote.top_parent().await?;
+        let id = match self.remote.find_child(name, &top, true).await?.into_iter().next() {
             Some(existing) => existing.id,
-            None => self.remote.create_folder(name, "root").await?.id,
+            None => self.remote.create_folder(name, &top).await?.id,
         };
         self.db
             .meta_set("root_id", &id)
@@ -1338,7 +1340,7 @@ impl Engine {
                         e.state = base;
                         self.pause(msg);
                     }
-                    RemoteError::Transient(msg) => {
+                    RemoteError::Transient(msg) | RemoteError::RateLimited { message: msg, .. } => {
                         e.attempts += 1;
                         e.retry_at = Some(now_ms() + backoff_ms(e.attempts));
                         e.state = base;
@@ -1346,7 +1348,7 @@ impl Engine {
                         self.last_transient = Some((Instant::now(), msg.clone()));
                         e.error = Some(msg);
                     }
-                    RemoteError::NotFound | RemoteError::Permanent(_) => {
+                    RemoteError::NotFound | RemoteError::Quota(_) | RemoteError::Permanent(_) => {
                         let msg = err.to_string();
                         tracing::error!("{path}: {msg}");
                         if job.placement_only {
