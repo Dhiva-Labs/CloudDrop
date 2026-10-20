@@ -1269,7 +1269,7 @@ mod tests {
         assert_eq!(resume_offset(20 * M), 18 * M);
         for n in [0, 1, M - 1, 7 * M + 12345, 100 * M] {
             let r = resume_offset(n);
-            assert!(r + IN_FLIGHT as u64 <= n.max(IN_FLIGHT as u64) && r % CHUNK_UNIT as u64 == 0, "{n}");
+            assert!(r + IN_FLIGHT as u64 <= n.max(IN_FLIGHT as u64) && r.is_multiple_of(CHUNK_UNIT as u64), "{n}");
         }
     }
 

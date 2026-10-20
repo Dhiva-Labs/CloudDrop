@@ -200,7 +200,7 @@ async fn upload_resumes_after_a_cut() {
     let UploadStatus::Next(offset) = r.query_upload(&session, total).await.unwrap() else {
         panic!("not finished yet")
     };
-    assert!(offset % MIB as u64 == 0 && (6 * MIB as u64..=11 * MIB as u64).contains(&offset), "{offset}");
+    assert!(offset.is_multiple_of(MIB as u64) && (6 * MIB as u64..=11 * MIB as u64).contains(&offset), "{offset}");
     let fresh = client(s.config(proxy.port));
     assert_eq!(fresh.query_upload(&session, total).await.unwrap(), UploadStatus::Next(offset));
 
