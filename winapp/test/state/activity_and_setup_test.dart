@@ -1,5 +1,6 @@
 import 'package:clouddrop_app/data/engine_api.dart';
 import 'package:clouddrop_app/data/models.dart';
+import 'package:clouddrop_app/logic/activity_text.dart';
 import 'package:clouddrop_app/logic/fmt.dart' as fmt;
 import 'package:clouddrop_app/state/activity_controller.dart';
 import 'package:clouddrop_app/state/setup_controller.dart';
@@ -36,6 +37,35 @@ void main() {
       await c.refresh();
       expect(n, 1);
       expect(c.items.first.path, 'z.bin');
+    });
+
+    test("the filter narrows the list; Home's recent rows ignore it", () async {
+      final t = TestApp(daemon: const DaemonStatus(pid: 1, updatedMs: 1, phase: Phase.idle));
+      for (var i = 1; i <= 120; i++) {
+        t.db.activity(i % 4 == 0 ? 'failed' : 'uploaded', 'f$i.txt', at: i * 1000, detail: 'x');
+      }
+      final app = await t.ready();
+      final c = ActivityController(app)..visible = true;
+      addTearDown(c.dispose);
+      await c.refresh();
+      expect(c.recent.map((a) => a.path), ['f120.txt', 'f119.txt', 'f118.txt', 'f117.txt']);
+      c.filter = ActivityFilter.problems;
+      expect(c.visibleItems.length, 30);
+      expect(c.visibleItems.every((a) => a.kind == ActivityKind.failed), isTrue);
+      expect(c.hasMore, isFalse);
+      c.filter = ActivityFilter.downloads;
+      expect(c.visibleItems, isEmpty);
+      expect(c.recent.length, ActivityController.recentCount);
+    });
+
+    test('loads while Home or Activity shows', () async {
+      final t = TestApp(daemon: const DaemonStatus(pid: 1, updatedMs: 1, phase: Phase.idle));
+      t.db.activity('uploaded', 'a.txt', at: 1000);
+      final app = await t.ready();
+      final c = ActivityController(app);
+      addTearDown(c.dispose);
+      await Future<void>.delayed(Duration.zero);
+      expect(c.loaded, isTrue, reason: 'the app opens on Home');
     });
 
     test('empty history', () async {

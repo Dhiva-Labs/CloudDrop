@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+A new look, and ARM64.
+
+- New logo: a cloud on a sky-blue tile with a drop cut through it, on Linux, Windows, the
+  Microsoft Store and the notification-area icons.
+- Home: a status card in the logo's colours that shows overall progress, upload speed and
+  time left while uploading, and the latest activity with *See All*.
+- The status is on every screen: an icon in the header bar on Linux, a line under the logo
+  in the navigation pane on Windows.
+- Activity can show just uploads, freed space, downloads or problems.
+- An empty folder in Files is a drop zone; *Free Up Space* has its own broom icon.
+- About CloudDrop (main menu on Linux, Settings on Windows): version and links.
+- Setup assistant: refreshed welcome page; on Windows, the steps are named.
 - Linux and Windows on ARM64: CI builds and tests CloudDrop natively on arm64 as well as
   x64 (Linux tests, Debian package and snap; Windows engine, Cloud Files test, app and
   packages). Releases carry `CloudDrop-<version>-windows-arm64.zip` next to the x64 zip.

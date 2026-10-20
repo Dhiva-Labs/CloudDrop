@@ -21,6 +21,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub enum Nav {
     Files { dir: String, filter: Filter, select: Option<String> },
+    Activity,
 }
 
 type NavHandler = Rc<dyn Fn(Nav)>;

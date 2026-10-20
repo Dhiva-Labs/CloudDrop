@@ -4,6 +4,37 @@ library;
 import '../data/models.dart';
 import 'fmt.dart';
 
+/// Which rows the Activity screen lists.
+enum ActivityFilter {
+  all('All activity'),
+  uploads('Uploads'),
+  freed('Space freed'),
+  downloads('Downloads'),
+  problems('Problems');
+
+  const ActivityFilter(this.label);
+  final String label;
+
+  bool matches(ActivityKind k) => switch (this) {
+    ActivityFilter.all => true,
+    ActivityFilter.uploads =>
+      k == ActivityKind.uploaded || k == ActivityKind.updated || k == ActivityKind.moved,
+    ActivityFilter.freed =>
+      k == ActivityKind.freed || k == ActivityKind.autoFreed || k == ActivityKind.keptInCloud,
+    ActivityFilter.downloads => k == ActivityKind.restored,
+    ActivityFilter.problems => k == ActivityKind.failed,
+  };
+
+  /// What the list says when nothing matches.
+  String get emptyText => switch (this) {
+    ActivityFilter.all => 'Uploads, downloads and other changes will be listed here.',
+    ActivityFilter.uploads => 'Nothing has been uploaded recently.',
+    ActivityFilter.freed => 'No space has been freed recently.',
+    ActivityFilter.downloads => 'Nothing has been downloaded back recently.',
+    ActivityFilter.problems => 'No uploads have failed recently.',
+  };
+}
+
 /// Colour family of an activity icon.
 enum Tone { ok, info, warn }
 

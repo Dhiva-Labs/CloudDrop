@@ -252,7 +252,7 @@ impl FilesPage {
             .css_classes(["heading"])
             .build();
         let (download, download_text) = label_button("folder-download-symbolic", "Download", "Download to this computer");
-        let (free, free_text) = label_button("drive-harddisk-symbolic", "Free Up Space", "Remove the local copy; it stays in Google Drive");
+        let (free, free_text) = label_button("clouddrop-free-up-space-symbolic", "Free Up Space", "Remove the local copy; it stays in Google Drive");
         let (retry, retry_text) = label_button("view-refresh-symbolic", "Retry", "Try the upload again");
         let keep = gtk::ToggleButton::builder()
             .icon_name("view-pin-symbolic")
@@ -849,14 +849,20 @@ impl FilesPage {
             ("folder-symbolic", t.to_string(), d.to_string(), false)
         } else if dir.is_empty() {
             (
-                "folder-symbolic",
+                "clouddrop-syncing-symbolic",
                 "CloudDrop Is Empty".to_string(),
                 "Drop files here or click Add Files to start uploading to Google Drive.".to_string(),
                 true,
             )
         } else {
-            ("folder-symbolic", "This Folder Is Empty".to_string(), "Drop files here to add them to this folder.".to_string(), true)
+            ("clouddrop-syncing-symbolic", "This Folder Is Empty".to_string(), "Drop files here to add them to this folder.".to_string(), true)
         };
+        // Where files can be added, the empty folder is drawn as a drop zone.
+        if add {
+            self.empty.add_css_class("drop-zone");
+        } else {
+            self.empty.remove_css_class("drop-zone");
+        }
         self.empty.set_icon_name(Some(icon));
         self.empty.set_title(&title);
         self.empty.set_description(Some(&text));

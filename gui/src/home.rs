@@ -1,5 +1,7 @@
-//! Home tab: one calm summary, two storage cards and the everyday actions.
+//! Home tab: one calm summary (with speed and time left while uploading), the uploads running
+//! now, the everyday actions, two storage cards and the latest activity.
 
+use crate::activity::activity_row;
 use crate::fmt;
 use crate::model::Filter;
 use crate::ops::{Nav, Ops};
@@ -9,6 +11,7 @@ use adw::prelude::*;
 use clouddrop::control::{self, Quota};
 use clouddrop::db::Kind;
 use clouddrop::util::{self, human_bytes};
+use clouddrop_tray::TrayIcon;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -86,11 +89,16 @@ pub struct HomePage {
     pub root: gtk::Box,
     /// The two storage cards; stacked when the window is narrow.
     pub cards: gtk::Box,
+    /// The four action tiles: one row, or two rows of two when the window is narrow.
+    pub tiles: gtk::FlowBox,
     ops: Rc<Ops>,
     banner: adw::Banner,
+    badge: gtk::Box,
     icon: gtk::Image,
     title: gtk::Label,
     detail: gtk::Label,
+    progress: gtk::ProgressBar,
+    speed: gtk::Label,
     action_btn: gtk::Button,
     action: Cell<Option<Action>>,
     uploads: adw::PreferencesGroup,
@@ -102,25 +110,41 @@ pub struct HomePage {
     pause_label: gtk::Label,
     drive: Card,
     computer: Card,
+    recent: adw::PreferencesGroup,
+    recent_rows: RefCell<Vec<adw::ActionRow>>,
+    /// Newest activity id shown in `recent`.
+    recent_id: Cell<Option<i64>>,
     last: RefCell<Option<Snapshot>>,
 }
+
+/// How many activity rows Home shows.
+const RECENT: usize = 4;
 
 impl HomePage {
     pub fn new(ops: Rc<Ops>) -> Rc<Self> {
         let banner = adw::Banner::builder().button_label("Review").build();
 
         let content = ui::vbox(20);
-        // Hero
+        // Hero: the status on a wash of the logo's sky.
         let hero = ui::vbox(6);
-        let icon = gtk::Image::builder().pixel_size(64).margin_bottom(6).build();
-        let title = ui::label("", &["title-1"]);
+        hero.add_css_class("card");
+        hero.add_css_class("hero");
+        let icon = gtk::Image::builder().pixel_size(40).build();
+        let badge = gtk::Box::builder().halign(gtk::Align::Center).margin_bottom(8).css_classes(["hero-badge"]).build();
+        badge.append(&icon);
+        let title = ui::label("", &["title-2"]);
         let detail = ui::label("", &["dim-label"]);
+        let progress = gtk::ProgressBar::builder().margin_top(8).visible(false).build();
+        let speed = ui::label("", &["caption", "dim-label", "numeric"]);
+        speed.set_visible(false);
         let action_btn = ui::pill("", true);
         action_btn.set_visible(false);
         action_btn.set_margin_top(10);
-        hero.append(&icon);
+        hero.append(&badge);
         hero.append(&title);
         hero.append(&detail);
+        hero.append(&progress);
+        hero.append(&speed);
         hero.append(&action_btn);
         content.append(&hero);
 
@@ -141,7 +165,7 @@ impl HomePage {
         open_tile.set_tooltip_text(Some("Open the CloudDrop folder in Files"));
         let (add_tile, _, _) = tile("list-add-symbolic", "Add Files…");
         add_tile.set_tooltip_text(Some("Copy files into CloudDrop to upload them"));
-        let (free_tile, _, _) = tile("drive-harddisk-symbolic", "Free Up Space…");
+        let (free_tile, _, _) = tile("clouddrop-free-up-space-symbolic", "Free Up Space…");
         free_tile.set_tooltip_text(Some("Remove local copies of uploaded files; they stay in Google Drive"));
         let (pause_tile, pause_icon, pause_label) = tile("media-playback-pause-symbolic", "Pause Uploads");
         for t in [&open_tile, &add_tile, &free_tile, &pause_tile] {
@@ -162,6 +186,18 @@ impl HomePage {
         cards.append(&computer.root);
         content.append(&cards);
 
+        let see_all = gtk::Button::builder()
+            .label("See All")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .build();
+        let recent = adw::PreferencesGroup::builder()
+            .title("Recent Activity")
+            .header_suffix(&see_all)
+            .visible(false)
+            .build();
+        content.append(&recent);
+
         let root = ui::vbox(0);
         root.append(&banner);
         root.append(&ui::body_wide(&content, 720));
@@ -169,11 +205,15 @@ impl HomePage {
         let me = Rc::new(HomePage {
             root,
             cards,
+            tiles,
             ops: ops.clone(),
             banner,
+            badge,
             icon,
             title,
             detail,
+            progress,
+            speed,
             action_btn,
             action: Cell::new(None),
             uploads,
@@ -185,9 +225,14 @@ impl HomePage {
             pause_label,
             drive,
             computer,
+            recent,
+            recent_rows: RefCell::default(),
+            recent_id: Cell::new(None),
             last: RefCell::default(),
         });
         me.connect(&open_tile, &open_drive, &open_local);
+        let ops = me.ops.clone();
+        see_all.connect_clicked(move |_| ops.navigate(Nav::Activity));
         me
     }
 
@@ -275,11 +320,23 @@ impl HomePage {
         );
     }
 
-    pub fn update(&self, s: &Snapshot) {
+    /// Updates everything from a fresh snapshot; the activity list only while Home shows.
+    pub fn update(&self, s: &Snapshot, visible: bool) {
         let sum = summarize(s);
         self.icon.set_icon_name(Some(sum.icon));
+        let tone = match sum.tray {
+            TrayIcon::Idle => "ok",
+            TrayIcon::Syncing => "busy",
+            TrayIcon::Paused => "paused",
+            TrayIcon::Attention => "warn",
+        };
+        self.badge.set_css_classes(&["hero-badge", tone]);
         self.title.set_label(&sum.title);
         self.detail.set_label(&sum.detail);
+        self.progress.set_visible(sum.fraction.is_some());
+        self.progress.set_fraction(sum.fraction.unwrap_or(0.0));
+        self.speed.set_visible(sum.fraction.is_some());
+        self.speed.set_label(sum.speed.as_deref().unwrap_or("Measuring speed…"));
         self.action.set(sum.action);
         match sum.action {
             Some(a) => {
@@ -313,7 +370,31 @@ impl HomePage {
 
         self.update_drive(s);
         self.update_computer(s);
+        if visible {
+            self.update_recent();
+        }
         *self.last.borrow_mut() = Some(s.clone());
+    }
+
+    /// Reads the newest activity when something new was logged.
+    fn update_recent(&self) {
+        let Some(db) = self.ops.db() else {
+            return;
+        };
+        let id = db.last_activity_id().unwrap_or(0);
+        if self.recent_id.replace(Some(id)) == Some(id) {
+            return;
+        }
+        for row in self.recent_rows.borrow_mut().drain(..) {
+            self.recent.remove(&row);
+        }
+        let items = db.recent_activity(RECENT).unwrap_or_default();
+        for a in &items {
+            let row = activity_row(&self.ops, a);
+            self.recent.add(&row);
+            self.recent_rows.borrow_mut().push(row);
+        }
+        self.recent.set_visible(!items.is_empty());
     }
 
     fn update_drive(&self, s: &Snapshot) {

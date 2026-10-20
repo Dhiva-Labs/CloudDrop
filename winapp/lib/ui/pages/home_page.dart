@@ -1,5 +1,5 @@
-/// Home: one calm summary, the uploads running now, the everyday actions and two storage
-/// cards (`gui/src/home.rs`).
+/// Home: one calm summary (with speed and time left while uploading), the uploads running
+/// now, the everyday actions, two storage cards and the latest activity (`gui/src/home.rs`).
 library;
 
 import 'package:fluent_ui/fluent_ui.dart';
@@ -7,6 +7,7 @@ import 'package:fluent_ui/fluent_ui.dart';
 import '../../data/models.dart';
 import '../../logic/fmt.dart' as fmt;
 import '../../logic/snapshot.dart';
+import '../../state/activity_controller.dart';
 import '../../state/app_controller.dart';
 import '../scope.dart';
 import '../theme.dart';
@@ -20,22 +21,24 @@ class HomePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final app = AppScope.of(context).app;
+    final scope = AppScope.of(context);
+    final app = scope.app;
     return ScaffoldPage(
       padding: const EdgeInsets.only(top: 14),
       header: const AppPageHeader('Home'),
       content: ListenableBuilder(
-        listenable: Listenable.merge([app, app.busyCount]),
-        builder: (context, _) => _HomeBody(app: app),
+        listenable: Listenable.merge([app, app.busyCount, scope.activity]),
+        builder: (context, _) => _HomeBody(app: app, activity: scope.activity),
       ),
     );
   }
 }
 
 class _HomeBody extends StatelessWidget {
-  const _HomeBody({required this.app});
+  const _HomeBody({required this.app, required this.activity});
 
   final AppController app;
+  final ActivityController activity;
 
   @override
   Widget build(BuildContext context) {
@@ -65,6 +68,30 @@ class _HomeBody extends StatelessWidget {
         _Tiles(app: app),
         const SizedBox(height: 16),
         _Storage(app: app),
+        if (activity.recent.isNotEmpty) ...[
+          SectionTitle(
+            'Recent activity',
+            trailing: HyperlinkButton(
+              onPressed: () => app.pane.value = AppPane.activity,
+              child: const Text('See All'),
+            ),
+          ),
+          Surface(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Column(
+              children: [
+                for (var i = 0; i < activity.recent.length; i++) ...[
+                  if (i > 0)
+                    const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: Divider()),
+                  ActivityRow(
+                    activity: activity.recent[i],
+                    onOpen: (a) => app.showFiles(dir: parentOf(a.path), select: a.path),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -88,22 +115,31 @@ class _Hero extends StatelessWidget {
       SummaryIcon.attention => (FluentIcons.warning, theme.caution),
     };
     final action = summary.action;
+    final fraction = summary.fraction;
     final narrow = MediaQuery.widthOf(context) < 560;
+    final align = narrow ? CrossAxisAlignment.center : CrossAxisAlignment.start;
+    final textAlign = narrow ? TextAlign.center : TextAlign.start;
     final text = Column(
-      crossAxisAlignment: narrow ? CrossAxisAlignment.center : CrossAxisAlignment.start,
+      crossAxisAlignment: align,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          summary.title,
-          style: theme.typography.subtitle,
-          textAlign: narrow ? TextAlign.center : TextAlign.start,
-        ),
+        Text(summary.title, style: theme.typography.subtitle, textAlign: textAlign),
         const SizedBox(height: 4),
         Text(
           summary.detail,
           style: theme.typography.body?.copyWith(color: theme.secondaryText),
-          textAlign: narrow ? TextAlign.center : TextAlign.start,
+          textAlign: textAlign,
         ),
+        if (fraction != null) ...[
+          const SizedBox(height: 12),
+          WideProgressBar(fraction: fraction),
+          const SizedBox(height: 6),
+          Text(
+            summary.speed ?? 'Measuring speed…',
+            style: theme.typography.caption?.copyWith(color: theme.secondaryText),
+            textAlign: textAlign,
+          ),
+        ],
         if (action != null) ...[
           const SizedBox(height: 14),
           FilledButton(onPressed: () => _run(context, action), child: Text(_label(action))),
@@ -113,21 +149,34 @@ class _Hero extends StatelessWidget {
     final badge = Container(
       width: 72,
       height: 72,
-      decoration: BoxDecoration(color: tint.bg, shape: BoxShape.circle),
+      decoration: BoxDecoration(
+        color: theme.isDark ? const Color(0x1FFFFFFF) : const Color(0xE6FFFFFF),
+        shape: BoxShape.circle,
+        boxShadow: theme.isDark
+            ? null
+            : const [BoxShadow(color: Color(0x1A1F3A8A), blurRadius: 12, offset: Offset(0, 3))],
+      ),
       alignment: Alignment.center,
       child: Icon(icon, size: 34, color: tint.fg),
     );
-    return Surface(
-      padding: EdgeInsets.all(narrow ? 20 : 24),
-      child: narrow
-          ? Column(children: [badge, const SizedBox(height: 14), text])
-          : Row(
-              children: [
-                badge,
-                const SizedBox(width: 20),
-                Expanded(child: text),
-              ],
-            ),
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: Brand.wash(theme.brightness),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: theme.cardStroke),
+      ),
+      child: Padding(
+        padding: EdgeInsets.all(narrow ? 20 : 24),
+        child: narrow
+            ? Column(children: [badge, const SizedBox(height: 14), text])
+            : Row(
+                children: [
+                  badge,
+                  const SizedBox(width: 20),
+                  Expanded(child: text),
+                ],
+              ),
+      ),
     );
   }
 
@@ -241,7 +290,7 @@ class _Tiles extends StatelessWidget {
         onPressed: s.ready ? () => app.addFiles('') : null,
       ),
       _Tile(
-        icon: FluentIcons.hard_drive,
+        icon: FluentIcons.broom,
         label: 'Free Up Space…',
         tooltip: 'Remove local copies of uploaded files; they stay in Google Drive',
         onPressed: s.counts.synced > 0 && !busy ? () => _free(context) : null,

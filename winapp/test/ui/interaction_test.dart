@@ -11,6 +11,7 @@ import 'package:clouddrop_app/state/app_controller.dart';
 import 'package:clouddrop_app/state/files_controller.dart';
 import 'package:clouddrop_app/ui/app.dart';
 import 'package:clouddrop_app/ui/pages/files_page.dart';
+import 'package:clouddrop_app/ui/pages/settings_page.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/gestures.dart';
@@ -1079,7 +1080,10 @@ void main() {
       final t2 = calmApp();
       t2.statusSource.value = null;
       await settings(tester, app: t2);
-      expect(find.text('Not running'), findsOneWidget);
+      expect(
+        find.descendant(of: find.byType(SettingsPage), matching: find.text('Not running')),
+        findsOneWidget,
+      );
       await tester.tap(find.text('Start'));
       await tester.settle();
       expect(t2.engine.calls.last, 'service start');
@@ -1134,7 +1138,7 @@ void main() {
       expect(find.text('Sign in to Google'), findsOneWidget);
       expect(find.text('Sign In with Google'), findsOneWidget);
       expect(find.text('Welcome to CloudDrop'), findsNothing);
-      expect(find.text('Step 4 of 5'), findsOneWidget);
+      expect(find.text('Step 4 of 5 · Sign in'), findsOneWidget);
       expect(find.text('Keep Current Sign-in'), findsNothing);
 
       // Signing in again goes through setup (no key re-sent) and the browser, then Done.

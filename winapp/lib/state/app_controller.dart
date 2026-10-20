@@ -16,6 +16,7 @@ import '../data/paths.dart';
 import '../data/state_reader.dart';
 import '../data/status_source.dart';
 import '../data/system_actions.dart';
+import '../logic/rate.dart';
 import '../logic/snapshot.dart';
 
 /// Everything the controller talks to.
@@ -218,6 +219,7 @@ class AppController extends ChangeNotifier {
     if (cfg != null && st != null && st.configured) {
       final db = services.db;
       _daemon = await services.status.read();
+      _rate.add(_daemon);
       // The aggregates scan the whole table: redo them only when the database changed.
       final dv = await db.dataVersion();
       final changed = dv == null || dv != _lastDataVersion || !_haveAggregates;
@@ -244,6 +246,7 @@ class AppController extends ChangeNotifier {
   bool _haveAggregates = false;
   bool _metaPaused = false;
   DaemonStatus? _daemon;
+  final RateMeter _rate = RateMeter();
   Counts _counts = const Counts();
   int _cloudBytes = 0;
   int _cloudOnlyBytes = 0;
@@ -272,6 +275,7 @@ class AppController extends ChangeNotifier {
             cloudOnlyBytes: _cloudOnlyBytes,
             root: _root,
             rootId: _rootId,
+            rate: _rate.bytesPerSecond,
           )
         : Snapshot(signedIn: st?.signedIn ?? false);
     final changed =

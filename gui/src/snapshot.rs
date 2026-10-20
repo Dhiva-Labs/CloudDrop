@@ -1,9 +1,11 @@
-//! One read of everything the window and the top-bar icon show.
+//! One read of everything the window and the top-bar icon show, and the upload speed
+//! measured across reads.
 
 use clouddrop::config::{self, Config};
 use clouddrop::control::{self, DaemonStatus, Phase, Quota};
 use clouddrop::db::{Db, FolderStats};
-use crate::fmt::files;
+use crate::fmt::{self, files};
+use std::collections::HashMap;
 use clouddrop::util::human_bytes;
 use clouddrop_tray::TrayIcon;
 
@@ -28,6 +30,8 @@ pub struct Snapshot {
     /// Totals over everything in the CloudDrop folder.
     pub root: FolderStats,
     pub root_id: Option<String>,
+    /// Upload speed in bytes per second, once measured (set by the app from its [`RateMeter`]).
+    pub rate: Option<f64>,
 }
 
 impl Snapshot {
@@ -43,6 +47,7 @@ impl Snapshot {
             cloud_only_bytes: 0,
             root: FolderStats::default(),
             root_id: None,
+            rate: None,
         };
         let Some(db) = db.filter(|_| s.cfg.is_some()) else {
             return s;
@@ -86,6 +91,72 @@ impl Snapshot {
                 .fold((0, 0), |(s, t), u| (s + u.sent, t + u.total))
         })
     }
+
+    /// Bytes still to send: the rest of the uploads running now and every file waiting.
+    pub fn remaining(&self) -> u64 {
+        (self.root.waiting_bytes.max(0) as u64).saturating_sub(self.progress().0)
+    }
+}
+
+/// Bytes per second over the last few seconds of uploading.
+///
+/// Time comes from the heartbeat's own `updated_ms`, so the reading doesn't depend on when the
+/// app happened to look. Bytes are the growth of each upload's `sent` between two heartbeats;
+/// an upload that finished between them counts only up to its last report.
+#[derive(Debug)]
+pub struct RateMeter {
+    window_ms: i64,
+    min_span_ms: i64,
+    samples: Vec<(i64, u64)>,
+    last_sent: HashMap<String, u64>,
+    last_ms: Option<i64>,
+    total: u64,
+}
+
+impl Default for RateMeter {
+    fn default() -> Self {
+        RateMeter::new(8000, 2000)
+    }
+}
+
+impl RateMeter {
+    pub fn new(window_ms: i64, min_span_ms: i64) -> Self {
+        RateMeter { window_ms, min_span_ms, samples: Vec::new(), last_sent: HashMap::new(), last_ms: None, total: 0 }
+    }
+
+    /// Feeds one status read. A moment between files (waiting, no upload running) counts as
+    /// time without bytes; anything else (idle, paused, offline...) starts the reading over.
+    pub fn add(&mut self, d: Option<&DaemonStatus>) {
+        let Some(d) = d.filter(|d| matches!(d.phase, Phase::Uploading | Phase::Waiting)) else {
+            self.samples.clear();
+            self.last_sent.clear();
+            self.last_ms = None;
+            return;
+        };
+        if self.last_ms.is_some_and(|last| d.updated_ms <= last) {
+            return;
+        }
+        let sent: HashMap<String, u64> = d.uploads.iter().map(|u| (u.path.clone(), u.sent)).collect();
+        for (path, now) in &sent {
+            if let Some(before) = self.last_sent.get(path) {
+                self.total += now.saturating_sub(*before);
+            }
+        }
+        self.last_sent = sent;
+        self.last_ms = Some(d.updated_ms);
+        self.samples.push((d.updated_ms, self.total));
+        let oldest = d.updated_ms - self.window_ms;
+        self.samples.retain(|(ms, _)| *ms >= oldest);
+    }
+
+    /// None until there is enough to measure.
+    pub fn bytes_per_second(&self) -> Option<f64> {
+        let (&(t0, b0), &(t1, b1)) = (self.samples.first()?, self.samples.last()?);
+        if t1 - t0 < self.min_span_ms {
+            return None;
+        }
+        Some((b1 - b0) as f64 * 1000.0 / (t1 - t0) as f64)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +176,10 @@ pub struct Summary {
     /// Short line for the top-bar menu.
     pub line: String,
     pub action: Option<Action>,
+    /// How far the uploads running now are (0..1), while uploading.
+    pub fraction: Option<f64>,
+    /// "2.4 MB/s · about 3 minutes left", once the speed is known.
+    pub speed: Option<String>,
 }
 
 pub fn summarize(s: &Snapshot) -> Summary {
@@ -115,6 +190,8 @@ pub fn summarize(s: &Snapshot) -> Summary {
         tray,
         line,
         action,
+        fraction: None,
+        speed: None,
     };
     if s.cfg.is_none() {
         return mk(
@@ -207,18 +284,22 @@ pub fn summarize(s: &Snapshot) -> Summary {
             } else {
                 "Waiting for a moment to upload.".into()
             };
-            mk(
-                "clouddrop-syncing-symbolic",
-                format!("Uploading {}", files(d.waiting.max(1) as i64)),
-                detail,
-                TrayIcon::Syncing,
-                if total > 0 {
-                    format!("Uploading {} — {pct}%", files(d.waiting.max(1) as i64))
-                } else {
-                    format!("{} waiting", files(d.waiting as i64))
-                },
-                None,
-            )
+            Summary {
+                fraction: if total > 0 { Some(sent as f64 / total as f64) } else { None },
+                speed: speed_line(s),
+                ..mk(
+                    "clouddrop-syncing-symbolic",
+                    format!("Uploading {}", files(d.waiting.max(1) as i64)),
+                    detail,
+                    TrayIcon::Syncing,
+                    if total > 0 {
+                        format!("Uploading {} — {pct}%", files(d.waiting.max(1) as i64))
+                    } else {
+                        format!("{} waiting", files(d.waiting as i64))
+                    },
+                    None,
+                )
+            }
         }
         Phase::Idle if s.counts.failed > 0 => mk(
             "clouddrop-attention-symbolic",
@@ -240,6 +321,15 @@ pub fn summarize(s: &Snapshot) -> Summary {
             None,
         ),
     }
+}
+
+/// "2.4 MB/s · about 3 minutes left"; just the speed when nothing is known to be waiting.
+fn speed_line(s: &Snapshot) -> Option<String> {
+    let rate = s.rate.filter(|r| *r >= 1.0)?;
+    Some(match s.remaining() {
+        0 => fmt::speed(rate),
+        left => format!("{} · {}", fmt::speed(rate), fmt::time_left((left as f64 / rate).ceil() as u64)),
+    })
 }
 
 fn capitalize(s: &str) -> String {
@@ -278,7 +368,84 @@ mod tests {
             cloud_only_bytes: 0,
             root: FolderStats::default(),
             root_id: Some("R".into()),
+            rate: None,
         }
+    }
+
+    fn uploading(ms: i64, sent: &[(&str, u64)]) -> DaemonStatus {
+        DaemonStatus {
+            pid: 1,
+            updated_ms: ms,
+            phase: Phase::Uploading,
+            message: None,
+            uploads: sent.iter().map(|(p, s)| Upload { path: (*p).into(), sent: *s, total: 1 << 30 }).collect(),
+            waiting: 0,
+            quota: None,
+        }
+    }
+
+    #[test]
+    fn rate_measures_growth_over_the_heartbeats() {
+        let mut m = RateMeter::default();
+        m.add(Some(&uploading(0, &[("a", 0)])));
+        assert_eq!(m.bytes_per_second(), None);
+        m.add(Some(&uploading(1000, &[("a", 1000)])));
+        assert_eq!(m.bytes_per_second(), None, "less than two seconds measured");
+        m.add(Some(&uploading(2000, &[("a", 2000)])));
+        assert_eq!(m.bytes_per_second(), Some(1000.0));
+        m.add(Some(&uploading(3000, &[("a", 3000), ("b", 0)])));
+        m.add(Some(&uploading(4000, &[("a", 4000), ("b", 1000)])));
+        assert_eq!(m.bytes_per_second(), Some(1250.0));
+    }
+
+    #[test]
+    fn rate_skips_repeats_and_stops_counting_finished_uploads() {
+        let mut m = RateMeter::default();
+        m.add(Some(&uploading(0, &[("a", 0)])));
+        m.add(Some(&uploading(1000, &[("a", 500)])));
+        m.add(Some(&uploading(1000, &[("a", 500)])));
+        m.add(Some(&uploading(2000, &[("b", 0)])));
+        assert_eq!(m.bytes_per_second(), Some(250.0));
+    }
+
+    #[test]
+    fn rate_window_and_restart() {
+        let mut m = RateMeter::new(2000, 2000);
+        m.add(Some(&uploading(0, &[("a", 0)])));
+        m.add(Some(&uploading(1000, &[("a", 10000)])));
+        m.add(Some(&uploading(2000, &[("a", 10100)])));
+        m.add(Some(&uploading(3000, &[("a", 10200)])));
+        assert_eq!(m.bytes_per_second(), Some(100.0));
+
+        let mut m = RateMeter::default();
+        m.add(Some(&uploading(0, &[("a", 0)])));
+        m.add(Some(&uploading(2000, &[("a", 2000)])));
+        let mut gap = uploading(4000, &[]);
+        gap.phase = Phase::Waiting;
+        m.add(Some(&gap));
+        assert_eq!(m.bytes_per_second(), Some(500.0), "a moment between files slows the reading");
+        let mut paused = uploading(5000, &[]);
+        paused.phase = Phase::Paused;
+        m.add(Some(&paused));
+        assert_eq!(m.bytes_per_second(), None);
+    }
+
+    #[test]
+    fn uploading_progress_speed_and_time_left() {
+        let mut s = snap(Phase::Uploading);
+        let d = s.daemon.as_mut().unwrap();
+        d.waiting = 2;
+        d.uploads = vec![Upload { path: "a".into(), sent: 1024 * 1024, total: 4 * 1024 * 1024 }];
+        let sum = summarize(&s);
+        assert_eq!(sum.fraction, Some(0.25));
+        assert_eq!(sum.speed, None);
+        s.rate = Some(512.0 * 1024.0);
+        assert_eq!(summarize(&s).speed.as_deref(), Some("512.0 KB/s"));
+        s.root.waiting_bytes = (4 + 300) * 1024 * 1024;
+        assert_eq!(summarize(&s).speed.as_deref(), Some("512.0 KB/s · about 10 minutes left"));
+        let mut idle = snap(Phase::Idle);
+        idle.rate = Some(1000.0);
+        assert_eq!((summarize(&idle).fraction, summarize(&idle).speed), (None, None));
     }
 
     #[test]

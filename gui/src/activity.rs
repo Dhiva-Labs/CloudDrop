@@ -1,4 +1,5 @@
-//! Activity tab: what CloudDrop did, newest first, grouped by day.
+//! Activity tab: what CloudDrop did, newest first, grouped by day, with a filter by kind.
+//! Home lists the newest few rows with [`activity_row`].
 
 use crate::fmt::{self, Civil};
 use crate::model::Filter;
@@ -13,6 +14,53 @@ use std::rc::Rc;
 
 const LOAD: usize = 500;
 const PAGE: usize = 100;
+const FREED_ICON: &str = "clouddrop-free-up-space-symbolic";
+
+/// Which rows the Activity tab lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Show {
+    All,
+    Uploads,
+    Freed,
+    Downloads,
+    Problems,
+}
+
+impl Show {
+    pub const ALL: [Show; 5] = [Show::All, Show::Uploads, Show::Freed, Show::Downloads, Show::Problems];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Show::All => "All Activity",
+            Show::Uploads => "Uploads",
+            Show::Freed => "Space Freed",
+            Show::Downloads => "Downloads",
+            Show::Problems => "Problems",
+        }
+    }
+
+    pub fn matches(self, k: ActivityKind) -> bool {
+        use ActivityKind::*;
+        match self {
+            Show::All => true,
+            Show::Uploads => matches!(k, Uploaded | Updated | Moved),
+            Show::Freed => matches!(k, Freed | AutoFreed | KeptInCloud),
+            Show::Downloads => k == Restored,
+            Show::Problems => k == Failed,
+        }
+    }
+
+    /// What the list says when nothing matches.
+    pub fn empty_text(self) -> &'static str {
+        match self {
+            Show::All => "Uploads, downloads and other changes will be listed here.",
+            Show::Uploads => "Nothing has been uploaded recently.",
+            Show::Freed => "No space has been freed recently.",
+            Show::Downloads => "Nothing has been downloaded back recently.",
+            Show::Problems => "No uploads have failed recently.",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Described {
@@ -43,10 +91,8 @@ pub fn describe(a: &Activity) -> Described {
             format!("Kept {name} in Google Drive"),
             Some("Removed from this computer".into()),
         ),
-        ActivityKind::Freed => mk("drive-harddisk-symbolic", "info", format!("Freed up {name}"), None),
-        ActivityKind::AutoFreed => {
-            mk("drive-harddisk-symbolic", "info", format!("Automatically freed up {name}"), None)
-        }
+        ActivityKind::Freed => mk(FREED_ICON, "info", format!("Freed up {name}"), None),
+        ActivityKind::AutoFreed => mk(FREED_ICON, "info", format!("Automatically freed up {name}"), None),
         ActivityKind::Restored => mk("folder-download-symbolic", "ok", format!("Downloaded {name}"), None),
         ActivityKind::Failed => mk(
             "dialog-warning-symbolic",
@@ -72,11 +118,46 @@ pub fn subtitle(a: &Activity, time: Civil) -> String {
     parts.join(" · ")
 }
 
+/// One row of the list: icon, what happened, where and when. Opens the file in Files.
+pub fn activity_row(ops: &Rc<Ops>, a: &Activity) -> adw::ActionRow {
+    let d = describe(a);
+    let row = adw::ActionRow::builder()
+        .title(&d.title)
+        .subtitle(subtitle(a, fmt::civil_from_ms(a.at_ms)))
+        .subtitle_lines(2)
+        .use_markup(false)
+        .activatable(true)
+        .build();
+    row.add_prefix(
+        &gtk::Image::builder()
+            .icon_name(d.icon)
+            .pixel_size(16)
+            .valign(gtk::Align::Center)
+            .css_classes(["activity-icon", d.tone])
+            .build(),
+    );
+    row.add_suffix(&gtk::Image::builder().icon_name("go-next-symbolic").css_classes(["dim-label"]).build());
+    row.set_tooltip_text(Some(&a.path));
+    let (ops, path) = (ops.clone(), a.path.clone());
+    row.connect_activated(move |_| {
+        ops.navigate(Nav::Files {
+            dir: util::parent_of(&path).to_string(),
+            filter: Filter::All,
+            select: Some(path.clone()),
+        });
+    });
+    row
+}
+
 pub struct ActivityPage {
-    pub root: gtk::Stack,
+    pub root: gtk::Box,
+    stack: gtk::Stack,
     ops: Rc<Ops>,
     scroller: gtk::ScrolledWindow,
     content: gtk::Box,
+    filter_bar: gtk::Widget,
+    filtered_empty: adw::StatusPage,
+    show: Cell<Show>,
     items: RefCell<Vec<Activity>>,
     shown: Cell<usize>,
     last_id: Cell<Option<i64>>,
@@ -94,19 +175,60 @@ impl ActivityPage {
             .css_classes(["compact"])
             .vexpand(true)
             .build();
-        let root = gtk::Stack::new();
-        root.add_named(&scroller, Some("list"));
-        root.add_named(&empty, Some("empty"));
-        Rc::new(ActivityPage {
+        let filtered_empty = adw::StatusPage::builder()
+            .icon_name("document-open-recent-symbolic")
+            .title("Nothing to Show")
+            .css_classes(["compact"])
+            .vexpand(true)
+            .build();
+        let stack = gtk::Stack::new();
+        stack.add_named(&scroller, Some("list"));
+        stack.add_named(&empty, Some("empty"));
+        stack.add_named(&filtered_empty, Some("filtered"));
+
+        let labels: Vec<&str> = Show::ALL.iter().map(|s| s.label()).collect();
+        let dropdown = gtk::DropDown::from_strings(&labels);
+        dropdown.set_tooltip_text(Some("Show"));
+        dropdown.update_property(&[gtk::accessible::Property::Label("Show")]);
+        let bar = gtk::Box::builder().halign(gtk::Align::End).build();
+        bar.append(&dropdown);
+        let filter_bar = adw::Clamp::builder()
+            .maximum_size(720)
+            .tightening_threshold(620)
+            .margin_top(12)
+            .margin_start(12)
+            .margin_end(12)
+            .child(&bar)
+            .build();
+        let root = ui::vbox(0);
+        root.append(&filter_bar);
+        root.append(&stack);
+
+        let me = Rc::new(ActivityPage {
             root,
+            stack,
             ops,
             scroller,
             content,
+            filter_bar: filter_bar.upcast(),
+            filtered_empty,
+            show: Cell::new(Show::All),
             items: RefCell::default(),
             shown: Cell::new(PAGE),
             last_id: Cell::new(None),
             day: Cell::new(0),
-        })
+        });
+        let weak = Rc::downgrade(&me);
+        dropdown.connect_selected_notify(move |d| {
+            if let Some(me) = weak.upgrade() {
+                me.show.set(Show::ALL.get(d.selected() as usize).copied().unwrap_or(Show::All));
+                me.shown.set(PAGE);
+                // A different list starts at the top.
+                me.scroller.vadjustment().set_value(0.0);
+                me.rebuild();
+            }
+        });
+        me
     }
 
     /// Called every second; only reads the database when something new was logged.
@@ -138,18 +260,26 @@ impl ActivityPage {
         while let Some(c) = self.content.first_child() {
             self.content.remove(&c);
         }
-        let items = self.items.borrow();
-        if items.is_empty() {
-            self.root.set_visible_child_name("empty");
+        let all = self.items.borrow();
+        self.filter_bar.set_visible(!all.is_empty());
+        if all.is_empty() {
+            self.stack.set_visible_child_name("empty");
             return;
         }
-        self.root.set_visible_child_name("list");
+        let show = self.show.get();
+        let items: Vec<&Activity> = all.iter().filter(|a| show.matches(a.kind)).collect();
+        if items.is_empty() {
+            self.filtered_empty.set_description(Some(show.empty_text()));
+            self.stack.set_visible_child_name("filtered");
+            return;
+        }
+        self.stack.set_visible_child_name("list");
         let shown = &items[..items.len().min(self.shown.get())];
         let today = fmt::now_civil();
         for (heading, group) in fmt::group_by_day(shown, |a| a.at_ms, fmt::civil_from_ms, today) {
             let g = adw::PreferencesGroup::builder().title(ui::esc(&heading)).build();
             for a in group {
-                g.add(&self.row(a));
+                g.add(&activity_row(&self.ops, a));
             }
             self.content.append(&g);
         }
@@ -170,36 +300,6 @@ impl ActivityPage {
         }
         glib::idle_add_local_once(move || adj.set_value(scroll));
     }
-
-    fn row(&self, a: &Activity) -> adw::ActionRow {
-        let d = describe(a);
-        let row = adw::ActionRow::builder()
-            .title(&d.title)
-            .subtitle(subtitle(a, fmt::civil_from_ms(a.at_ms)))
-            .subtitle_lines(2)
-            .use_markup(false)
-            .activatable(true)
-            .build();
-        row.add_prefix(
-            &gtk::Image::builder()
-                .icon_name(d.icon)
-                .pixel_size(16)
-                .valign(gtk::Align::Center)
-                .css_classes(["activity-icon", d.tone])
-                .build(),
-        );
-        row.add_suffix(&gtk::Image::builder().icon_name("go-next-symbolic").css_classes(["dim-label"]).build());
-        row.set_tooltip_text(Some(&a.path));
-        let (ops, path) = (self.ops.clone(), a.path.clone());
-        row.connect_activated(move |_| {
-            ops.navigate(Nav::Files {
-                dir: util::parent_of(&path).to_string(),
-                filter: Filter::All,
-                select: Some(path.clone()),
-            });
-        });
-        row
-    }
 }
 
 #[cfg(test)]
@@ -216,10 +316,21 @@ mod tests {
         let d = describe(&act(ActivityKind::Uploaded, "CloudDrop-test/hello.txt", Some(72), None));
         assert_eq!(d.title, "Uploaded hello.txt");
         assert_eq!(d.icon, "go-up-symbolic");
-        assert_eq!(describe(&act(ActivityKind::Freed, "a/b.mp4", None, None)).icon, "drive-harddisk-symbolic");
+        assert_eq!(describe(&act(ActivityKind::Freed, "a/b.mp4", None, None)).icon, FREED_ICON);
         assert_eq!(describe(&act(ActivityKind::Restored, "b.mp4", None, None)).title, "Downloaded b.mp4");
         assert_eq!(describe(&act(ActivityKind::AutoFreed, "b", None, None)).title, "Automatically freed up b");
         assert_eq!(describe(&act(ActivityKind::KeptInCloud, "b", None, None)).tone, "info");
+    }
+
+    #[test]
+    fn filters() {
+        assert!(Show::Uploads.matches(ActivityKind::Moved));
+        assert!(!Show::Uploads.matches(ActivityKind::Restored));
+        assert!(Show::Freed.matches(ActivityKind::AutoFreed));
+        assert!(Show::Freed.matches(ActivityKind::KeptInCloud));
+        assert!(Show::Downloads.matches(ActivityKind::Restored));
+        assert!(Show::Problems.matches(ActivityKind::Failed));
+        assert!(!Show::Problems.matches(ActivityKind::Uploaded));
     }
 
     #[test]

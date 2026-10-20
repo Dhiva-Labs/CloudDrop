@@ -18,6 +18,8 @@ Snapshot snap(
   List<Upload> uploads = const [],
   Quota? quota,
   int cloudBytes = 0,
+  double? rate,
+  int waitingBytes = 0,
 }) => Snapshot(
   cfg: cfg,
   signedIn: true,
@@ -33,6 +35,8 @@ Snapshot snap(
   counts: counts,
   cloudBytes: cloudBytes,
   rootId: 'R',
+  rate: rate,
+  root: FolderStats(waitingBytes: waitingBytes),
 );
 
 void main() {
@@ -146,5 +150,30 @@ void main() {
       StateCount('dir', 'synced', 9),
     ]);
     expect((c.synced, c.waiting, c.cloudOnly, c.failed), (4, 3, 3, 5));
+  });
+
+  test('uploading: progress of the current files, then speed and time left', () {
+    const up = [Upload(path: 'a', sent: 1024 * 1024, total: 4 * 1024 * 1024)];
+    final measuring = summarize(snap(Phase.uploading, waiting: 2, uploads: up));
+    expect(measuring.fraction, 0.25);
+    expect(measuring.speed, isNull);
+    final known = summarize(
+      snap(
+        Phase.uploading,
+        waiting: 2,
+        uploads: up,
+        rate: 512 * 1024,
+        waitingBytes: 4 * 1024 * 1024 + 300 * 1024 * 1024,
+      ),
+    );
+    expect(known.speed, '512.0 KB/s · about 10 minutes left');
+    final nothingQueued = summarize(snap(Phase.uploading, uploads: up, rate: 512 * 1024));
+    expect(nothingQueued.speed, '512.0 KB/s');
+  });
+
+  test('idle has no progress', () {
+    final s = summarize(snap(Phase.idle, rate: 1000));
+    expect(s.fraction, isNull);
+    expect(s.speed, isNull);
   });
 }

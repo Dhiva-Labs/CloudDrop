@@ -240,7 +240,14 @@ class _FilesPageState extends State<FilesPage> {
                   ),
                 ),
                 alignment: Alignment.center,
-                child: Text('Drop to add to CloudDrop', style: theme.typography.subtitle),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconBadge(icon: FluentIcons.cloud_upload, tint: theme.accent, size: 64),
+                    const SizedBox(height: 12),
+                    Text('Drop to add to CloudDrop', style: theme.typography.subtitle),
+                  ],
+                ),
               ),
             ),
           ),
@@ -995,34 +1002,75 @@ class _EmptyState extends StatelessWidget {
         ? FluentIcons.search
         : files.filter != Filter.all
         ? FluentIcons.filter
+        : e.canAdd
+        ? FluentIcons.cloud_upload
         : FluentIcons.fabric_folder;
+    final content = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (e.canAdd)
+          IconBadge(icon: icon, tint: theme.accent, size: 64, iconSize: 28)
+        else
+          Icon(icon, size: 44, color: theme.secondaryText),
+        const SizedBox(height: 14),
+        Text(e.title, style: theme.typography.subtitle, textAlign: TextAlign.center),
+        if (e.text.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 380),
+            child: Text(
+              e.text,
+              textAlign: TextAlign.center,
+              style: theme.typography.body?.copyWith(color: theme.secondaryText),
+            ),
+          ),
+        ],
+        if (e.canAdd) ...[
+          const SizedBox(height: 16),
+          FilledButton(onPressed: files.addFiles, child: const Text('Add Files…')),
+        ],
+      ],
+    );
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 44, color: theme.secondaryText),
-            const SizedBox(height: 14),
-            Text(e.title, style: theme.typography.subtitle, textAlign: TextAlign.center),
-            if (e.text.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 380),
-                child: Text(
-                  e.text,
-                  textAlign: TextAlign.center,
-                  style: theme.typography.body?.copyWith(color: theme.secondaryText),
+        child: e.canAdd
+            // Where files can be added, the empty folder is a drop zone.
+            ? CustomPaint(
+                painter: _DashedOutline(color: theme.resources.controlStrokeColorSecondary),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 32),
+                  child: content,
                 ),
-              ),
-            ],
-            if (e.canAdd) ...[
-              const SizedBox(height: 16),
-              FilledButton(onPressed: files.addFiles, child: const Text('Add Files…')),
-            ],
-          ],
-        ),
+              )
+            : content,
       ),
     );
   }
+}
+
+/// A rounded, dashed outline around the empty drop zone.
+class _DashedOutline extends CustomPainter {
+  const _DashedOutline({required this.color});
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    final outline = Path()
+      ..addRRect(RRect.fromRectAndRadius(Offset.zero & size, const Radius.circular(12)));
+    const dash = 7.0, gap = 5.0;
+    for (final metric in outline.computeMetrics()) {
+      for (var d = 0.0; d < metric.length; d += dash + gap) {
+        canvas.drawPath(metric.extractPath(d, d + dash), paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DashedOutline old) => old.color != color;
 }

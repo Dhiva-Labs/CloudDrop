@@ -63,7 +63,7 @@ CloudDrop is open source (MIT) at github.com/Dhiva-Labs/CloudDrop. The Store edi
 
 **Screenshots:** `winapp/store/screenshots/*.png`
 
-**Store logos:** `packaging/windows/msix/store-logos/` (9:16 poster art 1440×2160, 1:1 box art 1080×1080, 1:1 app tile icon 300×300).
+**Store logos:** `packaging/windows/msix/store-logos/` (9:16 poster art 1440×2160, 1:1 box art 1080×1080, 1:1 app tile icon 300×300), rendered by `packaging/make-icons.py`.
 
 ## Age ratings (IARC)
 

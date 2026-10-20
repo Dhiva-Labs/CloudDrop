@@ -128,7 +128,8 @@ fn welcome_page(nav: &adw::NavigationView, next: &adw::NavigationPage) -> adw::N
     let icon = gtk::Image::builder()
         .icon_name(control::APP_ID)
         .pixel_size(128)
-        .margin_top(12)
+        .halign(gtk::Align::Center)
+        .css_classes(["welcome-logo"])
         .build();
     content.append(&icon);
     content.append(&ui::label("Welcome to CloudDrop", &["title-1"]));
@@ -141,10 +142,10 @@ fn welcome_page(nav: &adw::NavigationView, next: &adw::NavigationPage) -> adw::N
     for (icon, title, sub) in [
         ("folder-symbolic", "Keeps your folders", "The same folder structure appears in My Drive."),
         ("clouddrop-syncing-symbolic", "Uploads by itself", "New and changed files go up in the background."),
-        ("user-trash-symbolic", "Never deletes in Drive", "Free up space here without losing anything."),
+        ("security-high-symbolic", "Never deletes in Drive", "Free up space here without losing anything."),
     ] {
         let row = adw::ActionRow::builder().title(title).subtitle(sub).build();
-        row.add_prefix(&gtk::Image::from_icon_name(icon));
+        row.add_prefix(&gtk::Image::builder().icon_name(icon).valign(gtk::Align::Center).css_classes(["feature-icon"]).build());
         points.add(&row);
     }
     content.append(&points);

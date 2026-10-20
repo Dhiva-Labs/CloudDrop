@@ -1,3 +1,5 @@
+<p align="center"><img src="data/icons/hicolor/scalable/apps/com.dhivalabs.CloudDrop.svg" width="96" alt=""></p>
+
 # CloudDrop
 
 [![ARM64 builds](https://github.com/Dhiva-Labs/CloudDrop/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dhiva-Labs/CloudDrop/actions/workflows/ci.yml)
@@ -22,10 +24,10 @@ space on your computer without losing anything — by hand, or automatically.
   copies are removed only after checking Google Drive holds an identical copy.
 - **Resumable**: large uploads continue where they stopped after a network drop,
   a reboot or a crash.
-- **Desktop app** with a setup assistant, a **Home** overview (what's happening,
-  Google Drive storage, space freed), a **Files** browser of everything in CloudDrop
-  (cloud-only included) with search, filters, multi-select and drag & drop, an
-  **Activity** history, and **Settings**.
+- **Desktop app** with a setup assistant, a **Home** overview (what's happening, with
+  upload speed and time left, Google Drive storage, space freed, recent activity), a
+  **Files** browser of everything in CloudDrop (cloud-only included) with search, filters,
+  multi-select and drag & drop, an **Activity** history you can filter, and **Settings**.
 - **Top-bar icon**: status at a glance, pause/resume, quick links.
 - **Windows: a File Explorer cloud folder** with Explorer's own status icons,
   *Free up space* and *Always keep on this device*, and a notification-area icon.
@@ -122,14 +124,17 @@ systemctl --user enable --now clouddrop
 
 Copy or move files into `~/CloudDrop` (or drag them onto CloudDrop's Files tab).
 
-- **Home** shows what's happening, how much of your Google storage is used, how much
-  space CloudDrop has freed here, and big buttons for *Open Folder*, *Add Files…*,
-  *Free Up Space…* and *Pause*.
+- **Home** shows what's happening (while uploading: progress, speed and time left), how
+  much of your Google storage is used, how much space CloudDrop has freed here, the latest
+  activity, and big buttons for *Open Folder*, *Add Files…*, *Free Up Space…* and *Pause*.
+  The status is also in the window's header (Linux) or navigation pane (Windows), whatever
+  the screen.
 - **Files** browses everything in CloudDrop, including cloud-only files. Select items
   to **Download**, **Free Up Space**, **Open in Google Drive**, **Show in Files** or
   **Retry**; pin a folder to *Always keep on this computer*. Filter by *On this
   computer*, *Cloud-only*, *Uploading* or *Failed*.
-- **Activity** lists what was uploaded, moved, freed, downloaded back or failed.
+- **Activity** lists what was uploaded, moved, freed, downloaded back or failed; show just
+  uploads, freed space, downloads or problems.
 - **Settings**: automatic space saving, kept folders, Google account, upload speed,
   notifications, ignored files, top-bar icon.
 
@@ -220,8 +225,12 @@ python3 -m unittest discover -s nautilus/tests -v      # Files extension
 cargo run --example mock_drive -- 127.0.0.1:8099      # fake Google Drive for trying the app offline
 ```
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the state model and rules, and
+See [docs/DESIGN.md](docs/DESIGN.md) for the state model and rules,
+[docs/PROVIDERS.md](docs/PROVIDERS.md) for the plan to support more clouds, and
 [packaging/vendor/README](packaging/vendor/README) for the offline PPA build.
+
+The logo's sources are the SVGs in `data/icons`; `python3 packaging/make-icons.py`
+renders every Windows and Store image from them.
 
 ## License
 
