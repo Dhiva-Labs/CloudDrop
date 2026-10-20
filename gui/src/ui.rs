@@ -139,10 +139,20 @@ const CSS: &str = "
 .activity-icon.info { color: alpha(@window_fg_color, 0.75); background-color: alpha(@window_fg_color, 0.08); }
 .activity-icon.warn { color: @error_color; background-color: alpha(@error_color, 0.14); }
 .crumb { padding: 2px 6px; min-height: 24px; }
+.hero { padding: 28px 24px 24px 24px; background-image: linear-gradient(135deg, alpha(#41d9ef, 0.16), alpha(#2f7cf0, 0.10), alpha(#4b3fd8, 0.16)); }
+.hero-badge { border-radius: 999px; padding: 18px; }
+.hero-badge.ok { color: @success_color; background-color: alpha(@success_color, 0.15); }
+.hero-badge.busy { color: @accent_color; background-color: alpha(@accent_bg_color, 0.18); }
+.hero-badge.paused { color: alpha(@window_fg_color, 0.7); background-color: alpha(@window_fg_color, 0.09); }
+.hero-badge.warn { color: @warning_color; background-color: alpha(@warning_color, 0.16); }
+.hero progressbar trough, .hero progressbar progress { min-height: 6px; }
+.welcome-logo { padding: 16px 40px; background-image: radial-gradient(circle closest-side, alpha(#2f7cf0, 0.24), alpha(#2f7cf0, 0)); }
+.feature-icon { border-radius: 999px; padding: 8px; color: @accent_color; background-color: alpha(@accent_bg_color, 0.16); }
+.drop-zone { border: 2px dashed alpha(@window_fg_color, 0.18); border-radius: 18px; margin: 24px; }
 columnview.files row { min-height: 40px; }
 ";
 
-/// Loads the app's small stylesheet (status pills, cards, drop highlight).
+/// Loads the app's small stylesheet (status pills, cards, the Home hero, drop zones).
 #[allow(deprecated)]
 pub fn install_css() {
     let Some(display) = gtk::gdk::Display::default() else {

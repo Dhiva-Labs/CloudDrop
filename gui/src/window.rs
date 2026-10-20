@@ -5,7 +5,7 @@ use crate::files::FilesPage;
 use crate::home::HomePage;
 use crate::ops::{Nav, Ops};
 use crate::settings::SettingsPage;
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Snapshot, summarize};
 use adw::prelude::*;
 use clouddrop::db::Db;
 use std::cell::RefCell;
@@ -30,12 +30,13 @@ pub struct MainWindow {
     files: Rc<FilesPage>,
     activity: Rc<ActivityPage>,
     settings: Rc<SettingsPage>,
+    /// The status at a glance, at the start of the header bar (opens Home).
+    status: gtk::Button,
     last: RefCell<Option<Snapshot>>,
 }
 
 impl MainWindow {
     pub fn new(app: &adw::Application, hooks: Rc<Hooks>) -> Rc<Self> {
-        crate::ui::install_css();
         let win = adw::ApplicationWindow::builder()
             .application(app)
             .title("CloudDrop")
@@ -57,6 +58,20 @@ impl MainWindow {
         stack.add_titled_with_icon(&settings.page, Some("settings"), "Settings", "emblem-system-symbolic");
 
         let header = adw::HeaderBar::new();
+        let status = gtk::Button::builder()
+            .icon_name("clouddrop-idle-symbolic")
+            .css_classes(["flat"])
+            .build();
+        header.pack_start(&status);
+        let menu = gtk::gio::Menu::new();
+        menu.append(Some("About CloudDrop"), Some("app.about"));
+        let menu_button = gtk::MenuButton::builder()
+            .icon_name("open-menu-symbolic")
+            .menu_model(&menu)
+            .primary(true)
+            .tooltip_text("Main Menu")
+            .build();
+        header.pack_end(&menu_button);
         let switcher = adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build();
         header.set_title_widget(Some(&switcher));
         let switcher_bar = adw::ViewSwitcherBar::builder().stack(&stack).build();
@@ -73,6 +88,7 @@ impl MainWindow {
             bp.add_setter(&switcher_bar, "reveal", Some(&true.to_value()));
             bp.add_setter(&header, "title-widget", Some(&None::<gtk::Widget>.to_value()));
             bp.add_setter(&home.cards, "orientation", Some(&gtk::Orientation::Vertical.to_value()));
+            bp.add_setter(&home.tiles, "max-children-per-line", Some(&2_u32.to_value()));
             for col in &files.columns {
                 bp.add_setter(col, "visible", Some(&false.to_value()));
             }
@@ -91,7 +107,14 @@ impl MainWindow {
             files,
             activity,
             settings,
+            status,
             last: RefCell::default(),
+        });
+        let weak = Rc::downgrade(&w);
+        w.status.connect_clicked(move |_| {
+            if let Some(w) = weak.upgrade() {
+                w.stack.set_visible_child_name("home");
+            }
         });
         let weak = Rc::downgrade(&w);
         ops.set_nav(move |nav| {
@@ -120,17 +143,25 @@ impl MainWindow {
     }
 
     fn navigate(&self, nav: Nav) {
-        let Nav::Files { dir, filter, select } = nav;
-        self.stack.set_visible_child_name("files");
-        self.files.show(&dir, filter, select);
+        match nav {
+            Nav::Files { dir, filter, select } => {
+                self.stack.set_visible_child_name("files");
+                self.files.show(&dir, filter, select);
+            }
+            Nav::Activity => self.stack.set_visible_child_name("activity"),
+        }
     }
 
     /// Updates everything from a fresh snapshot (called every second).
     pub fn refresh(&self, s: &Snapshot) {
         self.ops.set_snapshot(s);
+        let sum = summarize(s);
+        self.status.set_icon_name(sum.icon);
+        self.status.set_tooltip_text(Some(&sum.line));
+        self.status.update_property(&[gtk::accessible::Property::Label(&format!("Status: {}", sum.line))]);
         let page = self.stack.visible_child_name();
         let page = page.as_deref().unwrap_or("home");
-        self.home.update(s);
+        self.home.update(s, page == "home");
         self.settings.refresh(s);
         self.files.refresh(s, page == "files");
         self.activity.refresh(page == "activity");

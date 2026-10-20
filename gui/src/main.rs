@@ -27,7 +27,7 @@ use clouddrop::control::{self, APP_ID};
 use clouddrop::db::{Db, Kind};
 use clouddrop_tray::{Tray, TrayCommand, TrayState};
 use gtk::{gio, glib};
-use snapshot::{Snapshot, summarize};
+use snapshot::{RateMeter, Snapshot, summarize};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -51,6 +51,8 @@ struct App {
     hold: RefCell<Option<gio::ApplicationHoldGuard>>,
     db: RefCell<Option<Arc<Db>>>,
     snap: RefCell<Option<Snapshot>>,
+    /// Upload speed, measured across the once-a-second snapshots.
+    rate: RefCell<RateMeter>,
     started: Cell<bool>,
 }
 
@@ -97,6 +99,12 @@ impl App {
                 theme.add_search_path(&d);
             }
         }
+        // Before any window: the setup assistant uses it too.
+        ui::install_css();
+        let about = gio::SimpleAction::new("about", None);
+        let me = self.clone();
+        about.connect_activate(move |_, _| me.show_about());
+        self.adw.add_action(&about);
         if let Some(rx) = self.tray_rx.borrow_mut().take() {
             let me = self.clone();
             glib::spawn_future_local(async move {
@@ -130,7 +138,12 @@ impl App {
     }
 
     fn refresh(self: &Rc<Self>) {
-        let s = self.snapshot();
+        let mut s = self.snapshot();
+        {
+            let mut rate = self.rate.borrow_mut();
+            rate.add(s.daemon.as_ref());
+            s.rate = rate.bytes_per_second();
+        }
         let window = self.window.borrow().clone();
         if let Some(w) = window {
             w.refresh(&s);
@@ -228,6 +241,23 @@ impl App {
         }
         wiz.present();
         *self.wizard.borrow_mut() = Some(wiz);
+    }
+
+    fn show_about(self: &Rc<Self>) {
+        let parent = self.window.borrow().as_ref().map(|w| w.win.clone());
+        let about = adw::AboutDialog::builder()
+            .application_name("CloudDrop")
+            .application_icon(APP_ID)
+            .version(env!("CARGO_PKG_VERSION"))
+            .comments("An upload-only cloud folder: everything you put in it is uploaded, and nothing is ever deleted in the cloud.")
+            .developer_name("Dhiva Labs")
+            .website("https://github.com/Dhiva-Labs/CloudDrop")
+            .issue_url("https://github.com/Dhiva-Labs/CloudDrop/issues")
+            .license_type(gtk::License::MitX11)
+            .copyright("© 2026 Dhiva Labs")
+            .build();
+        about.add_link("Privacy Policy", "https://github.com/Dhiva-Labs/CloudDrop/blob/main/PRIVACY.md");
+        about.present(parent.as_ref());
     }
 
     fn sign_in(self: &Rc<Self>) {
@@ -399,6 +429,7 @@ fn main() -> glib::ExitCode {
         hold: RefCell::default(),
         db: RefCell::default(),
         snap: RefCell::default(),
+        rate: RefCell::default(),
         started: Cell::new(false),
     });
     {
