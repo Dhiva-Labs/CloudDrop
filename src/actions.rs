@@ -71,7 +71,7 @@ pub fn url_for(ctx: &Ctx, rel: &str) -> Result<String> {
             .db
             .meta_get("root_id")?
             .ok_or_else(|| anyhow!("the CloudDrop folder has not been created in Drive yet"))?;
-        return Ok(ctx.cfg.provider.web_url(Kind::Dir, &id));
+        return web_url(ctx, Kind::Dir, &id);
     }
     let e = ctx
         .db
@@ -80,7 +80,13 @@ pub fn url_for(ctx: &Ctx, rel: &str) -> Result<String> {
     let id = e
         .drive_id
         .ok_or_else(|| anyhow!("{rel} has not been uploaded yet"))?;
-    Ok(ctx.cfg.provider.web_url(e.kind, &id))
+    web_url(ctx, e.kind, &id)
+}
+
+fn web_url(ctx: &Ctx, kind: Kind, id: &str) -> Result<String> {
+    let p = ctx.cfg.provider;
+    p.web_url(kind, id)
+        .ok_or_else(|| anyhow!("{} has no web page for files", p.display_name()))
 }
 
 fn tracked_subtree(ctx: &Ctx, rel: &str) -> Result<Vec<Entry>> {
@@ -461,7 +467,7 @@ mod tests {
     #[test]
     fn urls() {
         let p = crate::remote::Provider::GoogleDrive;
-        assert_eq!(p.web_url(Kind::Dir, "X"), "https://drive.google.com/drive/folders/X");
-        assert_eq!(p.web_url(Kind::File, "Y"), "https://drive.google.com/file/d/Y/view");
+        assert_eq!(p.web_url(Kind::Dir, "X").as_deref(), Some("https://drive.google.com/drive/folders/X"));
+        assert_eq!(p.web_url(Kind::File, "Y").as_deref(), Some("https://drive.google.com/file/d/Y/view"));
     }
 }

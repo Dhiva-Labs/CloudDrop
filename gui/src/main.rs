@@ -375,7 +375,9 @@ impl App {
                     && let Some(id) = &s.root_id
                 {
                     let provider = s.cfg.as_ref().map(|c| c.provider).unwrap_or_default();
-                    control::open_uri(&provider.web_url(Kind::Dir, id));
+                    if let Some(url) = provider.web_url(Kind::Dir, id) {
+                        control::open_uri(&url);
+                    }
                 }
             }
             TrayCommand::TogglePause => {

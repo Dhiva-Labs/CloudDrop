@@ -1,7 +1,8 @@
 //! Google OAuth for an installed app: loopback redirect + PKCE, refresh-token storage.
 
 use crate::config::Config;
-use crate::remote::{RemoteError, RemoteResult};
+use crate::remote::{RemoteError, RemoteResult, TokenSource};
+use futures_util::future::BoxFuture;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -147,6 +148,16 @@ impl Auth {
             file_mtime: self.file_mtime(),
         });
         Ok(access)
+    }
+}
+
+impl TokenSource for Auth {
+    fn token(&self) -> BoxFuture<'_, RemoteResult<String>> {
+        Box::pin(Auth::token(self))
+    }
+
+    fn refresh(&self) -> BoxFuture<'_, RemoteResult<String>> {
+        Box::pin(Auth::refresh(self))
     }
 }
 

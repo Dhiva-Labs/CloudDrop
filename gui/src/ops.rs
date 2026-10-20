@@ -156,7 +156,9 @@ impl Ops {
 
     pub fn open_in_drive(&self, kind: Kind, id: &str) {
         let provider = self.cfg.borrow().as_ref().map(|c| c.provider).unwrap_or_default();
-        control::open_uri(&provider.web_url(kind, id));
+        if let Some(url) = provider.web_url(kind, id) {
+            control::open_uri(&url);
+        }
     }
 
     /// Opens a file with its default app, or a folder in Files.

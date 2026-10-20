@@ -124,6 +124,124 @@ Drive" strings across the apps.
 7. **Status.** `status.json` gains `provider` and `account` (display name / email); `quota` keeps
    its shape, and `limit: null` already means "unlimited / unknown".
 
+## Adding a provider (the contract)
+
+Everything a provider needs from the rest of CloudDrop is fixed here, so providers, the engine
+and the apps can be built at the same time.
+
+### Files
+
+A provider called `<id>` (`onedrive`, `dropbox`, `webdav`, `s3`, `sftp`, `mega`):
+
+- **`src/<id>.rs`**: the client struct and `pub static INFO: ProviderInfo`, plus its unit tests.
+- **`tests/common/<id>_mock.rs`**: a fake server in axum, like the Google Drive one in
+  `tests/common/mod.rs`. It must cover resumable sessions, hashes, errors (401 then refresh,
+  429/503, storage full) and missing parents.
+- **The few shared lines** it may add, and nothing else in shared files:
+  - `src/lib.rs`: `pub mod <id>;` and one arm in `remote_for`.
+  - `src/remote.rs`: a `Provider` variant (with `#[serde(rename = "<id>")]`), its entry in
+    `Provider::ALL` and `Provider::info`, a `Remote` variant, its arm in `Remote::provider` and
+    one arm in `each_client!`.
+  - `src/config.rs`: a `pub <id>: <Id>Config` section struct with `#[serde(default)]` and
+    `skip_serializing_if` so existing files don't change.
+  - `tests/common/mod.rs`: `pub mod <id>_mock;`.
+  - `Cargo.toml`: its dependencies. Prefer what's already there: `reqwest`, `serde`, `tokio`,
+    `sha2`/`sha1`/`md-5`, `base64`, `hex`. Every new crate is vendored into the offline PPA build.
+
+### The client
+
+Inherent async methods with exactly these signatures (`Remote` calls them through
+`each_client!`, so the compiler checks the shape):
+
+```rust
+pub async fn storage_quota(&self) -> RemoteResult<StorageQuota>
+pub async fn top_parent(&self) -> RemoteResult<String>
+pub async fn get(&self, id: &str) -> RemoteResult<RemoteMeta>
+pub async fn find_child(&self, name: &str, parent: &str, folder: bool) -> RemoteResult<Vec<RemoteMeta>>
+pub async fn create_folder(&self, name: &str, parent: &str) -> RemoteResult<RemoteMeta>
+pub async fn move_rename(&self, id: &str, name: Option<&str>, parents: Option<(&str, &str)>) -> RemoteResult<RemoteMeta>
+pub async fn keep_version(&self, id: &str) -> RemoteResult<()>
+pub async fn start_upload(&self, existing: Option<&str>, name: &str, parents: (&str, Option<&str>), size: u64, mime: &str) -> RemoteResult<String>
+pub async fn query_upload(&self, session: &str, total: u64) -> RemoteResult<UploadStatus>
+pub async fn put_chunk(&self, session: &str, data: bytes::Bytes, start: u64, total: u64) -> RemoteResult<UploadStatus>
+pub async fn download_range(&self, id: &str, start: u64, end: u64) -> RemoteResult<bytes::Bytes>
+pub async fn download(&self, id: &str, out: &mut tokio::fs::File) -> RemoteResult<(ContentHash, u64)>
+```
+
+Rules, as `src/drive.rs` follows them:
+
+- **Ids are opaque strings.** Where the provider has no stable ids, use paths relative to the
+  provider's root and set `stable_ids: false`. `move_rename` then returns the new id; the engine
+  rewrites the ids of everything beneath a moved folder.
+- **`top_parent`** is where the top `CloudDrop` folder goes: My Drive (`"root"`), the app folder
+  (OneDrive `approot`, Dropbox's app folder), or the configured WebDAV path, S3 prefix or SFTP
+  directory.
+- **`find_child` never returns trashed items.** `get` reports `trashed: true` rather than
+  NotFound when the provider has a trash.
+- **`start_upload`** returns an opaque session string that the engine persists, so after a
+  crash `query_upload` gets the same string. Encode what you need, e.g. JSON with the upload URL
+  and the target path. `put_chunk` gets chunks that are a multiple of `caps.chunk_unit`, except
+  the last; return `Next(offset)` until the provider confirms the whole file, then
+  `Done(meta)`. A session the provider no longer knows is `NotFound`. Without resumable
+  uploads (`resumable: false`), `query_upload` always answers `Next(0)`.
+- **`keep_version`** pins the current version (`pin_versions: true`). Otherwise it makes a
+  server-side copy named `<stem> (replaced YYYY-MM-DD).<ext>` in the same folder, so replacing
+  the content never loses it.
+- **`RemoteMeta.hash`** is the provider's hash of kind `caps.hash`, as lowercase hex. Convert
+  base64 (OneDrive). Leave it `None` when the provider reports none, and set `caps.hash: None`.
+  `download` returns the hash of what it wrote, in the same kind, or SHA-256 when `caps.hash` is
+  None. Use `crate::hash::Hasher`.
+- **Errors:**
+  - `Auth`: sign-in needed.
+  - `Transient`: network trouble or 5xx.
+  - `RateLimited`: 429, with `Retry-After` when given.
+  - `Quota`: storage full.
+  - `NotFound`.
+  - `Permanent`: anything else. The message shows to people, so make it a short sentence.
+- **Never delete anything in the cloud,** except S3's rename: copy, check the checksum, then
+  delete the old key, and only when the bucket has versioning.
+
+### Sign-in and secrets
+
+- **`INFO.sign_in`** describes how people connect: `OAuth(OAuthApp)`, `NextcloudLoginFlow` or
+  `Form(fields)`.
+- **OAuth clients** take an `Arc<dyn TokenSource>` (`remote::TokenSource`). The generic browser
+  sign-in implements it over `token-<id>.json` in the data directory; tests use a fixed token.
+- **Other secrets** come from `crate::credentials::load("<id>")`. Non-secret settings come from
+  the `[<id>]` config section.
+
+### The engine (built alongside the providers)
+
+The engine reads `Capabilities` and does the rest; providers don't touch `engine.rs`,
+`jobs.rs` or `actions.rs`:
+
+- **Hashing:** it hashes local files in `caps.hash`'s kind and records it in `entries.hash_kind`.
+- **Freeing:** it proves the cloud copy by downloading it when `caps.hash` is None.
+- **Moves:** it rewrites descendant ids when `stable_ids` is false.
+- **Names:** it maps `forbidden_chars`, and avoids case-only clashes where `case_insensitive`.
+- **Errors:** it treats `RateLimited` like `Transient`, honouring `retry_after`, and `Quota`
+  like `Permanent`.
+
+### What the apps read (the CLI contract)
+
+`clouddrop providers --json` lists every provider:
+
+```json
+[{"id": "webdav", "name": "WebDAV", "verify_by_download": true, "web_links": false,
+  "sign_in": {"kind": "form", "fields": [{"key": "url", "label": "Server address", "kind": "url",
+                                          "required": true, "hint": "https://cloud.example.com/remote.php/dav/files/me"}]}}]
+```
+
+`sign_in.kind` is `google`, `oauth`, `nextcloud` or `form`.
+
+| Command | What it does |
+| --- | --- |
+| `clouddrop setup --provider <id> [--set key=value]… [--secret key=value]…` | Writes the provider's config section and credentials. |
+| `clouddrop login [--no-browser]` | Runs the provider's browser sign-in, if it has one. |
+| `clouddrop check` | Connects with the saved settings and says whether it works. |
+
+`status --json` gains `"provider_name"` (e.g. `"OneDrive"`) next to `"provider"`.
+
 ## App changes
 
 - **Setup assistant**: a new first step, *Choose where to upload*, with a card per provider
