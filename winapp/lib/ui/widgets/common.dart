@@ -6,6 +6,7 @@ import 'package:fluent_ui/fluent_ui.dart';
 import '../../data/models.dart';
 import '../../logic/activity_text.dart';
 import '../../logic/fmt.dart';
+import '../scope.dart';
 import '../theme.dart';
 
 /// A Windows 11 card: rounded, thin border, card fill.
@@ -184,6 +185,15 @@ class FileTypeIcon extends StatelessWidget {
   }
 }
 
+/// A provider's picture: a generic icon by the kind of storage (no brand logos).
+IconData providerIcon(String id) => switch (id) {
+  'nextcloud' || 'webdav' => FluentIcons.fabric_network_folder,
+  's3' => FluentIcons.blob_storage,
+  'sftp' => FluentIcons.command_prompt,
+  'mega' => FluentIcons.lock,
+  _ => FluentIcons.cloud,
+};
+
 IconData activityIcon(ActivityIcon i) => switch (i) {
   ActivityIcon.uploaded => FluentIcons.cloud_upload,
   ActivityIcon.updated => FluentIcons.refresh,
@@ -281,7 +291,7 @@ class ActivityRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = FluentTheme.of(context);
-    final d = describe(activity);
+    final d = describe(activity, cloud: AppScope.of(context).app.provider.name);
     final sub = subtitle(activity, civilFromMs(activity.atMs));
     return Tooltip(
       message: activity.path,

@@ -1,5 +1,6 @@
 import 'package:clouddrop_app/data/engine_api.dart';
 import 'package:clouddrop_app/data/models.dart';
+import 'package:clouddrop_app/data/providers.dart';
 import 'package:clouddrop_app/logic/activity_text.dart';
 import 'package:clouddrop_app/logic/fmt.dart' as fmt;
 import 'package:clouddrop_app/state/activity_controller.dart';
@@ -9,6 +10,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/fakes.dart';
+import '../support/scenarios.dart';
 
 void main() {
   group('ActivityController', () {
@@ -160,19 +162,30 @@ void main() {
       var (t, c) = await make(builtin: false);
       expect(c.steps, [
         SetupStep.welcome,
+        SetupStep.provider,
         SetupStep.key,
         SetupStep.folder,
         SetupStep.signIn,
         SetupStep.done,
       ]);
       (t, c) = await make(builtin: true);
-      expect(c.steps, [SetupStep.welcome, SetupStep.folder, SetupStep.signIn, SetupStep.done]);
-      expect(c.stepCount, 4);
+      expect(c.steps, [
+        SetupStep.welcome,
+        SetupStep.provider,
+        SetupStep.folder,
+        SetupStep.signIn,
+        SetupStep.done,
+      ]);
+      expect(c.stepCount, 5);
       expect(c.step, SetupStep.welcome);
       expect(c.canGoBack, isFalse);
       c.next();
+      expect(c.step, SetupStep.provider);
+      expect(c.chosen, CloudProvider.google);
+      c.next();
       expect(c.step, SetupStep.folder);
       expect(c.canGoBack, isTrue);
+      c.back();
       c.back();
       expect(c.step, SetupStep.welcome);
     });
@@ -188,7 +201,7 @@ void main() {
       expect(c.folder, '/home/me/CloudDrop');
       expect(c.hasStoredSecret, isTrue, reason: 'the stored Google key is reused');
       // Signing in again re-sends nothing: the engine keeps its key and folder.
-      unawaited(c.signInWithGoogle());
+      unawaited(c.signInWithBrowser());
       await Future<void>.delayed(const Duration(milliseconds: 5));
       expect(
         t.engine.calls.first,
@@ -269,11 +282,12 @@ void main() {
 
     test('sign in: setup first, then the browser; moves on when signed in', () async {
       final (t, c) = await make(builtin: true);
+      c.next(); // where to upload
       c.next(); // folder
       c.setDriveFolder(' My Drive Backup ');
       c.next(); // sign-in
       expect(c.step, SetupStep.signIn);
-      final f = c.signInWithGoogle();
+      final f = c.signInWithBrowser();
       await Future<void>.delayed(const Duration(milliseconds: 5));
       expect(
         t.engine.calls.first,
@@ -294,7 +308,7 @@ void main() {
       final (t, c) = await make();
       c.setClientId('123-abc.apps.googleusercontent.com');
       c.setClientSecret('sec');
-      unawaited(c.signInWithGoogle());
+      unawaited(c.signInWithBrowser());
       await Future<void>.delayed(const Duration(milliseconds: 5));
       expect(t.engine.calls.first, contains('id=123-abc.apps.googleusercontent.com secret=sec'));
     });
@@ -304,7 +318,7 @@ void main() {
       c.keyFile = '/dl/k.json';
       c.clientId = '1.apps.googleusercontent.com';
       c.clientSecret = 's';
-      unawaited(c.signInWithGoogle());
+      unawaited(c.signInWithBrowser());
       await Future<void>.delayed(const Duration(milliseconds: 5));
       expect(t.engine.calls.first, contains('json=/dl/k.json'));
     });
@@ -317,7 +331,7 @@ void main() {
               'CloudDrop already uses /x; the folder can\'t be changed after setup',
             )
           : const ActionResult(true, '');
-      await c.signInWithGoogle();
+      await c.signInWithBrowser();
       expect(c.setupError, contains("can't be changed after setup"));
       expect(t.engine.calls, hasLength(1));
       expect(c.signIn.phase, SignInPhase.idle);
@@ -327,7 +341,8 @@ void main() {
       final (t, c) = await make(builtin: true);
       c.next();
       c.next();
-      var f = c.signInWithGoogle();
+      c.next();
+      var f = c.signInWithBrowser();
       await Future<void>.delayed(const Duration(milliseconds: 5));
       t.engine.logins.last.urlC.complete('https://a.example/auth');
       t.engine.logins.last.doneC.complete(const ActionResult(false, 'access_denied'));
@@ -336,7 +351,7 @@ void main() {
       expect(c.signIn.error, 'access_denied');
       expect(c.step, SetupStep.signIn);
 
-      f = c.signInWithGoogle();
+      f = c.signInWithBrowser();
       await Future<void>.delayed(const Duration(milliseconds: 5));
       expect(c.signIn.phase, anyOf(SignInPhase.starting, SignInPhase.waiting));
       c.signIn.cancel();
@@ -348,6 +363,7 @@ void main() {
 
     test('keeping the current sign-in only writes the config', () async {
       final (t, c) = await make(builtin: true, signedIn: true);
+      c.next();
       c.next();
       c.next();
       expect(c.alreadySignedIn, isTrue);
@@ -365,7 +381,7 @@ void main() {
       expect(c.clientId, '123-test.apps.googleusercontent.com');
       expect(c.hasStoredSecret, isTrue);
       expect(c.keyValid, isTrue, reason: 'the stored secret still goes with the stored id');
-      unawaited(c.signInWithGoogle());
+      unawaited(c.signInWithBrowser());
       await Future<void>.delayed(const Duration(milliseconds: 5));
       expect(t.engine.calls.first, contains('id=null secret=null'), reason: 'nothing is re-sent');
       c.signIn.cancel();
@@ -379,7 +395,7 @@ void main() {
 
     test('the last page starts the service; failures offer a retry', () async {
       final (t, c) = await make(builtin: true);
-      for (var i = 0; i < 3; i++) {
+      for (var i = 0; i < 4; i++) {
         c.next();
       }
       expect(c.step, SetupStep.done);
@@ -417,6 +433,253 @@ void main() {
       );
       await c.finish();
       expect(c.app.setupActive, isFalse);
+    });
+  });
+
+  group('SetupController with other providers', () {
+    Future<(TestApp, SetupController)> make({
+      CloudProvider? configured,
+      bool switching = false,
+      bool signedIn = false,
+    }) async {
+      final t = configured == null
+          ? TestApp(status: const EngineStatus(configured: false, hasBuiltinClient: true))
+          : TestApp(
+              status: EngineStatus(
+                configured: true,
+                signedIn: signedIn,
+                hasBuiltinClient: true,
+                provider: configured.id,
+                providerName: configured.name,
+              ),
+            );
+      if (configured == null) t.engine.config = null;
+      t.engine.providerList = allProviders;
+      final app = await t.ready();
+      final c = SetupController(
+        app,
+        switching: switching,
+        lockedRoot: switching ? t.syncDir : null,
+      );
+      addTearDown(c.dispose);
+      return (t, c);
+    }
+
+    Future<void> tick() => Future<void>.delayed(const Duration(milliseconds: 5));
+
+    test('every listed provider is offered; Google Drive first; no key page for others', () async {
+      final (_, c) = await make();
+      expect(c.providers, allProviders);
+      expect(c.chosen, CloudProvider.google);
+      c.next();
+      expect(c.step, SetupStep.provider);
+      expect(c.stepLabel, 'Upload to');
+      c.choose(webdav);
+      expect(c.steps, [
+        SetupStep.welcome,
+        SetupStep.provider,
+        SetupStep.folder,
+        SetupStep.signIn,
+        SetupStep.done,
+      ]);
+      c.next();
+      c.next();
+      expect((c.step, c.stepLabel), (SetupStep.signIn, 'Connect'));
+    });
+
+    test('OAuth: setup --provider, then the browser sign-in', () async {
+      final (t, c) = await make();
+      c.choose(oneDrive);
+      final f = c.signInWithBrowser();
+      await tick();
+      expect(
+        t.engine.calls.first,
+        'setup folder=/home/me/CloudDrop drive=CloudDrop json=null id=null secret=null '
+        'provider=onedrive',
+      );
+      expect(t.engine.calls.last, 'login');
+      t.engine.logins.single.urlC.complete('https://login.microsoftonline.com/x');
+      t.engine.logins.single.doneC.complete(const ActionResult(true, 'Signed in.'));
+      await f;
+      expect(t.system.urls, ['https://login.microsoftonline.com/x']);
+    });
+
+    test('Nextcloud: the server address goes to setup, then the Login Flow', () async {
+      final (t, c) = await make();
+      c.choose(nextcloud);
+      c.setServerUrl('cloud.example.com');
+      expect(c.serverValid, isFalse);
+      c.setServerUrl(' https://cloud.example.com ');
+      expect(c.serverValid, isTrue);
+      unawaited(c.signInWithBrowser());
+      await tick();
+      expect(
+        t.engine.calls.first,
+        endsWith('provider=nextcloud --set url=https://cloud.example.com'),
+      );
+      expect(t.engine.calls.last, 'login');
+      c.signIn.cancel();
+    });
+
+    test('a form: Test Connection saves and checks; Continue only after it worked', () async {
+      final (t, c) = await make();
+      t.engine.result = (call) => call == 'check'
+          ? const ActionResult(true, 'Connected to nas as me.')
+          : const ActionResult(true, 'ok');
+      c.choose(webdav);
+      for (var i = 0; i < 3; i++) {
+        c.next();
+      }
+      expect(c.step, SetupStep.signIn);
+      expect(c.formValid, isFalse);
+      c.setField('url', 'https://nas/dav');
+      c.setField('user', 'me');
+      expect(c.formValid, isFalse, reason: 'the password is required');
+      c.setField('password', 'p w');
+      expect(c.formValid, isTrue);
+      await c.continueConnected();
+      expect(c.step, SetupStep.signIn, reason: 'not tested yet');
+      await c.testConnection();
+      expect(t.engine.calls, [
+        'setup folder=/home/me/CloudDrop drive=CloudDrop json=null id=null secret=null '
+            'provider=webdav --set url=https://nas/dav --set user=me --secret password=p w',
+        'check',
+      ]);
+      expect((c.test, c.testMessage), (ConnectionTest.ok, 'Connected to nas as me.'));
+      c.setField('user', 'you');
+      expect(c.test, ConnectionTest.idle, reason: 'a change needs another test');
+      await c.continueConnected();
+      expect(c.step, SetupStep.signIn);
+      await c.testConnection();
+      await c.continueConnected();
+      expect(c.step, SetupStep.done);
+      expect(t.engine.calls.where((x) => x == 'reset-cloud'), isEmpty);
+    });
+
+    test('a form: a failed setup or check is shown and nothing moves on', () async {
+      final (t, c) = await make();
+      c.choose(webdav);
+      c.setField('url', 'https://nas/dav');
+      c.setField('user', 'me');
+      c.setField('password', 'x');
+      t.engine.result = (call) => call == 'check'
+          ? const ActionResult(false, 'The server refused the password (401).')
+          : const ActionResult(true, 'ok');
+      await c.testConnection();
+      expect(
+        (c.test, c.testMessage),
+        (ConnectionTest.failed, 'The server refused the password (401).'),
+      );
+      t.engine.result = (call) => call.startsWith('setup')
+          ? const ActionResult(false, 'unknown setting "user"')
+          : const ActionResult(true, 'ok');
+      t.engine.calls.clear();
+      await c.testConnection();
+      expect(c.test, ConnectionTest.failed);
+      expect(t.engine.calls.where((x) => x == 'check'), isEmpty);
+      // An empty check sentence still says something.
+      t.engine.result = (call) => const ActionResult(true, '');
+      await c.testConnection();
+      expect(c.testMessage, 'Connected to WebDAV.');
+    });
+
+    test('settings saved earlier prefill the form; secrets never do', () async {
+      final t = TestApp(
+        status: const EngineStatus(
+          configured: true,
+          signedIn: false,
+          provider: 'webdav',
+          providerName: 'WebDAV',
+        ),
+        config: const AppConfig(
+          syncDir: '/home/me/CloudDrop',
+          driveFolder: 'CloudDrop',
+          clientId: '',
+          hasClientSecret: false,
+          sections: {
+            'webdav': {'url': 'https://nas/dav', 'user': 'me', 'password': 'leaked?'},
+          },
+        ),
+      );
+      t.engine.providerList = allProviders;
+      final app = await t.ready();
+      final c = SetupController(app, startAtSignIn: true);
+      addTearDown(c.dispose);
+      expect(c.chosen, webdav, reason: 'the configured provider');
+      expect(c.step, SetupStep.signIn);
+      expect(c.fieldValue('url'), 'https://nas/dav');
+      expect(c.fieldValue('user'), 'me');
+      expect(c.fieldValue('password'), '');
+    });
+
+    test('Google after another provider passes --provider=gdrive', () async {
+      final (t, c) = await make(configured: oneDrive);
+      expect(c.chosen, oneDrive);
+      c.choose(CloudProvider.google);
+      unawaited(c.signInWithBrowser());
+      await tick();
+      expect(t.engine.calls.first, endsWith('provider=gdrive'));
+      c.signIn.cancel();
+    });
+
+    test('Keep Current Sign-in only for the provider signed in now', () async {
+      final (_, c) = await make(configured: oneDrive, signedIn: true);
+      expect(c.alreadySignedIn, isTrue);
+      c.choose(dropbox);
+      expect(c.alreadySignedIn, isFalse);
+    });
+
+    test('switching: no welcome, Cancel until written, service stop, then reset-cloud', () async {
+      final (t, c) = await make(configured: CloudProvider.google, signedIn: true, switching: true);
+      expect(c.steps.first, SetupStep.provider);
+      expect(c.canGoBack, isFalse);
+      expect(c.canCancel, isTrue);
+      expect(c.alreadySignedIn, isFalse, reason: 'switching always signs in anew');
+      expect(c.folderLocked, isTrue);
+      c.choose(oneDrive);
+      c.next();
+      c.next();
+      final f = c.signInWithBrowser();
+      await tick();
+      expect(t.engine.calls.take(2), [
+        'service stop',
+        'setup folder=/home/me/CloudDrop drive=CloudDrop json=null id=null secret=null '
+            'provider=onedrive',
+      ]);
+      expect(c.canCancel, isFalse, reason: 'the new settings are written');
+      t.engine.logins.single.urlC.complete('https://login.example/x');
+      t.engine.logins.single.doneC.complete(const ActionResult(true, 'Signed in.'));
+      await f;
+      await tick();
+      expect(t.engine.calls, containsAllInOrder(['login', 'reset-cloud', 'service enable']));
+      expect(c.step, SetupStep.done);
+    });
+
+    test('switching: a failed reset-cloud stays on the sign-in page', () async {
+      final (t, c) = await make(configured: CloudProvider.google, signedIn: true, switching: true);
+      t.engine.result = (call) => call == 'reset-cloud'
+          ? const ActionResult(false, 'the database is busy')
+          : const ActionResult(true, 'ok');
+      c.choose(webdav);
+      c.next();
+      c.next();
+      c.setField('url', 'https://nas/dav');
+      c.setField('user', 'me');
+      c.setField('password', 'x');
+      await c.testConnection();
+      await c.continueConnected();
+      expect(c.step, SetupStep.signIn);
+      expect(c.setupError, 'the database is busy');
+      expect(t.engine.calls.where((x) => x == 'service stop'), hasLength(1));
+    });
+
+    test('switching: Cancel leaves the assistant with nothing changed', () async {
+      final (t, c) = await make(configured: CloudProvider.google, signedIn: true, switching: true);
+      t.controller.setupActive = true;
+      c.choose(dropbox);
+      c.cancel();
+      expect(t.controller.setupActive, isFalse);
+      expect(t.engine.calls, isEmpty);
     });
   });
 }

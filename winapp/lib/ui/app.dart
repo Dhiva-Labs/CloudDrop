@@ -170,9 +170,16 @@ class _GateState extends State<_Gate> {
     final locked = await app.services.db.meta('sync_root');
     if (!mounted) return;
     final atSignIn = app.setupAtSignIn;
+    final switching = app.setupSwitching;
     app.setupAtSignIn = false;
+    app.setupSwitching = false;
     setState(() {
-      _setup = SetupController(app, lockedRoot: locked, startAtSignIn: atSignIn);
+      _setup = SetupController(
+        app,
+        lockedRoot: locked,
+        startAtSignIn: atSignIn,
+        switching: switching,
+      );
       _making = false;
     });
   }

@@ -3,6 +3,7 @@ library;
 
 import 'package:clouddrop_app/data/engine_api.dart';
 import 'package:clouddrop_app/data/models.dart';
+import 'package:clouddrop_app/data/providers.dart';
 
 import 'fakes.dart';
 import 'harness.dart';
@@ -11,6 +12,90 @@ import 'test_db.dart';
 const int kb = 1024;
 const int mb = 1024 * 1024;
 const int gb = 1024 * 1024 * 1024;
+
+// ---------- providers, as `clouddrop providers --json` will list them ----------
+
+const oneDrive = CloudProvider(id: 'onedrive', name: 'OneDrive', signIn: SignInKind.oauth);
+const dropbox = CloudProvider(id: 'dropbox', name: 'Dropbox', signIn: SignInKind.oauth);
+const nextcloud = CloudProvider(id: 'nextcloud', name: 'Nextcloud', signIn: SignInKind.nextcloud);
+const webdav = CloudProvider(
+  id: 'webdav',
+  name: 'WebDAV',
+  signIn: SignInKind.form,
+  verifyByDownload: true,
+  webLinks: false,
+  fields: [
+    ProviderField(
+      key: 'url',
+      label: 'Server address',
+      kind: FieldKind.url,
+      required: true,
+      hint: 'https://cloud.example.com/remote.php/dav/files/me',
+    ),
+    ProviderField(key: 'user', label: 'User name', required: true),
+    ProviderField(
+      key: 'password',
+      label: 'Password',
+      kind: FieldKind.secret,
+      required: true,
+      hint: 'An app password, if your server offers them.',
+    ),
+  ],
+);
+const s3 = CloudProvider(
+  id: 's3',
+  name: 'S3',
+  signIn: SignInKind.form,
+  webLinks: false,
+  hasQuota: false,
+  fields: [
+    ProviderField(
+      key: 'endpoint',
+      label: 'Endpoint',
+      kind: FieldKind.url,
+      required: true,
+      hint: 'https://s3.eu-central-1.amazonaws.com',
+    ),
+    ProviderField(key: 'bucket', label: 'Bucket', required: true),
+    ProviderField(key: 'prefix', label: 'Folder in the bucket', hint: 'Leave empty for the top'),
+    ProviderField(key: 'access_key_id', label: 'Access key ID', required: true),
+    ProviderField(
+      key: 'secret_access_key',
+      label: 'Secret access key',
+      kind: FieldKind.secret,
+      required: true,
+    ),
+  ],
+);
+const sftp = CloudProvider(
+  id: 'sftp',
+  name: 'SFTP',
+  signIn: SignInKind.form,
+  verifyByDownload: true,
+  webLinks: false,
+  fields: [
+    ProviderField(key: 'host', label: 'Server', required: true, hint: 'nas.local'),
+    ProviderField(key: 'port', label: 'Port', kind: FieldKind.number, hint: 'Usually 22'),
+    ProviderField(key: 'user', label: 'User name', required: true),
+    ProviderField(
+      key: 'key_file',
+      label: 'SSH key',
+      kind: FieldKind.file,
+      hint: '~/.ssh/id_ed25519',
+    ),
+  ],
+);
+
+/// Every provider, in the order the CLI lists them.
+const List<CloudProvider> allProviders = [
+  CloudProvider.google,
+  oneDrive,
+  dropbox,
+  nextcloud,
+  webdav,
+  s3,
+  sftp,
+];
 
 /// A folder with a bit of everything: nested folders, files in every state, a pinned folder.
 void fillBusyFolder(TestDb db) {
@@ -194,12 +279,14 @@ TestApp busyApp({
   bool activity = true,
   bool windows = true,
   bool cloudFiles = false,
+  CloudProvider? provider,
 }) {
   final t = TestApp(
     windows: windows,
     daemon: daemon ?? uploadingDaemon(),
     config: config,
     cloudFiles: cloudFiles,
+    provider: provider,
   );
   fillBusyFolder(t.db);
   if (activity) fillActivity(t.db);
@@ -207,8 +294,13 @@ TestApp busyApp({
 }
 
 /// A tidy folder where everything is uploaded.
-TestApp calmApp({bool windows = true}) {
-  final t = TestApp(windows: windows, daemon: idleDaemon(), config: busyConfig);
+TestApp calmApp({bool windows = true, CloudProvider? provider, DaemonStatus? daemon}) {
+  final t = TestApp(
+    windows: windows,
+    daemon: daemon ?? idleDaemon(),
+    config: busyConfig,
+    provider: provider,
+  );
   t.db.meta('root_id', 'ROOT-DRIVE-ID');
   t.db.dir('Documents');
   t.db.file(

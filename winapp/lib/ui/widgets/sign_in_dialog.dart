@@ -3,6 +3,7 @@ library;
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/services.dart';
 
+import '../../data/providers.dart';
 import '../../state/app_controller.dart';
 import '../../state/setup_controller.dart';
 import '../theme.dart';
@@ -42,14 +43,20 @@ class _CopyLinkButtonState extends State<CopyLinkButton> {
   }
 }
 
-/// Sign-in for an already set-up app (expired or revoked sign-in): opens Google's page
-/// and waits. Returns true when signed in.
+/// Sign-in for an already set-up app (expired or revoked sign-in): opens the provider's page
+/// and waits. Returns true when signed in. A provider without a browser sign-in (a form:
+/// WebDAV, S3, SFTP) opens the setup assistant on its Connect page instead.
 Future<bool> showSignInDialog(BuildContext context, AppController app) async {
+  final provider = app.provider;
+  if (provider.signIn == SignInKind.form) {
+    app.beginSetup(atSignIn: true);
+    return false;
+  }
   final flow = SignInFlow(app.engine, app.services.system);
   final started = flow.start();
   final ok = await showDialog<bool>(
     context: context,
-    builder: (ctx) => _SignInDialog(flow: flow),
+    builder: (ctx) => _SignInDialog(flow: flow, provider: provider),
   );
   if (ok != true) flow.cancel();
   await started;
@@ -62,9 +69,10 @@ Future<bool> showSignInDialog(BuildContext context, AppController app) async {
 }
 
 class _SignInDialog extends StatelessWidget {
-  const _SignInDialog({required this.flow});
+  const _SignInDialog({required this.flow, required this.provider});
 
   final SignInFlow flow;
+  final CloudProvider provider;
 
   @override
   Widget build(BuildContext context) {
@@ -78,8 +86,26 @@ class _SignInDialog extends StatelessWidget {
           });
         }
         final failed = flow.phase == SignInPhase.failed;
+        final p = provider;
+        final text = switch (p.signIn) {
+          SignInKind.google =>
+            "Your browser opened Google's sign-in page. Choose your account and "
+                'allow CloudDrop, then come back here.',
+          SignInKind.nextcloud =>
+            "Your browser opened your server's login page. Log in and allow CloudDrop, "
+                'then come back here.',
+          SignInKind.oauth || SignInKind.form =>
+            "Your browser opened ${p.name}'s sign-in page. Choose your account and "
+                'allow CloudDrop, then come back here.',
+        };
         return ContentDialog(
-          title: Text(failed ? "Sign-in didn't finish" : 'Sign in to Google'),
+          title: Text(
+            failed
+                ? "Sign-in didn't finish"
+                : p.isGoogle
+                ? 'Sign in to Google'
+                : 'Sign in to ${p.name}',
+          ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -87,10 +113,7 @@ class _SignInDialog extends StatelessWidget {
               if (failed)
                 Text(flow.error ?? '')
               else ...[
-                const Text(
-                  "Your browser opened Google's sign-in page. Choose your account and "
-                  'allow CloudDrop, then come back here.',
-                ),
+                Text(text),
                 const SizedBox(height: 16),
                 Row(
                   children: [

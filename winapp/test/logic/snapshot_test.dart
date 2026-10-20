@@ -1,5 +1,6 @@
 import 'package:clouddrop_app/data/engine_api.dart';
 import 'package:clouddrop_app/data/models.dart';
+import 'package:clouddrop_app/data/providers.dart';
 import 'package:clouddrop_app/logic/snapshot.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -20,7 +21,9 @@ Snapshot snap(
   int cloudBytes = 0,
   double? rate,
   int waitingBytes = 0,
+  CloudProvider provider = CloudProvider.google,
 }) => Snapshot(
+  provider: provider,
   cfg: cfg,
   signedIn: true,
   daemon: DaemonStatus(
@@ -175,5 +178,128 @@ void main() {
     final s = summarize(snap(Phase.idle, rate: 1000));
     expect(s.fraction, isNull);
     expect(s.speed, isNull);
+  });
+
+  // ---------- other providers ----------
+
+  const webdav = CloudProvider(
+    id: 'webdav',
+    name: 'WebDAV',
+    signIn: SignInKind.form,
+    verifyByDownload: true,
+    webLinks: false,
+  );
+  const oneDrive = CloudProvider(id: 'onedrive', name: 'OneDrive', signIn: SignInKind.oauth);
+
+  test('Google Drive keeps every sentence it had', () {
+    final notSignedIn = Snapshot(cfg: cfg, signedIn: false, daemon: snap(Phase.idle).daemon);
+    expect(
+      summarize(notSignedIn).detail,
+      'CloudDrop needs your permission to upload to Google Drive.',
+    );
+    expect(
+      summarize(snap(Phase.needsSignIn)).detail,
+      "Google no longer accepts CloudDrop's sign-in, so uploads are on hold.",
+    );
+    expect(summarize(snap(Phase.driveFolderMissing)).line, 'Drive folder missing');
+    expect(summarize(snap(Phase.starting)).detail, 'Connecting to Google Drive.');
+    expect(
+      summarize(snap(Phase.idle, counts: const Counts(failed: 1))).detail,
+      'Everything else is safe in Google Drive.',
+    );
+    expect(summarize(const Snapshot()).detail, 'Set it up to start uploading to the cloud.');
+  });
+
+  test('other providers are named in every summary', () {
+    expect(summarize(snap(Phase.offline, provider: oneDrive)).title, "Can't reach OneDrive");
+    expect(summarize(snap(Phase.starting, provider: oneDrive)).detail, 'Connecting to OneDrive.');
+    expect(
+      summarize(snap(Phase.needsSignIn, provider: oneDrive)).detail,
+      "OneDrive no longer accepts CloudDrop's sign-in, so uploads are on hold.",
+    );
+    final missing = summarize(snap(Phase.driveFolderMissing, provider: oneDrive));
+    expect(missing.title, 'The CloudDrop folder is missing in OneDrive');
+    expect(missing.line, 'Cloud folder missing');
+    expect(
+      summarize(
+        snap(Phase.idle, counts: const Counts(synced: 2), cloudBytes: 2048, provider: oneDrive),
+      ).detail,
+      '2 files · 2.0 KB safe in OneDrive',
+    );
+    final oauth = Snapshot(cfg: cfg, signedIn: false, provider: oneDrive);
+    expect(summarize(oauth).title, 'Sign in to OneDrive');
+    expect(summarize(oauth).detail, 'CloudDrop needs your permission to upload to OneDrive.');
+    final form = Snapshot(cfg: cfg, signedIn: false, provider: webdav);
+    expect(summarize(form).title, 'Connect to WebDAV');
+    expect(summarize(form).detail, 'CloudDrop needs your WebDAV details to upload.');
+    expect(summarize(form).action, SummaryAction.signIn);
+  });
+
+  test('verifying: the phase, or a "Verifying" message while idle or waiting', () {
+    final phase = snap(Phase.verifying, provider: webdav);
+    expect(phase.verifying, isTrue);
+    final v = summarize(phase);
+    expect((v.title, v.line, v.icon), ('Verifying…', 'Verifying…', SummaryIcon.syncing));
+    expect(v.detail, 'Making sure WebDAV holds identical copies before freeing up space.');
+    final msg = summarize(snap(Phase.idle, message: 'verifying 3 files', provider: webdav));
+    expect((msg.title, msg.detail), ('Verifying…', 'Verifying 3 files'));
+    expect(snap(Phase.waiting, message: 'Verifying report.pdf').verifying, isTrue);
+    expect(snap(Phase.uploading, message: 'Verifying report.pdf').verifying, isFalse);
+    expect(snap(Phase.paused, message: 'Verifying report.pdf').verifying, isFalse);
+    expect(snap(Phase.idle).verifying, isFalse);
+    expect(const Snapshot().verifying, isFalse);
+    expect(Phase.parse('verifying'), Phase.verifying);
+    expect(Phase.parse('remote_folder_missing'), Phase.driveFolderMissing);
+  });
+
+  group('the cloud storage card', () {
+    test('Google: quota, unlimited, or still asking (unchanged)', () {
+      var c = cloudStorage(
+        snap(
+          Phase.idle,
+          cloudBytes: 1024,
+          quota: const Quota(limit: 4096, usage: 1024, usageInDrive: 0),
+        ),
+      );
+      expect(
+        (c.headline, c.note, c.fraction, c.muted),
+        ('1.0 KB of 4.0 KB used', 'CloudDrop holds 1.0 KB', 0.25, false),
+      );
+      c = cloudStorage(snap(Phase.idle, quota: const Quota(usage: 0, usageInDrive: 0)));
+      expect((c.headline, c.note), ('0 B used', 'CloudDrop holds 0 B · unlimited storage'));
+      c = cloudStorage(snap(Phase.idle));
+      expect((c.headline, c.muted), ('Checking…', true));
+      c = cloudStorage(Snapshot(cfg: cfg, signedIn: true));
+      expect(c.headline, 'Not connected');
+    });
+
+    test('a provider without a quota: "CloudDrop holds …"', () {
+      const s3 = CloudProvider(id: 's3', name: 'S3', signIn: SignInKind.form, hasQuota: false);
+      var c = cloudStorage(snap(Phase.idle, cloudBytes: 25 * 1024 * 1024, provider: s3));
+      expect(
+        (c.headline, c.note, c.fraction, c.muted),
+        ('CloudDrop holds 25.0 MB', "S3 doesn't report free space", null, false),
+      );
+      // Nothing used of no limit is what a provider without a quota reports.
+      c = cloudStorage(
+        snap(
+          Phase.idle,
+          cloudBytes: 2048,
+          quota: const Quota(usage: 0, usageInDrive: 0),
+          provider: webdav,
+        ),
+      );
+      expect(c.headline, 'CloudDrop holds 2.0 KB');
+      c = cloudStorage(
+        snap(
+          Phase.idle,
+          quota: const Quota(limit: 1024, usage: 512, usageInDrive: 0),
+          provider: webdav,
+        ),
+      );
+      expect(c.headline, '512 B of 1.0 KB used');
+      c = cloudStorage(snap(Phase.idle, provider: oneDrive));
+      expect(c.headline, 'Checking…', reason: 'OneDrive reports one, once asked');
+    });
   });
 }

@@ -5,6 +5,7 @@ library;
 import 'package:fluent_ui/fluent_ui.dart';
 
 import '../../data/models.dart';
+import '../../data/providers.dart';
 import '../../logic/fmt.dart' as fmt;
 import '../../logic/snapshot.dart';
 import '../../state/activity_controller.dart';
@@ -142,7 +143,10 @@ class _Hero extends StatelessWidget {
         ],
         if (action != null) ...[
           const SizedBox(height: 14),
-          FilledButton(onPressed: () => _run(context, action), child: Text(_label(action))),
+          FilledButton(
+            onPressed: () => _run(context, action),
+            child: Text(_label(action, app.provider)),
+          ),
         ],
       ],
     );
@@ -180,9 +184,9 @@ class _Hero extends StatelessWidget {
     );
   }
 
-  String _label(SummaryAction a) => switch (a) {
+  String _label(SummaryAction a, CloudProvider p) => switch (a) {
     SummaryAction.setup => 'Set Up CloudDrop',
-    SummaryAction.signIn => 'Sign In',
+    SummaryAction.signIn => p.signIn == SignInKind.form ? 'Connect' : 'Sign In',
     SummaryAction.startService => 'Start CloudDrop',
     SummaryAction.resume => 'Resume Uploads',
   };
@@ -292,7 +296,7 @@ class _Tiles extends StatelessWidget {
       _Tile(
         icon: FluentIcons.broom,
         label: 'Free Up Space…',
-        tooltip: 'Remove local copies of uploaded files; they stay in Google Drive',
+        tooltip: 'Remove local copies of uploaded files; they stay in ${app.provider.name}',
         onPressed: s.counts.synced > 0 && !busy ? () => _free(context) : null,
       ),
       _Tile(
@@ -322,7 +326,7 @@ class _Tiles extends StatelessWidget {
       context,
       body:
           'This removes the local copies of all $synced uploaded files. They stay in '
-          'Google Drive, and you can download them again from Files at any time. '
+          '${app.provider.name}, and you can download them again from Files at any time. '
           'Folders are kept.',
     );
     if (ok) await app.free(['']);
@@ -414,31 +418,18 @@ class _Storage extends StatelessWidget {
   }
 
   Widget _driveCard(BuildContext context, Snapshot s) {
-    final holds = 'CloudDrop holds ${fmt.humanBytes(s.cloudBytes)}';
-    final q = s.quota;
-    String headline;
-    double? frac;
-    String note = holds;
-    var muted = false;
-    if (q != null && q.limit != null && q.limit! > 0) {
-      headline = '${fmt.humanBytes(q.usage)} of ${fmt.humanBytes(q.limit!)} used';
-      frac = q.usage / q.limit!;
-    } else if (q != null) {
-      headline = '${fmt.humanBytes(q.usage)} used';
-      note = '$holds · unlimited storage';
-    } else {
-      headline = s.daemon != null ? 'Checking…' : 'Not connected';
-      muted = true;
-    }
+    final text = cloudStorage(s);
+    final p = s.provider;
     return _StorageCard(
-      icon: FluentIcons.cloud,
-      title: 'Google Drive',
-      headline: headline,
-      muted: muted,
-      fraction: frac,
-      note: note,
-      actionIcon: FluentIcons.open_in_new_window,
-      actionTooltip: 'Open in Google Drive',
+      icon: providerIcon(p.id),
+      title: p.name,
+      headline: text.headline,
+      muted: text.muted,
+      fraction: text.fraction,
+      note: text.note,
+      // Providers without web pages (WebDAV, S3, SFTP) have nothing to open.
+      actionIcon: p.webLinks ? FluentIcons.open_in_new_window : null,
+      actionTooltip: 'Open in ${p.name}',
       onAction: s.ready ? app.openRootInDrive : null,
       warnWhenFull: true,
     );
@@ -497,7 +488,9 @@ class _StorageCard extends StatelessWidget {
 
   /// A nearly full bar turns amber and red (storage quota); a "freed" bar never does.
   final bool warnWhenFull;
-  final IconData actionIcon;
+
+  /// null: no action (the row keeps its height).
+  final IconData? actionIcon;
   final String actionTooltip;
   final VoidCallback? onAction;
 
@@ -521,10 +514,20 @@ class _StorageCard extends StatelessWidget {
               Icon(icon, size: 16, color: theme.secondaryText),
               const SizedBox(width: 8),
               Expanded(child: Text(title, style: theme.typography.bodyStrong)),
-              Tooltip(
-                message: actionTooltip,
-                child: IconButton(icon: Icon(actionIcon, size: 14), onPressed: onAction),
-              ),
+              if (actionIcon != null)
+                Tooltip(
+                  message: actionTooltip,
+                  child: IconButton(icon: Icon(actionIcon, size: 14), onPressed: onAction),
+                )
+              else
+                // Same height as the button, so both cards line up.
+                Visibility(
+                  visible: false,
+                  maintainSize: true,
+                  maintainAnimation: true,
+                  maintainState: true,
+                  child: IconButton(icon: const Icon(FluentIcons.cloud, size: 14), onPressed: null),
+                ),
             ],
           ),
           const SizedBox(height: 8),

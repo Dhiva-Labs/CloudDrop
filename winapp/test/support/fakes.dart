@@ -7,6 +7,7 @@ import 'package:clouddrop_app/data/cli_runner.dart';
 import 'package:clouddrop_app/data/engine_api.dart';
 import 'package:clouddrop_app/data/models.dart';
 import 'package:clouddrop_app/data/paths.dart';
+import 'package:clouddrop_app/data/providers.dart';
 import 'package:clouddrop_app/data/state_reader.dart';
 import 'package:clouddrop_app/data/status_source.dart';
 import 'package:clouddrop_app/data/system_actions.dart';
@@ -107,6 +108,9 @@ class FakeEngine implements EngineApi {
   AppConfig? config;
   Object? statusError;
   ServiceStatus service = const ServiceStatus(running: true, startsAtSignIn: true);
+
+  /// What `providers --json` lists.
+  List<CloudProvider> providerList = const [CloudProvider.google];
   final calls = <String>[];
   final logins = <FakeLogin>[];
   ActionResult Function(String call) result = (c) => ActionResult(true, 'Done: $c');
@@ -130,15 +134,39 @@ class FakeEngine implements EngineApi {
   Future<ActionResult> configSet(String key, String value) async => _do('config set $key $value');
 
   @override
+  Future<List<CloudProvider>> providers() async => providerList;
+
+  /// A Google setup reads exactly as it always did; another provider adds its id, settings and
+  /// secrets.
+  @override
   Future<ActionResult> setup({
     required String folder,
     required String driveFolder,
     String? clientJsonPath,
     String? clientId,
     String? clientSecret,
-  }) async => _do(
-    'setup folder=$folder drive=$driveFolder json=$clientJsonPath id=$clientId secret=$clientSecret',
-  );
+    String? provider,
+    Map<String, String> settings = const {},
+    Map<String, String> secrets = const {},
+  }) async {
+    var call =
+        'setup folder=$folder drive=$driveFolder json=$clientJsonPath id=$clientId '
+        'secret=$clientSecret';
+    if (provider != null) call += ' provider=$provider';
+    for (final e in settings.entries) {
+      call += ' --set ${e.key}=${e.value}';
+    }
+    for (final e in secrets.entries) {
+      call += ' --secret ${e.key}=${e.value}';
+    }
+    return _do(call);
+  }
+
+  @override
+  Future<ActionResult> check() async => _do('check');
+
+  @override
+  Future<ActionResult> resetCloud() async => _do('reset-cloud');
 
   @override
   LoginSession login() {
@@ -179,15 +207,20 @@ class FakeEngine implements EngineApi {
   Future<ActionResult> serviceStart() async => _do('service start');
 
   @override
+  Future<ActionResult> serviceStop() async => _do('service stop');
+
+  @override
   Future<ActionResult> serviceEnable() async => _do('service enable');
 
   @override
   Future<ActionResult> serviceDisable() async => _do('service disable');
 
+  /// A link the test's [result] gives, else a Drive folder link.
   @override
   Future<ActionResult> driveUrl(String path) async {
     final r = _do('url $path');
-    return r.ok ? const ActionResult(true, 'https://drive.google.com/drive/folders/ROOT') : r;
+    if (!r.ok || r.message.startsWith('https://')) return r;
+    return const ActionResult(true, 'https://drive.google.com/drive/folders/ROOT');
   }
 }
 
@@ -208,6 +241,7 @@ class FakeSystem implements SystemActions {
   List<String> files = [];
   String? directory;
   String? jsonFile;
+  String? file;
 
   @override
   Future<void> openPath(String path) async => opened.add(path);
@@ -226,6 +260,9 @@ class FakeSystem implements SystemActions {
 
   @override
   Future<String?> pickJsonFile({String? initial}) async => jsonFile;
+
+  @override
+  Future<String?> pickFile({String? title}) async => file;
 
   @override
   String? get downloadsDir => '/home/me/Downloads';
@@ -248,6 +285,7 @@ class TestApp {
     int? nowMs,
     this.cloudFiles = false,
     StateReader? reader,
+    CloudProvider? provider,
   }) : syncDir = syncDir ?? (windows ? 'C:\\Users\\$windowsUser\\CloudDrop' : '/home/me/CloudDrop'),
        db = db ?? TestDb.memory(),
        engine = engine ?? FakeEngine(),
@@ -272,7 +310,13 @@ class TestApp {
           hasBuiltinClient: false,
           folder: this.syncDir,
           driveFolder: 'CloudDrop',
+          provider: provider?.id,
+          providerName: provider?.name,
         );
+    // The app finds a configured provider in the CLI's list.
+    if (provider != null && !this.engine.providerList.contains(provider)) {
+      this.engine.providerList = [...this.engine.providerList, provider];
+    }
     controller = AppController(
       AppServices(
         paths: windows

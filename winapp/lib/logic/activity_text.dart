@@ -51,7 +51,8 @@ class Described {
   final String? detail;
 }
 
-Described describe(Activity a) {
+/// What a row says; [cloud] names where CloudDrop uploads ("Google Drive").
+Described describe(Activity a, {String cloud = 'Google Drive'}) {
   final name = nameOf(a.path);
   switch (a.kind) {
     case ActivityKind.uploaded:
@@ -68,7 +69,7 @@ Described describe(Activity a) {
       return Described(
         ActivityIcon.keptInCloud,
         Tone.info,
-        'Kept $name in Google Drive',
+        'Kept $name in $cloud',
         'Removed from this computer',
       );
     case ActivityKind.freed:
