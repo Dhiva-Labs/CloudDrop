@@ -5,7 +5,7 @@ use clouddrop::config::{self, Config};
 use clouddrop::db::{Db, Kind, State};
 use clouddrop::notifier::Notifier;
 use clouddrop::control::{self, Phase};
-use clouddrop::{auth, drive_for, engine, util};
+use clouddrop::{auth, engine, remote_for, util};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -261,7 +261,7 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             }
             let cfg = Config::load()?;
             let db = Arc::new(Db::open_default()?);
-            let drive = drive_for(&cfg, auth::token_path());
+            let remote = remote_for(&cfg, auth::token_path());
             let (tx, rx) = tokio::sync::watch::channel(false);
             tokio::spawn(async move {
                 #[cfg(unix)]
@@ -282,7 +282,7 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
                 config_file: Some(config::config_path()),
                 ..Default::default()
             };
-            engine::run_with_options(cfg, opts, db, drive, config::data_dir(), rx).await?;
+            engine::run_with_options(cfg, opts, db, remote, config::data_dir(), rx).await?;
             Ok(String::new())
         }
         Cmd::Status { json } => status(json),
@@ -372,14 +372,14 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
         Cmd::Free { paths } => {
             let ctx = Ctx::load()?;
             let rels = resolve_all(&ctx, &paths)?;
-            let drive = drive_for(&ctx.cfg, auth::token_path());
-            Ok(actions::free(&ctx, &drive, &rels).await?.summary())
+            let remote = remote_for(&ctx.cfg, auth::token_path());
+            Ok(actions::free(&ctx, &remote, &rels).await?.summary())
         }
         Cmd::Restore { paths } => {
             let ctx = Ctx::load()?;
             let rels = resolve_all(&ctx, &paths)?;
-            let drive = drive_for(&ctx.cfg, auth::token_path());
-            Ok(actions::restore(&ctx, &drive, &rels).await?.summary())
+            let remote = remote_for(&ctx.cfg, auth::token_path());
+            Ok(actions::restore(&ctx, &remote, &rels).await?.summary())
         }
         Cmd::Open { path } => {
             let ctx = Ctx::load()?;
@@ -544,6 +544,7 @@ fn status(json: bool) -> Result<String> {
         }
         let v = serde_json::json!({
             "configured": true,
+            "provider": ctx.cfg.provider.as_str(),
             "paused": control::is_paused(&ctx.db),
             "root_id": ctx.db.meta_get("root_id")?,
             "folder": ctx.cfg.sync_dir,

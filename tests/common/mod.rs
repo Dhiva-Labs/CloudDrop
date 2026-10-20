@@ -547,8 +547,8 @@ impl Harness {
         self.data.join("token.json")
     }
 
-    pub fn drive(&self) -> Arc<clouddrop::drive::Drive> {
-        clouddrop::drive_for(&self.cfg, self.token_path())
+    pub fn remote(&self) -> Arc<clouddrop::remote::Remote> {
+        clouddrop::remote_for(&self.cfg, self.token_path())
     }
 
     /// A second database handle, like a separate `clouddrop` CLI process.
@@ -568,7 +568,7 @@ impl Harness {
             self.cfg.clone(),
             opts,
             self.db.clone(),
-            self.drive(),
+            self.remote(),
             self.data.clone(),
             rx,
         ));
