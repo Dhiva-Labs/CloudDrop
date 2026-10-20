@@ -953,18 +953,21 @@ impl Sftp {
     /// known without the extension.
     pub async fn storage_quota(&self) -> RemoteResult<StorageQuota> {
         let c = self.conn().await?;
-        if !c.ext.statvfs {
-            return Ok((None, 0, 0));
-        }
-        let v = match c.sftp.statvfs(c.base.as_str()).await {
-            Ok(v) => v,
-            Err(e) => return Err(self.fail(&c, e, "read how much space is free")),
-        };
-        let unit = v.fragment_size.max(1);
-        let used = v.blocks.saturating_sub(v.blocks_free).saturating_mul(unit);
-        // What this account can fill: used plus what is free to it (excludes root's reserve).
-        let size = used.saturating_add(v.blocks_avail.saturating_mul(unit));
-        Ok((Some(size), used, used))
+        watched(&c, async {
+            if !c.ext.statvfs {
+                return Ok((None, 0, 0));
+            }
+            let v = match c.sftp.statvfs(c.base.as_str()).await {
+                Ok(v) => v,
+                Err(e) => return Err(self.fail(&c, e, "read how much space is free")),
+            };
+            let unit = v.fragment_size.max(1);
+            let used = v.blocks.saturating_sub(v.blocks_free).saturating_mul(unit);
+            // What this account can fill: used plus what is free to it (excludes root's reserve).
+            let size = used.saturating_add(v.blocks_avail.saturating_mul(unit));
+            Ok((Some(size), used, used))
+        })
+        .await
     }
 
     /// The configured directory.
@@ -974,39 +977,48 @@ impl Sftp {
 
     pub async fn get(&self, id: &str) -> RemoteResult<RemoteMeta> {
         let c = self.conn().await?;
-        self.meta_of(&c, id).await
+        watched(&c, async {
+            self.meta_of(&c, id).await
+        })
+        .await
     }
 
     /// The item called `name` in `parent`, if there is one (and it's a folder, if asked).
     pub async fn find_child(&self, name: &str, parent: &str, folder: bool) -> RemoteResult<Vec<RemoteMeta>> {
         let c = self.conn().await?;
-        let id = child_id(parent, name)?;
-        match self.meta_of(&c, &id).await {
-            Ok(m) if m.folder || !folder => Ok(vec![m]),
-            Ok(_) | Err(RemoteError::NotFound) => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
+        watched(&c, async {
+            let id = child_id(parent, name)?;
+            match self.meta_of(&c, &id).await {
+                Ok(m) if m.folder || !folder => Ok(vec![m]),
+                Ok(_) | Err(RemoteError::NotFound) => Ok(Vec::new()),
+                Err(e) => Err(e),
+            }
+        })
+        .await
     }
 
     pub async fn create_folder(&self, name: &str, parent: &str) -> RemoteResult<RemoteMeta> {
         let c = self.conn().await?;
-        let id = child_id(parent, name)?;
-        match self.meta_of(&c, &id).await {
-            Ok(m) if m.folder => return Ok(m),
-            Ok(_) => self.clear(&c, &id).await?,
-            Err(RemoteError::NotFound) => {}
-            Err(e) => return Err(e),
-        }
-        let path = c.path(&id);
-        if let Err(e) = c.sftp.mkdir(path.as_str(), FileAttributes::empty()).await {
-            let err = self.fail_storing(&c, e, &format!("create the folder {path}")).await;
-            // Made by someone else meanwhile?
-            return match self.meta_of(&c, &id).await {
-                Ok(m) if m.folder => Ok(m),
-                _ => Err(err),
-            };
-        }
-        self.meta_of(&c, &id).await
+        watched(&c, async {
+            let id = child_id(parent, name)?;
+            match self.meta_of(&c, &id).await {
+                Ok(m) if m.folder => return Ok(m),
+                Ok(_) => self.clear(&c, &id).await?,
+                Err(RemoteError::NotFound) => {}
+                Err(e) => return Err(e),
+            }
+            let path = c.path(&id);
+            if let Err(e) = c.sftp.mkdir(path.as_str(), FileAttributes::empty()).await {
+                let err = self.fail_storing(&c, e, &format!("create the folder {path}")).await;
+                // Made by someone else meanwhile?
+                return match self.meta_of(&c, &id).await {
+                    Ok(m) if m.folder => Ok(m),
+                    _ => Err(err),
+                };
+            }
+            self.meta_of(&c, &id).await
+        })
+        .await
     }
 
     /// Renames and/or moves an item; the returned id is its new path. Something already at
@@ -1018,30 +1030,36 @@ impl Sftp {
         parents: Option<(&str, &str)>,
     ) -> RemoteResult<RemoteMeta> {
         let c = self.conn().await?;
-        check_id(id)?;
-        if id.is_empty() {
-            return Err(RemoteError::Permanent("the SFTP folder itself cannot be moved".into()));
-        }
-        let parent = parents.map_or(parent_of(id), |(new, _)| new);
-        let new_id = child_id(parent, name.unwrap_or(name_of(id)))?;
-        if new_id != id {
-            if !self.exists(&c, id).await? {
-                return Err(RemoteError::NotFound);
+        watched(&c, async {
+            check_id(id)?;
+            if id.is_empty() {
+                return Err(RemoteError::Permanent("the SFTP folder itself cannot be moved".into()));
             }
-            self.clear(&c, &new_id).await?;
-            self.rename(&c, id, &new_id).await?;
-        }
-        self.meta_of(&c, &new_id).await
+            let parent = parents.map_or(parent_of(id), |(new, _)| new);
+            let new_id = child_id(parent, name.unwrap_or(name_of(id)))?;
+            if new_id != id {
+                if !self.exists(&c, id).await? {
+                    return Err(RemoteError::NotFound);
+                }
+                self.clear(&c, &new_id).await?;
+                self.rename(&c, id, &new_id).await?;
+            }
+            self.meta_of(&c, &new_id).await
+        })
+        .await
     }
 
     /// Keeps the current content as "<stem> (replaced YYYY-MM-DD).<ext>" beside the file.
     pub async fn keep_version(&self, id: &str) -> RemoteResult<()> {
         let c = self.conn().await?;
-        if self.meta_of(&c, id).await?.folder {
-            return Ok(());
-        }
-        let aside = self.aside_name(&c, parent_of(id), name_of(id)).await?;
-        self.copy(&c, id, &aside).await
+        watched(&c, async {
+            if self.meta_of(&c, id).await?.folder {
+                return Ok(());
+            }
+            let aside = self.aside_name(&c, parent_of(id), name_of(id)).await?;
+            self.copy(&c, id, &aside).await
+        })
+        .await
     }
 
     /// Creates the partial file the content goes into; the session names it and the target.
@@ -1054,26 +1072,32 @@ impl Sftp {
         _mime: &str,
     ) -> RemoteResult<String> {
         let c = self.conn().await?;
-        let target = child_id(parents.0, name)?;
-        if let Some(old) = existing {
-            check_id(old)?;
-            // Like a vanished Drive file: NotFound makes the engine upload a new one.
-            self.stat(&c, old).await?;
-        }
-        let part = child_id(parents.0, &format!("{PART_PREFIX}{:016x}{PART_SUFFIX}", rand::random::<u64>()))?;
-        let h = self.open(&c, &part, OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::EXCLUDE).await?;
-        self.close(&c, h, &part).await?;
-        Ok(UploadSession { part, target, replaces: existing.map(str::to_string) }.encode())
+        watched(&c, async {
+            let target = child_id(parents.0, name)?;
+            if let Some(old) = existing {
+                check_id(old)?;
+                // Like a vanished Drive file: NotFound makes the engine upload a new one.
+                self.stat(&c, old).await?;
+            }
+            let part = child_id(parents.0, &format!("{PART_PREFIX}{:016x}{PART_SUFFIX}", rand::random::<u64>()))?;
+            let h = self.open(&c, &part, OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::EXCLUDE).await?;
+            self.close(&c, h, &part).await?;
+            Ok(UploadSession { part, target, replaces: existing.map(str::to_string) }.encode())
+        })
+        .await
     }
 
     /// Continues where the partial file is known to be complete; NotFound once it's gone.
     pub async fn query_upload(&self, session: &str, total: u64) -> RemoteResult<UploadStatus> {
         let s = UploadSession::decode(session)?;
         let c = self.conn().await?;
-        match self.stat(&c, &s.part).await?.size.unwrap_or(0) {
-            n if n > total => Err(RemoteError::NotFound),
-            n => Ok(UploadStatus::Next(resume_offset(n))),
-        }
+        watched(&c, async {
+            match self.stat(&c, &s.part).await?.size.unwrap_or(0) {
+                n if n > total => Err(RemoteError::NotFound),
+                n => Ok(UploadStatus::Next(resume_offset(n))),
+            }
+        })
+        .await
     }
 
     pub async fn put_chunk(&self, session: &str, data: bytes::Bytes, start: u64, total: u64) -> RemoteResult<UploadStatus> {
@@ -1083,24 +1107,27 @@ impl Sftp {
             return Err(RemoteError::Permanent("the upload got more data than the file has".into()));
         }
         let c = self.conn().await?;
-        if !data.is_empty() {
-            let h = self.open(&c, &s.part, OpenFlags::WRITE).await?;
-            let written = self.write_at(&c, &h, start, &data, &s.part).await;
-            let synced = if written.is_ok() && end == total && c.ext.fsync {
-                match c.sftp.fsync(h.as_str()).await {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(self.fail_storing(&c, e, &format!("write {}", c.path(&s.part))).await),
-                }
-            } else {
-                Ok(())
-            };
-            let closed = self.close(&c, h, &s.part).await;
-            written.and(synced).and(closed)?;
-        }
-        if end < total {
-            return Ok(UploadStatus::Next(end));
-        }
-        Ok(UploadStatus::Done(self.complete(&c, &s, total).await?))
+        watched(&c, async {
+            if !data.is_empty() {
+                let h = self.open(&c, &s.part, OpenFlags::WRITE).await?;
+                let written = self.write_at(&c, &h, start, &data, &s.part).await;
+                let synced = if written.is_ok() && end == total && c.ext.fsync {
+                    match c.sftp.fsync(h.as_str()).await {
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(self.fail_storing(&c, e, &format!("write {}", c.path(&s.part))).await),
+                    }
+                } else {
+                    Ok(())
+                };
+                let closed = self.close(&c, h, &s.part).await;
+                written.and(synced).and(closed)?;
+            }
+            if end < total {
+                return Ok(UploadStatus::Next(end));
+            }
+            Ok(UploadStatus::Done(self.complete(&c, &s, total).await?))
+        })
+        .await
     }
 
     /// Bytes `start..end` of a file's content (fewer if the file is shorter).
@@ -1109,40 +1136,64 @@ impl Sftp {
             return Ok(bytes::Bytes::new());
         }
         let c = self.conn().await?;
-        check_id(id)?;
-        let h = self.open(&c, id, OpenFlags::READ).await?;
-        let data = self.read_at(&c, &h, start, end - start, id).await;
-        let _ = c.sftp.close(h).await;
-        Ok(bytes::Bytes::from(data?))
+        watched(&c, async {
+            check_id(id)?;
+            let h = self.open(&c, id, OpenFlags::READ).await?;
+            let data = self.read_at(&c, &h, start, end - start, id).await;
+            let _ = c.sftp.close(h).await;
+            Ok(bytes::Bytes::from(data?))
+        })
+        .await
     }
 
     /// Streams a file's content into `out`; returns (its SHA-256, bytes written).
     pub async fn download(&self, id: &str, out: &mut tokio::fs::File) -> RemoteResult<(ContentHash, u64)> {
         let c = self.conn().await?;
-        check_id(id)?;
-        let h = self.open(&c, id, OpenFlags::READ).await?;
-        let res = async {
-            let mut hasher = Hasher::new(HashKind::Sha256);
-            let mut total = 0u64;
-            loop {
-                let data = self.read_at(&c, &h, total, BATCH, id).await?;
-                if data.is_empty() {
-                    break;
+        watched(&c, async {
+            check_id(id)?;
+            let h = self.open(&c, id, OpenFlags::READ).await?;
+            let res = async {
+                let mut hasher = Hasher::new(HashKind::Sha256);
+                let mut total = 0u64;
+                loop {
+                    let data = self.read_at(&c, &h, total, BATCH, id).await?;
+                    if data.is_empty() {
+                        break;
+                    }
+                    hasher.update(&data);
+                    total += data.len() as u64;
+                    out.write_all(&data)
+                        .await
+                        .map_err(|e| RemoteError::Permanent(format!("cannot write download: {e}")))?;
                 }
-                hasher.update(&data);
-                total += data.len() as u64;
-                out.write_all(&data)
+                out.flush()
                     .await
                     .map_err(|e| RemoteError::Permanent(format!("cannot write download: {e}")))?;
+                Ok((hasher.finish(), total))
             }
-            out.flush()
-                .await
-                .map_err(|e| RemoteError::Permanent(format!("cannot write download: {e}")))?;
-            Ok((hasher.finish(), total))
+            .await;
+            let _ = c.sftp.close(h).await;
+            res
+        })
+        .await
+    }
+}
+
+/// Runs `op` on `c`, giving up (Transient) as soon as the SSH connection closes: a request
+/// sent just as the SFTP session ended would otherwise wait for its timeout.
+async fn watched<T>(c: &Conn, op: impl Future<Output = RemoteResult<T>>) -> RemoteResult<T> {
+    let closed = async {
+        while !c.ssh.is_closed() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        .await;
-        let _ = c.sftp.close(h).await;
-        res
+    };
+    tokio::select! {
+        biased;
+        r = op => r,
+        () = closed => {
+            c.broken.store(true, Ordering::Relaxed);
+            Err(RemoteError::Transient("The connection to the SFTP server was lost.".into()))
+        }
     }
 }
 
