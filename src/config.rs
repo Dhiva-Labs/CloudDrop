@@ -36,6 +36,9 @@ pub struct Config {
     pub chunk_size: usize,
     #[serde(skip_serializing_if = "Endpoints::is_default")]
     pub endpoints: Endpoints,
+    /// `[sftp]`: the server for `provider = "sftp"`.
+    #[serde(skip_serializing_if = "crate::sftp::SftpConfig::is_default")]
+    pub sftp: crate::sftp::SftpConfig,
 }
 
 /// Google endpoints; overridable so tests can point at a local fake.
@@ -86,6 +89,7 @@ impl Default for Config {
             keep_local: Vec::new(),
             chunk_size: DEFAULT_CHUNK,
             endpoints: Endpoints::default(),
+            sftp: Default::default(),
         }
     }
 }

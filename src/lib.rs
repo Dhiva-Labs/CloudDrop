@@ -10,6 +10,7 @@ pub mod hash;
 pub mod jobs;
 pub mod notifier;
 pub mod remote;
+pub mod sftp;
 pub mod store;
 #[cfg(windows)]
 pub mod winstore;
@@ -25,6 +26,15 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
             let http = drive::http_client();
             let auth = Arc::new(auth::Auth::new(http.clone(), cfg, token_file));
             Arc::new(remote::Remote::GoogleDrive(drive::Drive::new(http, cfg.endpoints.clone(), auth)))
+        }
+        remote::Provider::Sftp => {
+            let secrets = credentials::load("sftp").unwrap_or_else(|e| {
+                tracing::warn!("cannot read the SFTP password: {e:#}");
+                None
+            });
+            let secrets = sftp::Secrets::from_map(&secrets.unwrap_or_default());
+            let client = sftp::Sftp::new(cfg.sftp.clone(), secrets, Some(config::config_path()));
+            Arc::new(remote::Remote::Sftp(client))
         }
     }
 }
