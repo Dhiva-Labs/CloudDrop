@@ -17,6 +17,7 @@ pub mod store;
 #[cfg(windows)]
 pub mod winstore;
 pub mod util;
+pub mod webdav;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,5 +42,9 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
             let (api, content) = (&cfg.dropbox.api_base, &cfg.dropbox.content_base);
             Arc::new(remote::Remote::Dropbox(dropbox::Dropbox::new(drive::http_client(), api, content, tokens)))
         }
+        // The app password is in credentials.json, next to the token file in the data directory.
+        remote::Provider::WebDav | remote::Provider::Nextcloud => Arc::new(remote::Remote::WebDav(
+            webdav::WebDav::from_config(cfg, &token_file.with_file_name("credentials.json")),
+        )),
     }
 }

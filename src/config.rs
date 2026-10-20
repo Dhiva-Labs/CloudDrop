@@ -1,4 +1,5 @@
 use crate::remote::Provider;
+use crate::webdav::WebDavConfig;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,12 @@ pub struct Config {
     pub onedrive: OneDriveConfig,
     #[serde(skip_serializing_if = "crate::dropbox::DropboxConfig::is_default")]
     pub dropbox: crate::dropbox::DropboxConfig,
+    /// `[webdav]`: a WebDAV server (its app password is in credentials.json).
+    #[serde(default, skip_serializing_if = "WebDavConfig::is_unset")]
+    pub webdav: WebDavConfig,
+    /// `[nextcloud]`: a Nextcloud server, signed in through the browser.
+    #[serde(default, skip_serializing_if = "WebDavConfig::is_unset")]
+    pub nextcloud: WebDavConfig,
 }
 
 /// Google endpoints; overridable so tests can point at a local fake.
@@ -116,6 +123,8 @@ impl Default for Config {
             endpoints: Endpoints::default(),
             onedrive: OneDriveConfig::default(),
             dropbox: Default::default(),
+            webdav: WebDavConfig::default(),
+            nextcloud: WebDavConfig::default(),
         }
     }
 }

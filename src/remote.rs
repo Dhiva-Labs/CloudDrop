@@ -11,6 +11,7 @@
 
 use crate::db::Kind;
 use crate::drive::Drive;
+use crate::webdav::WebDav;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
@@ -24,17 +25,23 @@ pub enum Provider {
     OneDrive,
     #[serde(rename = "dropbox")]
     Dropbox,
+    #[serde(rename = "webdav")]
+    WebDav,
+    #[serde(rename = "nextcloud")]
+    Nextcloud,
 }
 
 impl Provider {
     /// Every provider, for listings (setup, `clouddrop setup --provider`).
-    pub const ALL: &'static [Provider] = &[Provider::GoogleDrive, Provider::OneDrive, Provider::Dropbox];
+    pub const ALL: &'static [Provider] = &[Provider::GoogleDrive, Provider::OneDrive, Provider::Dropbox, Provider::WebDav, Provider::Nextcloud];
 
     pub fn info(self) -> &'static ProviderInfo {
         match self {
             Provider::GoogleDrive => &crate::drive::INFO,
             Provider::OneDrive => &crate::onedrive::INFO,
             Provider::Dropbox => &crate::dropbox::INFO,
+            Provider::WebDav => &crate::webdav::INFO,
+            Provider::Nextcloud => &crate::webdav::NEXTCLOUD_INFO,
         }
     }
 
@@ -291,6 +298,8 @@ pub enum Remote {
     GoogleDrive(Drive),
     OneDrive(crate::onedrive::OneDrive),
     Dropbox(crate::dropbox::Dropbox),
+    /// `webdav` and `nextcloud` (one client; it knows which it is).
+    WebDav(WebDav),
 }
 
 /// Runs `$body` with `$c` bound to whichever client `$remote` holds.
@@ -300,6 +309,7 @@ macro_rules! each_client {
             Remote::GoogleDrive($c) => $body,
             Remote::OneDrive($c) => $body,
             Remote::Dropbox($c) => $body,
+            Remote::WebDav($c) => $body,
         }
     };
 }
@@ -310,6 +320,7 @@ impl Remote {
             Remote::GoogleDrive(_) => Provider::GoogleDrive,
             Remote::OneDrive(_) => Provider::OneDrive,
             Remote::Dropbox(_) => Provider::Dropbox,
+            Remote::WebDav(c) => c.provider(),
         }
     }
 
