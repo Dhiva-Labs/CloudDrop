@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod s3_mock;
+
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path as AxPath, Query, State as AxState};

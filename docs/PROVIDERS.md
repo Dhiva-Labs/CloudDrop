@@ -242,6 +242,85 @@ The engine reads `Capabilities` and does the rest; providers don't touch `engine
 
 `status --json` gains `"provider_name"` (e.g. `"OneDrive"`) next to `"provider"`.
 
+## S3-compatible storage
+
+**Built**: `src/s3.rs` for Amazon S3, Backblaze B2, Wasabi, Cloudflare R2, MinIO and Garage. It
+signs requests with AWS Signature Version 4 itself (no AWS SDK, no new crates). A fake S3 in
+`tests/common/s3_mock.rs` checks every signature with its own implementation. The client's tests
+run against it, and against AWS's published SigV4 examples, in `src/s3.rs`.
+
+- **Settings**: `[s3] endpoint` (empty = Amazon S3 in `region`), `region` (`us-east-1` when
+  empty, `auto` for R2), `bucket`, `prefix` (the folder in the bucket that holds `CloudDrop/`),
+  `access_key_id`, and `addressing`: `path`, `virtual`, or empty, which means virtual-hosted for
+  Amazon S3 and path-style elsewhere. The secret key is `secret_access_key` in the credentials store.
+- **Ids** are keys relative to the prefix: `CloudDrop/sub/a.txt`. Folders end in `/` and have a
+  zero-byte marker object (`CloudDrop/sub/`), so empty folders exist. A prefix with objects under
+  it counts as a folder even without a marker. `top_parent` is `""`, and `stable_ids` is false.
+- **Uploads**: a file of one part (8 MiB) is one PUT with `Content-MD5` and
+  `x-amz-checksum-sha256`. Bigger files are multipart uploads. Parts are 8 MiB, or a multiple of
+  8 MiB for files that would need more than 10,000 parts; chunks smaller than a part are held in
+  memory until a part is full. `ListParts` says where to continue after a crash. The session is
+  JSON: key, upload id, part size, and a nonce that is also written to the object, so a session
+  that completed just before a crash still answers Done. Starting an upload aborts earlier
+  unfinished uploads of the same key, since their parts cost storage.
+- **Proof before freeing** is SHA-256. A file sent in one PUT gets it from the service
+  (`x-amz-checksum-sha256`, read with `x-amz-checksum-mode: ENABLED`). Where the service doesn't
+  keep checksums, or refuses the header (asked once), the proof is the SHA-256 recorded in the
+  object's metadata at upload. It counts only when the MD5 recorded with it equals the object's
+  ETag, which the service computes, so it is the same proof as Drive's `md5Checksum`. A multipart
+  object only has a checksum of its parts' checksums, and objects under SSE-KMS or SSE-C have
+  ETags that aren't MD5s. For those, `get` reports no hash, so **the engine verifies them by
+  download, per object**, even though `caps.hash` is SHA-256.
+- **Renames and moves** are the one place CloudDrop deletes. Every object under the old key or
+  prefix is copied (CopyObject, or UploadPartCopy part by part above 5 GiB), and each copy's
+  SHA-256 or ETag and size are checked against the original. The old keys are then deleted only
+  when GetBucketVersioning says `Enabled` (asked at most once an hour): the delete just hides them,
+  and the content stays as noncurrent versions. With no versioning, `Suspended`, a service without
+  the call, or a key that may not delete, the old keys stay where they were and the log says
+  "kept …". Different content already at the destination (left behind by such a rename) is kept
+  aside first. An upload that also renames a file treats its old key the same way.
+- **Keep version** always makes a copy, `<stem> (replaced YYYY-MM-DD).<ext>` (UTC date, ` 2` and
+  up when that name is taken), versioned bucket or not, because lifecycle rules can expire
+  noncurrent versions.
+- **Quota**: S3 has none. `storage_quota` reports (no limit, bytes under the prefix, the same),
+  added up from listings at most once an hour. Above 20,000 objects it reports (None, 0, 0)
+  instead and checks again a day later, since every 1,000 objects listed is a paid request.
+  Noncurrent versions and unfinished uploads aren't counted.
+- **Errors**: `SignatureDoesNotMatch`, `InvalidAccessKeyId` and `ExpiredToken` are Auth (a HEAD's
+  403 has no body, so a listing explains it). `SlowDown`, 429 and 503 are RateLimited
+  (`Retry-After` when sent). `NoSuchKey`, `NoSuchUpload` and 404 are NotFound. A full bucket (507,
+  `XMinioStorageFull`, `QuotaExceeded`, B2's "storage cap exceeded") is Quota. 5xx, and errors
+  inside a 200 (CopyObject, CompleteMultipartUpload), are Transient. `NoSuchBucket`, a wrong
+  region and a wrong clock are Permanent, each with a sentence.
+- **Web links**: none.
+
+**Bucket permissions**: CloudDrop needs these, on one bucket and prefix (AWS IAM shown; other
+services have equivalents, e.g. B2's `listFiles`, `readFiles`, `writeFiles`, `deleteFiles`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": ["s3:ListBucket", "s3:ListBucketMultipartUploads"],
+     "Resource": "arn:aws:s3:::my-bucket", "Condition": {"StringLike": {"s3:prefix": ["laptop/*"]}}},
+    {"Effect": "Allow", "Action": "s3:GetBucketVersioning", "Resource": "arn:aws:s3:::my-bucket"},
+    {"Effect": "Allow",
+     "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts"],
+     "Resource": "arn:aws:s3:::my-bucket/laptop/*"}
+  ]
+}
+```
+
+`s3:DeleteObject` is only used for renames in a versioned bucket. Leave it out and renames keep
+the old keys there too. `s3:GetBucketVersioning` can't take the prefix condition, so it gets a
+statement of its own. A lifecycle rule that aborts incomplete multipart uploads after a week
+cleans up after uploads that were never finished. R2 and Garage don't have bucket versioning, so
+renames there always keep the old keys.
+
+**Left for the live tests** (MinIO in CI, phase 2): checksum support on each service, B2's
+versioning answer, and virtual-hosted addressing.
+
 ## App changes
 
 - **Setup assistant**: a new first step, *Choose where to upload*, with a card per provider
