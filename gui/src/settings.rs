@@ -1,8 +1,9 @@
 //! Settings tab: account, folders, upload behaviour, startup.
 
 use crate::ops::Ops;
+use crate::providers::Choice;
 use crate::snapshot::Snapshot;
-use crate::{fsops, rt, ui};
+use crate::{cli, fsops, rt, ui};
 use adw::prelude::*;
 use clouddrop::control;
 use clouddrop::db::Kind;
@@ -41,20 +42,58 @@ pub fn keep_summary(n: usize) -> String {
     }
 }
 
+/// The page's sentences that name the provider.
+pub struct Texts {
+    pub space: String,
+    pub auto_free: String,
+    pub account_group: &'static str,
+    pub switch: String,
+}
+
+pub fn texts(p: &Choice) -> Texts {
+    let cloud = &p.name;
+    Texts {
+        space: format!("Keep this computer light: uploaded files can be removed here and stay in {cloud}."),
+        auto_free: format!(
+            "Local copies are removed only after CloudDrop checks\n{cloud} has an identical copy{}",
+            if p.verify_by_download { ", by downloading it once" } else { "" }
+        ),
+        account_group: if p.is_google() { "Google Account" } else { "Account" },
+        switch: format!("Switch to another cloud. Everything is uploaded again; nothing is deleted from {cloud}."),
+    }
+}
+
+/// "Switch to another cloud?": what switching does to the files in `cloud`.
+pub fn switch_dialog_text(cloud: &str) -> (&'static str, String) {
+    (
+        "Switch to another cloud?",
+        format!(
+            "CloudDrop will upload everything in your CloudDrop folder again, to the cloud you choose next. \
+             Nothing is deleted from {cloud}. Files that are only in {cloud} (freed from this computer) stay \
+             there, but CloudDrop stops listing them."
+        ),
+    )
+}
+
 pub struct SettingsPage {
     pub page: adw::PreferencesPage,
     ops: Rc<Ops>,
+    space: adw::PreferencesGroup,
     auto_free: adw::ComboRow,
     auto_opts: RefCell<Vec<Option<u32>>>,
     keep: adw::ExpanderRow,
     keep_rows: RefCell<Vec<adw::ActionRow>>,
     keep_add: adw::ActionRow,
     shown_keep: RefCell<Option<Vec<String>>>,
+    account_group: adw::PreferencesGroup,
     account: adw::ActionRow,
+    account_icon: gtk::Image,
     sign_in: gtk::Button,
     sign_out: gtk::Button,
+    switch: adw::ActionRow,
     folder: adw::ActionRow,
     drive: adw::ActionRow,
+    open_drive: gtk::Button,
     parallel: adw::SpinRow,
     settle: adw::SpinRow,
     notifications: adw::SwitchRow,
@@ -98,7 +137,8 @@ impl SettingsPage {
 
         let account_group = adw::PreferencesGroup::builder().title("Google Account").build();
         let account = adw::ActionRow::builder().title("Google Drive").build();
-        account.add_prefix(&gtk::Image::from_icon_name("avatar-default-symbolic"));
+        let account_icon = gtk::Image::from_icon_name("avatar-default-symbolic");
+        account.add_prefix(&account_icon);
         let sign_in = gtk::Button::builder().label("Sign In Again").valign(gtk::Align::Center).build();
         let sign_out = gtk::Button::builder()
             .label("Sign Out")
@@ -108,6 +148,11 @@ impl SettingsPage {
         account.add_suffix(&sign_in);
         account.add_suffix(&sign_out);
         account_group.add(&account);
+        let switch = adw::ActionRow::builder().title("Upload somewhere else").build();
+        switch.add_prefix(&gtk::Image::from_icon_name("view-refresh-symbolic"));
+        let switch_btn = gtk::Button::builder().label("Switch Provider…").valign(gtk::Align::Center).build();
+        switch.add_suffix(&switch_btn);
+        account_group.add(&switch);
         page.add(&account_group);
 
         let folders = adw::PreferencesGroup::builder().title("Folders").build();
@@ -171,17 +216,22 @@ impl SettingsPage {
         let me = Rc::new(SettingsPage {
             page,
             ops,
+            space,
             auto_free,
             auto_opts: RefCell::new(AUTO_FREE_PRESETS.to_vec()),
             keep,
             keep_rows: RefCell::default(),
             keep_add: keep_add.clone(),
             shown_keep: RefCell::default(),
+            account_group,
             account,
+            account_icon,
             sign_in: sign_in.clone(),
             sign_out: sign_out.clone(),
+            switch,
             folder,
             drive,
+            open_drive: open_drive.clone(),
             parallel,
             settle,
             notifications,
@@ -222,22 +272,57 @@ impl SettingsPage {
         {
             let (win, hooks, me2) = (win.clone(), hooks.clone(), Rc::downgrade(&me));
             sign_out.connect_clicked(move |_| {
+                let Some(provider) = me2.upgrade().map(|m| m.ops.provider()) else {
+                    return;
+                };
                 let d = adw::AlertDialog::new(
                     Some("Sign out?"),
-                    Some("Uploads stop until you sign in again. Nothing is removed from Google Drive or this computer."),
+                    Some(&format!(
+                        "Uploads stop until you sign in again. Nothing is removed from {} or this computer.",
+                        provider.name
+                    )),
                 );
                 d.add_response("cancel", "Cancel");
                 d.add_response("out", "Sign Out");
                 d.set_response_appearance("out", adw::ResponseAppearance::Destructive);
                 let (hooks, me2) = (hooks.clone(), me2.clone());
                 d.connect_response(Some("out"), move |_, _| {
-                    if let Err(e) = control::sign_out()
-                        && let Some(me) = me2.upgrade()
-                    {
-                        me.ops.toast(&format!("{e:#}"));
+                    if provider.is_google() {
+                        if let Err(e) = control::sign_out()
+                            && let Some(me) = me2.upgrade()
+                        {
+                            me.ops.toast(&format!("{e:#}"));
+                        }
+                        (hooks.refresh)();
+                        return;
                     }
-                    (hooks.refresh)();
+                    // The engine knows where each provider keeps its sign-in.
+                    let (hooks, me2) = (hooks.clone(), me2.clone());
+                    cli::run_all(vec![cli::args(&["logout"])], move |res| {
+                        if let Err(e) = res
+                            && let Some(me) = me2.upgrade()
+                        {
+                            me.ops.toast(&format!("{e:#}"));
+                        }
+                        (hooks.refresh)();
+                    });
                 });
+                d.present(Some(&win));
+            });
+        }
+        {
+            let (win, hooks, me2) = (win.clone(), hooks.clone(), Rc::downgrade(&me));
+            switch_btn.connect_clicked(move |_| {
+                let Some(provider) = me2.upgrade().map(|m| m.ops.provider()) else {
+                    return;
+                };
+                let (heading, body) = switch_dialog_text(&provider.name);
+                let d = adw::AlertDialog::new(Some(heading), Some(&body));
+                d.add_response("cancel", "Cancel");
+                d.add_response("choose", "Choose Cloud…");
+                d.set_response_appearance("choose", adw::ResponseAppearance::Suggested);
+                let hooks = hooks.clone();
+                d.connect_response(Some("choose"), move |_, _| (hooks.setup)(crate::setup::Start::Switch));
                 d.present(Some(&win));
             });
         }
@@ -404,13 +489,24 @@ impl SettingsPage {
     }
 
     pub fn refresh(self: &Rc<Self>, s: &Snapshot) {
+        let p = &s.provider;
+        let t = texts(p);
+        self.space.set_description(Some(&t.space));
+        self.auto_free.set_subtitle(&t.auto_free);
+        self.account_group.set_title(t.account_group);
+        self.account.set_title(&p.name);
+        self.account_icon.set_icon_name(Some(if p.is_google() { "avatar-default-symbolic" } else { p.icon }));
+        self.switch.set_subtitle(&t.switch);
+        self.drive.set_title(&format!("In {}", p.name));
+        self.open_drive.set_tooltip_text(Some(&format!("Open in {}", p.name)));
+        self.open_drive.set_visible(p.can_open_web());
         self.account.set_subtitle(if s.signed_in { "Signed in" } else { "Not signed in" });
         self.sign_in.set_label(if s.signed_in { "Sign In Again" } else { "Sign In" });
         self.sign_out.set_visible(s.signed_in);
         self.service.set_subtitle(if s.daemon.is_some() { "Running" } else { "Not running" });
         if let Some(cfg) = &s.cfg {
             self.folder.set_subtitle(&ui::pretty_path(&cfg.sync_dir));
-            self.drive.set_subtitle(&format!("My Drive → {}", cfg.drive_folder));
+            self.drive.set_subtitle(&format!("{} → {}", p.root_label(), cfg.drive_folder));
             self.sync_space_saving(cfg);
             if !self.filled.get() {
                 self.filling.set(true);
@@ -451,6 +547,27 @@ impl SettingsPage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_texts() {
+        let g = texts(&Choice::of(clouddrop::remote::Provider::GoogleDrive));
+        assert_eq!(g.space, "Keep this computer light: uploaded files can be removed here and stay in Google Drive.");
+        assert_eq!(g.auto_free, "Local copies are removed only after CloudDrop checks\nGoogle Drive has an identical copy");
+        assert_eq!(g.account_group, "Google Account");
+        let dav = crate::providers::fakes().into_iter().find(|c| c.id == "webdav").unwrap();
+        let w = texts(&dav);
+        assert_eq!(w.auto_free, "Local copies are removed only after CloudDrop checks\nWebDAV has an identical copy, by downloading it once");
+        assert_eq!(w.account_group, "Account");
+        assert_eq!(w.switch, "Switch to another cloud. Everything is uploaded again; nothing is deleted from WebDAV.");
+        let (h, b) = switch_dialog_text("Google Drive");
+        assert_eq!(h, "Switch to another cloud?");
+        assert_eq!(
+            b,
+            "CloudDrop will upload everything in your CloudDrop folder again, to the cloud you choose next. \
+             Nothing is deleted from Google Drive. Files that are only in Google Drive (freed from this computer) \
+             stay there, but CloudDrop stops listing them."
+        );
+    }
+
     use super::*;
 
     #[test]

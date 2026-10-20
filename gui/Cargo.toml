@@ -16,7 +16,8 @@ clouddrop = { path = ".." }
 clouddrop-tray = { path = "../tray" }
 gtk = { version = "0.11.5", package = "gtk4", features = ["v4_12"] }
 rusqlite = "0.40.2"
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "time", "macros"] }
+toml = "1.1.8"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "time", "macros", "process", "io-util"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

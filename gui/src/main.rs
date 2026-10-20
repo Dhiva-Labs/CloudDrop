@@ -6,6 +6,7 @@
 
 mod activity;
 mod cells;
+mod cli;
 mod dbwatch;
 mod files;
 mod fmt;
@@ -13,6 +14,7 @@ mod fsops;
 mod home;
 mod model;
 mod ops;
+mod providers;
 mod rt;
 mod settings;
 mod setup;
@@ -80,6 +82,8 @@ fn tray_state(s: &Snapshot) -> TrayState {
         paused: s.paused,
         can_pause: s.ready(),
         has_drive_folder: s.root_id.is_some(),
+        provider_name: s.provider.name.clone(),
+        web_links: s.provider.can_open_web(),
     }
 }
 
@@ -125,7 +129,7 @@ impl App {
 
     /// The shared state database, opened on first use once CloudDrop is configured.
     fn db(&self) -> Option<Arc<Db>> {
-        if self.db.borrow().is_none() && control::is_configured() {
+        if self.db.borrow().is_none() && providers::is_configured() {
             *self.db.borrow_mut() = Db::open_default().ok().map(Arc::new);
         }
         self.db.borrow().clone()
@@ -169,7 +173,7 @@ impl App {
         if ready {
             self.show_window();
         } else {
-            self.show_setup();
+            self.show_setup(setup::Start::Welcome);
         }
     }
 
@@ -177,7 +181,7 @@ impl App {
         let (a, b, c, d, e) = (self.clone(), self.clone(), self.clone(), self.clone(), self.clone());
         Rc::new(Hooks {
             sign_in: Box::new(move || a.sign_in()),
-            setup: Box::new(move || b.show_setup()),
+            setup: Box::new(move |start| b.show_setup(start)),
             set_tray: Box::new(move |on| c.set_tray(on)),
             refresh: Box::new(move || d.refresh()),
             db: Box::new(move || e.db()),
@@ -212,14 +216,14 @@ impl App {
         w.present();
     }
 
-    fn show_setup(self: &Rc<Self>) {
+    fn show_setup(self: &Rc<Self>, start: setup::Start) {
         let wizard = self.wizard.borrow().clone();
         if let Some(w) = wizard {
             w.present();
             return;
         }
         let me = self.clone();
-        let wiz = setup::build(&self.adw, move |tray| {
+        let wiz = setup::build(&self.adw, start, move |tray| {
             if let Err(e) = control::set_autostart(tray, &exe()) {
                 eprintln!("autostart: {e:#}");
             }
@@ -231,8 +235,20 @@ impl App {
             me.show_window();
         });
         let me = self.clone();
-        wiz.connect_destroy(move |_| {
+        // On close rather than destroy: the assistant's own closures keep it alive, so GTK
+        // never disposes it.
+        wiz.connect_close_request(move |_| {
             me.wizard.borrow_mut().take();
+            // Closed without finishing (switching providers, then Cancel): back to the window
+            // it replaced, if there is one.
+            let window = me.window.borrow().clone();
+            if let Some(w) = window
+                && !w.win.is_visible()
+            {
+                me.refresh();
+                w.present();
+            }
+            glib::Propagation::Proceed
         });
         let window = self.window.borrow().clone();
         if let Some(w) = window {
@@ -260,8 +276,13 @@ impl App {
     }
 
     fn sign_in(self: &Rc<Self>) {
-        if !control::is_configured() {
-            return self.show_setup();
+        if !providers::is_configured() {
+            return self.show_setup(setup::Start::Welcome);
+        }
+        // Form providers (WebDAV, S3, SFTP) have no browser sign-in: their Connect page.
+        let provider = self.snap.borrow().as_ref().map(|s| s.provider.clone());
+        if provider.is_some_and(|p| p.is_form()) {
+            return self.show_setup(setup::Start::SignIn);
         }
         self.show_window();
         let parent = self.window.borrow().as_ref().map(|w| w.win.clone());

@@ -5,6 +5,7 @@ use crate::agent::EXIT;
 use clouddrop::config::{self, Config};
 use clouddrop::control::{self, Phase};
 use clouddrop::db::{Db, Kind};
+use clouddrop::remote::Provider;
 use std::sync::atomic::Ordering;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -33,12 +34,21 @@ fn icon(look: Look) -> Icon {
     Icon::from_rgba(raw.to_vec(), SIZE, SIZE).expect("tray icon")
 }
 
+/// The configured cloud (Google Drive when there is no config).
+fn provider() -> Provider {
+    Config::load().map(|c| c.provider).unwrap_or_default()
+}
+
 /// (look, one-line status, paused?)
 fn current() -> (Look, String, bool) {
-    if !control::is_configured() {
+    let cfg = Config::load().ok();
+    let provider = cfg.as_ref().map(|c| c.provider).unwrap_or_default();
+    // Google Drive needs its client; the other providers keep their settings elsewhere.
+    if !cfg.is_some_and(|c| !c.provider.is_default() || control::is_configured()) {
         return (Look::Attention, "Not set up — open CloudDrop".into(), false);
     }
-    if !control::is_signed_in() {
+    // Only Google Drive's sign-in is a file here; the engine reports the others' (NeedsSignIn).
+    if provider.is_default() && !control::is_signed_in() {
         return (Look::Attention, "Sign-in needed".into(), false);
     }
     let Some(s) = control::read_status(&config::data_dir()).filter(|s| s.is_live()) else {
@@ -56,7 +66,10 @@ fn current() -> (Look, String, bool) {
         Phase::Starting => (Look::Syncing, "Starting…".into(), false),
         Phase::Offline => (Look::Attention, "Offline — retrying".into(), false),
         Phase::NeedsSignIn => (Look::Attention, "Sign-in needed".into(), false),
-        Phase::DriveFolderMissing => (Look::Attention, "Drive folder missing".into(), false),
+        Phase::DriveFolderMissing => {
+            let line = if provider.is_default() { "Drive folder missing" } else { "Cloud folder missing" };
+            (Look::Attention, line.into(), false)
+        }
     }
 }
 
@@ -81,17 +94,28 @@ fn show_app() {
 pub fn run() {
     let status = MenuItem::new("CloudDrop", false, None);
     let open_folder = MenuItem::new("Open CloudDrop Folder", true, None);
-    let open_drive = MenuItem::new("Open in Google Drive", true, None);
+    let cloud = provider();
+    let open_drive = MenuItem::new(format!("Open in {}", cloud.display_name()), true, None);
     let show = MenuItem::new("Show CloudDrop", true, None);
     let pause = MenuItem::new("Pause Uploads", true, None);
     let quit = MenuItem::new("Quit", true, None);
     let menu = Menu::new();
+    // Providers without web pages (WebDAV, S3, SFTP) have nothing to open. Asked with the cloud
+    // folder's real id where there is one: some providers link only ids of their own form.
+    let root_id = Db::open_default().ok().and_then(|db| db.meta_get("root_id").ok().flatten());
+    let web_links = cloud.web_url(Kind::Dir, root_id.as_deref().unwrap_or("x")).is_some();
     for item in [
         &status as &dyn tray_icon::menu::IsMenuItem,
         &PredefinedMenuItem::separator(),
         &open_folder,
-        &open_drive,
-        &show,
+    ] {
+        let _ = menu.append(item);
+    }
+    if web_links {
+        let _ = menu.append(&open_drive);
+    }
+    for item in [
+        &show as &dyn tray_icon::menu::IsMenuItem,
         &PredefinedMenuItem::separator(),
         &pause,
         &PredefinedMenuItem::separator(),
