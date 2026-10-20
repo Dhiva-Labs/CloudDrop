@@ -35,6 +35,7 @@ contact: reachout@dhivalabs.com
 
 platforms:
   amd64:
+  arm64:
 
 environment:
   # The uploaded folder is the real ~/CloudDrop. Settings, the state database

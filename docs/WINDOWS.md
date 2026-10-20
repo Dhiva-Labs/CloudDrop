@@ -76,3 +76,10 @@ Commands print a human sentence on success (exit 0) or an error on stderr (exit 
   self-test (`clouddrop-agent --selftest DIR`) inside the package.
 - **GitHub** (free): source, plus the CI-built zip (`install.cmd`; unsigned, no Google
   client — like source builds, the setup assistant asks for your own).
+- **x64 and arm64**: every package exists for both Intel/AMD PCs and Windows on ARM PCs
+  (`CloudDrop-<version>-windows-x64.zip` and `…-windows-arm64.zip`). Nothing is
+  cross-compiled or emulated: CI builds each one on a native runner, runs the Rust
+  tests, the Cloud Files test and the app on it, and checks the machine type of every
+  `.exe` and `.dll` (and of the app's compiled Dart code). `packaging/windows/build.ps1`
+  and `msix/build-msix.ps1` build for the PC they run on; an arm64 Store package is built
+  on a Windows on ARM PC (or the arm64 CI runner) the same way as the x64 one.

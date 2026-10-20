@@ -46,6 +46,11 @@ flutter build windows       # on Windows; then put clouddrop.exe next to clouddr
 flutter build linux         # development build
 ```
 
+On a Windows on ARM PC `flutter build windows` produces an arm64 app (in
+`build\windows\arm64\runner\Release`); on an Intel/AMD PC it produces x64. The engine
+(`cargo build --release -p clouddrop -p clouddrop-agent`) is native in the same way, and
+`packaging\windows\build.ps1` assembles the matching package.
+
 The app's own exe is `clouddrop_app.exe` on purpose: Windows file names are
 case-insensitive, so `CloudDrop.exe` would collide with the engine's `clouddrop.exe`.
 

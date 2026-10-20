@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-A new look.
+A new look, and ARM64.
 
 - New logo: a cloud on a sky-blue tile with a drop cut through it, on Linux, Windows, the
   Microsoft Store and the notification-area icons.
@@ -14,6 +14,10 @@ A new look.
 - An empty folder in Files is a drop zone; *Free Up Space* has its own broom icon.
 - About CloudDrop (main menu on Linux, Settings on Windows): version and links.
 - Setup assistant: refreshed welcome page; on Windows, the steps are named.
+- Linux and Windows on ARM64: CI builds and tests CloudDrop natively on arm64 as well as
+  x64 (Linux tests, Debian package and snap; Windows engine, Cloud Files test, app and
+  packages). Releases carry `CloudDrop-<version>-windows-arm64.zip` next to the x64 zip.
+  `snap/snapcraft.yaml` and `debian/` now build for arm64.
 
 ## 0.2.0 — 2026-10-15
 

@@ -3,15 +3,22 @@ Vendored build inputs for the Ubuntu PPA source package
 
 Launchpad's PPA builders have no network access, so the source package carries:
 
-rustc / cargo / rust-std 1.97.1 (x86_64-unknown-linux-gnu)
+rustc / cargo / rust-std 1.97.1, for each architecture the package is built on:
+    x86_64-unknown-linux-gnu   (amd64)
+    aarch64-unknown-linux-gnu  (arm64)
     The official standalone component tarballs from
     https://static.rust-lang.org/dist/, unmodified. debian/rules runs each
-    one's install.sh into debian/.rust.
+    one's install.sh into debian/.rust, for the builder's own architecture.
+    A build for an architecture whose three tarballs are missing fails with a
+    message naming the missing toolchain.
 
 crates-<version>.tar.xz
     Produced by ./packaging/vendor/make-crates.sh: `cargo vendor` of the whole
-    workspace, with crates the Linux build doesn't compile replaced by stubs.
+    workspace, with crates neither Linux architecture compiles replaced by
+    stubs. The same tarball serves amd64 and arm64.
     Regenerate whenever Cargo.lock changes.
 
-SHA256SUMS lists all four files; debian/rules verifies it before building.
-The tarballs are gitignored but included in the source package.
+SHA256SUMS lists every one of those files; debian/rules verifies it before
+building. make-crates.sh writes it from the tarballs found in this directory,
+so download the rust tarballs of both architectures first. The tarballs are
+gitignored but included in the source package.
