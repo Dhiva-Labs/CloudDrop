@@ -37,6 +37,8 @@ pub struct Config {
     pub chunk_size: usize,
     #[serde(skip_serializing_if = "Endpoints::is_default")]
     pub endpoints: Endpoints,
+    #[serde(default, skip_serializing_if = "OneDriveConfig::is_default")]
+    pub onedrive: OneDriveConfig,
 }
 
 /// Google endpoints; overridable so tests can point at a local fake.
@@ -66,6 +68,29 @@ impl Endpoints {
     }
 }
 
+/// `[onedrive]`: which Azure app signs in, and which accounts may.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OneDriveConfig {
+    /// The app registration's client id; empty = the one CloudDrop is built with.
+    pub client_id: String,
+    /// "common" (personal, work and school accounts), "consumers", "organizations" or one
+    /// organisation's tenant id ([`crate::onedrive::oauth_endpoints`]).
+    pub tenant: String,
+}
+
+impl Default for OneDriveConfig {
+    fn default() -> Self {
+        Self { client_id: String::new(), tenant: "common".into() }
+    }
+}
+
+impl OneDriveConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 fn is_default_chunk(n: &usize) -> bool {
     *n == DEFAULT_CHUNK
 }
@@ -87,6 +112,7 @@ impl Default for Config {
             keep_local: Vec::new(),
             chunk_size: DEFAULT_CHUNK,
             endpoints: Endpoints::default(),
+            onedrive: OneDriveConfig::default(),
         }
     }
 }
