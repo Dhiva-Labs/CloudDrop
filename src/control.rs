@@ -386,6 +386,18 @@ pub fn sign_out() -> Result<()> {
     }
 }
 
+/// Ids shaped like each provider's, to ask a provider's `web_url` whether it links files or
+/// folders at all: opaque (Google Drive, MEGA) and OneDrive's "<drive id>!<n>".
+const SAMPLE_IDS: &[&str] = &["sample", "0123456789ABCDEF!101"];
+
+/// The provider has web pages for its files or folders ("Open in …" in the apps). The apps ask
+/// `web_url` with a real id where they have one.
+pub fn has_web_links(provider: Provider) -> bool {
+    [Kind::File, Kind::Dir]
+        .iter()
+        .any(|k| SAMPLE_IDS.iter().any(|id| provider.web_url(*k, id).is_some()))
+}
+
 /// Every provider for setup assistants (`clouddrop providers --json`): id, name, whether
 /// freeing space downloads files to verify them, whether files have web pages, and how to
 /// sign in (`google`, `oauth`, `nextcloud`, or a `form` with its fields).
@@ -417,7 +429,7 @@ pub fn providers_json() -> serde_json::Value {
                 "id": info.id,
                 "name": info.name,
                 "verify_by_download": info.caps.hash.is_none(),
-                "web_links": (info.web_url)(Kind::File, "x").is_some(),
+                "web_links": has_web_links(*p),
                 "sign_in": sign_in,
             })
         })
@@ -860,6 +872,18 @@ mod tests {
                                "web_links": true, "sign_in": {"kind": "google"}})
         );
         assert_eq!(all.as_array().unwrap().len(), Provider::ALL.len());
+    }
+
+    #[test]
+    fn web_links_by_id_shape_and_kind() {
+        assert!(has_web_links(Provider::GoogleDrive));
+        let onedrive = |_: Kind, id: &str| id.split_once('!').map(|(cid, _)| format!("https://onedrive.live.com/?cid={cid}"));
+        let folders_only = |k: Kind, id: &str| (k == Kind::Dir).then(|| format!("https://mega.nz/fm/{id}"));
+        let none = |_: Kind, _: &str| None::<String>;
+        let any = |f: &dyn Fn(Kind, &str) -> Option<String>| {
+            [Kind::File, Kind::Dir].iter().any(|k| SAMPLE_IDS.iter().any(|id| f(*k, id).is_some()))
+        };
+        assert!(any(&onedrive) && any(&folders_only) && !any(&none));
     }
 
     #[test]
