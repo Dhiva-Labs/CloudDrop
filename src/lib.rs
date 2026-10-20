@@ -14,6 +14,7 @@ pub mod oauth;
 pub mod onedrive;
 pub mod remote;
 pub mod s3;
+pub mod sftp;
 pub mod store;
 #[cfg(windows)]
 pub mod winstore;
@@ -49,6 +50,15 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
         )),
         remote::Provider::S3 => {
             Arc::new(remote::Remote::S3(Box::new(s3::S3::with_saved_secret(drive::http_client(), &cfg.s3))))
+        }
+        remote::Provider::Sftp => {
+            let secrets = credentials::load("sftp").unwrap_or_else(|e| {
+                tracing::warn!("cannot read the SFTP password: {e:#}");
+                None
+            });
+            let secrets = sftp::Secrets::from_map(&secrets.unwrap_or_default());
+            let client = sftp::Sftp::new(cfg.sftp.clone(), secrets, Some(config::config_path()));
+            Arc::new(remote::Remote::Sftp(client))
         }
     }
 }

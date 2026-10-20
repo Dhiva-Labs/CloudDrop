@@ -50,6 +50,9 @@ pub struct Config {
     pub nextcloud: WebDavConfig,
     #[serde(default, skip_serializing_if = "crate::s3::S3Config::is_default")]
     pub s3: crate::s3::S3Config,
+    /// `[sftp]`: the server for `provider = "sftp"`.
+    #[serde(skip_serializing_if = "crate::sftp::SftpConfig::is_default")]
+    pub sftp: crate::sftp::SftpConfig,
 }
 
 /// Google endpoints; overridable so tests can point at a local fake.
@@ -128,6 +131,7 @@ impl Default for Config {
             webdav: WebDavConfig::default(),
             nextcloud: WebDavConfig::default(),
             s3: Default::default(),
+            sftp: Default::default(),
         }
     }
 }

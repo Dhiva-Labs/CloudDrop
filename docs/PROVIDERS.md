@@ -120,6 +120,29 @@ chunked uploads and checksums: the client looks at the server, whatever the prov
 - **Tests:** `tests/webdav.rs` against `tests/common/webdav_mock.rs`, in plain and Nextcloud
   mode.
 
+### SFTP (`src/sftp.rs`)
+
+- **Client**: pure Rust (`russh` on the `aws-lc-rs` backend reqwest already builds, plus
+  `russh-sftp`); one SSH connection per client, reconnected on the next call after a drop.
+- **Config** `[sftp] host port user path key_file host_key`; the password and key passphrase are
+  in `credentials.json` ("sftp"). With neither a key nor a password it signs in with ssh-agent.
+- **Host key**: `host_key` is a `SHA256:…` fingerprint (`sftp::fetch_host_key` shows it). Empty:
+  the first key seen is trusted and written into config.toml. A different key is refused
+  (Permanent).
+- **Ids** are paths relative to `path` (`""` = `path` itself), so `stable_ids: false`.
+- **Uploads** write `.clouddrop-<random>.part` beside the target at the given offsets, and are
+  renamed into place (`posix-rename@openssh.com`, else a temporary name). `query_upload`
+  resumes 2 MiB (the most data in flight) before the partial file's end, at a 1 MiB boundary,
+  since writes in flight at a cut may leave holes.
+- **Never overwrites what it didn't upload**: a taken name (upload, rename, new folder) first
+  moves aside as `<stem> (replaced YYYY-MM-DD).<ext>`.
+- **keep_version** copies on the server with OpenSSH's `copy-data` extension (9.0+), else reads
+  and writes the file through the client. No shell or exec channel is used.
+- **Quota** from `statvfs@openssh.com`, else `(None, 0, 0)`. A write "Failure" with under 4 MiB
+  free is `Quota`.
+- **Tests** (`tests/sftp.rs`) run against a real `sshd` started as the current user, and skip
+  with a note where there is none (`CLOUDDROP_REQUIRE_SSHD=1` makes that a failure).
+
 ## Engine changes (phase 0, no visible change)
 
 **Done**, with these differences from the list below, each deferred to the first provider that

@@ -32,6 +32,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
+pub mod sftp_mock;
+
 pub const FOLDER: &str = "application/vnd.google-apps.folder";
 
 #[derive(Clone, Debug)]
