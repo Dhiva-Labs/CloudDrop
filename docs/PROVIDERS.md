@@ -281,6 +281,66 @@ The engine reads `Capabilities` and does the rest; providers don't touch `engine
 - **Self-hosted backends run for real in CI** (Nextcloud, MinIO and OpenSSH containers), which is
   cheap and catches more than a mock.
 
+## Dropbox
+
+**Built** (phase 1), tested against the mock only; no real account has been used yet.
+
+- **`src/dropbox.rs`** is an API v2 client for an *App folder* app. The app folder is
+  `top_parent` (id `"root"`), and every other id is Dropbox's `id:…`, which survives renames and
+  moves. Calls that only take paths (making a folder, where a move or copy goes, where a new file
+  goes) look the parent's path up first. `get` makes a second call to find the parent's id.
+- **Uploads** use `upload_session/start`, `append_v2` and `finish`, with the last chunk sent in
+  `finish`. The session string is JSON (`session_id`, parent, name, and for a replacement the
+  file's id and `rev`). `query_upload` sends an empty append at offset 0, and Dropbox's
+  `incorrect_offset` gives the real one. A forgotten session, or one this client can't read, is
+  NotFound.
+- **Nothing in the cloud is overwritten blindly.** A replacement commits `update` with the `rev`
+  seen when the upload started (after moving the file to its new name and place). If someone
+  changed the file meanwhile, Dropbox keeps both and names the new one "name (1)". New files
+  commit `add` with autorename, so a different file with that name stays as it is. The same
+  content at the same name is no conflict, so a lost reply to `finish` doesn't duplicate the file.
+- **`keep_version`** copies the file to `<stem> (replaced YYYY-MM-DD).<ext>` (UTC date) with
+  `copy_v2`; a second copy on the same day becomes `… (1)`. **Moves** use `move_v2` with
+  autorename. Case-only renames go through a temporary name, because `move_v2` can't do them.
+- **`find_child`** asks `get_metadata` for the composed path, so matches ignore case and the
+  result carries Dropbox's own spelling. A deleted item is NotFound (no trash flag).
+- **Errors:** 401 → refresh once, then `Auth`; 429 (and 503 with `Retry-After`) → `RateLimited`;
+  `insufficient_space` / `insufficient_quota` → `Quota`; any `…/not_found` → `NotFound`;
+  `too_many_write_operations` → `RateLimited`; 5xx → `Transient`. A 404 means a wrong URL, not a
+  missing file, so it is `Permanent`.
+- **Other details:** `Dropbox-API-Arg` headers escape everything non-ASCII as `\uXXXX`.
+  `forbidden_chars` is `\` and DEL. Names Dropbox refuses for other reasons (`disallowed_name`,
+  trailing spaces) become a `Permanent` error. There are no web links (Dropbox's pages go by
+  path), and quota comes from `users/get_space_usage`.
+- **Config:** `[dropbox] app_key` (`client_id` is read too), plus `api_base` / `content_base`,
+  which only tests change.
+- **`tests/common/dropbox_mock.rs`** fakes both hosts: the API host (RPC calls, `oauth2/token`,
+  `oauth2/authorize`) and the content host (uploads, downloads). It supports injected faults
+  (`Status`, `RateLimited`, `LostReply`), expiring tokens and sessions, deletes on "dropbox.com"
+  and a storage limit. It uses nothing from CloudDrop, so `src/dropbox.rs` includes it for its
+  unit tests with `#[path]`.
+- **Not wired yet:** `remote_for` builds the client with `dropbox::NotSignedIn`, which answers
+  every call with `Auth`, until the generic OAuth sign-in exists. The engine must hash in
+  `DropboxContent` before Dropbox can free space or adopt existing files: today `file_job`
+  compares MD5s. `chunk_size` must be a multiple of 4 MiB.
+
+**What a release needs:**
+
+1. An app in the Dropbox App Console: *Scoped access*, *App folder* (named `CloudDrop`, so the
+   folder is `Apps/CloudDrop`), with the permissions `files.metadata.read`, `files.content.read`,
+   `files.content.write` and `account_info.read`. Allow public clients (PKCE), so the build ships
+   only the app key and no secret.
+2. Redirect URIs: Dropbox matches them exactly, port included. The browser sign-in needs a fixed
+   loopback port (or a few), each registered as `http://127.0.0.1:<port>/`. A fallback where the
+   person pastes the code, with no `redirect_uri`, also works.
+3. **Production approval.** A new app is in development status: it can link up to 500 accounts,
+   and once it reaches 50, it has two weeks to be approved for production or its linking freezes.
+   Dropbox reviews only after 50 users, and checks its branding guidelines (the app name must not
+   contain "Dropbox"). Plan a beta that gets there.
+4. A live run of the conformance suite with `CLOUDDROP_LIVE_DROPBOX` before release. It should
+   check the guesses the mock encodes: the error for committing to a deleted file's id, whether
+   `move_v2` changes `rev`, and that an identical `add` isn't a conflict.
+
 ## Open questions
 
 - Phase 1 order: OneDrive first (more users; File Explorer shows it natively, which may confuse,

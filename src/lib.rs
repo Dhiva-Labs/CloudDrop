@@ -5,6 +5,7 @@ pub mod control;
 pub mod credentials;
 pub mod db;
 pub mod drive;
+pub mod dropbox;
 pub mod engine;
 pub mod hash;
 pub mod jobs;
@@ -25,6 +26,12 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
             let http = drive::http_client();
             let auth = Arc::new(auth::Auth::new(http.clone(), cfg, token_file));
             Arc::new(remote::Remote::GoogleDrive(drive::Drive::new(http, cfg.endpoints.clone(), auth)))
+        }
+        remote::Provider::Dropbox => {
+            // Until the browser sign-in is wired up: every call asks for a sign-in.
+            let tokens = Arc::new(dropbox::NotSignedIn);
+            let (api, content) = (&cfg.dropbox.api_base, &cfg.dropbox.content_base);
+            Arc::new(remote::Remote::Dropbox(dropbox::Dropbox::new(drive::http_client(), api, content, tokens)))
         }
     }
 }
