@@ -7,6 +7,7 @@ pub mod drive;
 pub mod engine;
 pub mod jobs;
 pub mod notifier;
+pub mod remote;
 pub mod store;
 #[cfg(windows)]
 pub mod winstore;
@@ -15,9 +16,13 @@ pub mod util;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Drive client wired to the configured endpoints and the given token file.
-pub fn drive_for(cfg: &config::Config, token_file: PathBuf) -> Arc<drive::Drive> {
-    let http = drive::http_client();
-    let auth = Arc::new(auth::Auth::new(http.clone(), cfg, token_file));
-    Arc::new(drive::Drive::new(http, cfg.endpoints.clone(), auth))
+/// The configured provider's client, wired to its endpoints and the given token file.
+pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remote> {
+    match cfg.provider {
+        remote::Provider::GoogleDrive => {
+            let http = drive::http_client();
+            let auth = Arc::new(auth::Auth::new(http.clone(), cfg, token_file));
+            Arc::new(remote::Remote::GoogleDrive(drive::Drive::new(http, cfg.endpoints.clone(), auth)))
+        }
+    }
 }

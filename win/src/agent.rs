@@ -115,9 +115,9 @@ fn background(rt: tokio::runtime::Handle, quit: watch::Receiver<bool>) {
         Ok(db) => Arc::new(db),
         Err(e) => return tracing::error!("cannot open the state database: {e:#}"),
     };
-    let drive = clouddrop::drive_for(&cfg, auth::token_path());
+    let remote = clouddrop::remote_for(&cfg, auth::token_path());
 
-    let connection = match crate::cloud::connect(&cfg, drive.clone(), rt.clone()) {
+    let connection = match crate::cloud::connect(&cfg, remote.clone(), rt.clone()) {
         Ok(c) => Some(c),
         Err(e) => {
             tracing::warn!("File Explorer integration unavailable, using plain files: {e:#}");
@@ -141,7 +141,7 @@ fn background(rt: tokio::runtime::Handle, quit: watch::Receiver<bool>) {
         cfg,
         opts,
         db,
-        drive,
+        remote,
         config::data_dir(),
         quit,
     )) {

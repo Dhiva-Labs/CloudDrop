@@ -214,8 +214,8 @@ async fn free_up_space_then_restore() {
     let mtime = std::fs::metadata(h.path("big/video.mp4")).unwrap().modified().unwrap();
 
     let ctx = h.ctx();
-    let drive = h.drive();
-    let report = actions::free(&ctx, &drive, &["big".into()]).await.unwrap();
+    let remote = h.remote();
+    let report = actions::free(&ctx, &remote, &["big".into()]).await.unwrap();
     assert_eq!(report.freed_files, 2, "{report:?}");
     assert!(!h.path("big/video.mp4").exists());
     assert!(h.path("big").is_dir(), "folders stay so the structure is visible");
@@ -232,7 +232,7 @@ async fn free_up_space_then_restore() {
     assert_eq!(names, ["big/clip.mp4", "big/video.mp4"]);
 
     let (sessions, _) = h.stats();
-    let report = actions::restore(&ctx, &drive, &["big/video.mp4".into()]).await.unwrap();
+    let report = actions::restore(&ctx, &remote, &["big/video.mp4".into()]).await.unwrap();
     assert_eq!(report.files, 1);
     assert_eq!(read(&h.path("big/video.mp4")), "lots of bytes");
     assert_eq!(std::fs::metadata(h.path("big/video.mp4")).unwrap().modified().unwrap(), mtime);
@@ -264,7 +264,7 @@ async fn free_refuses_unverified_copies() {
     h.mock.lock().unwrap().items.remove(&b_id);
 
     let ctx = h.ctx();
-    let report = actions::free(&ctx, &h.drive(), &["".into()]).await.unwrap();
+    let report = actions::free(&ctx, &h.remote(), &["".into()]).await.unwrap();
     assert_eq!(report.freed_files, 0, "{report:?}");
     assert_eq!(report.changed, 1);
     assert_eq!(report.cloud_mismatch, 1);
@@ -288,7 +288,7 @@ async fn restore_whole_folder_after_local_delete() {
     h.wait("cloud-only", |h| h.state("trip") == Some(State::CloudOnly)).await;
     h.settle().await;
 
-    let report = actions::restore(&h.ctx(), &h.drive(), &["trip".into()]).await.unwrap();
+    let report = actions::restore(&h.ctx(), &h.remote(), &["trip".into()]).await.unwrap();
     assert_eq!(report.files, 2);
     assert_eq!(read(&h.path("trip/day1/a.jpg")), "a");
     assert_eq!(read(&h.path("trip/day2/b.jpg")), "b");
@@ -639,8 +639,8 @@ async fn activity_history_records_what_happened() {
     std::fs::remove_file(h.path("b.txt")).unwrap();
     h.wait("b cloud-only", |h| h.state("b.txt") == Some(State::CloudOnly)).await;
     let ctx = h.ctx();
-    actions::restore(&ctx, &h.drive(), &["b.txt".into()]).await.unwrap();
-    actions::free(&ctx, &h.drive(), &["renamed.txt".into()]).await.unwrap();
+    actions::restore(&ctx, &h.remote(), &["b.txt".into()]).await.unwrap();
+    actions::free(&ctx, &h.remote(), &["renamed.txt".into()]).await.unwrap();
     h.settle().await;
 
     let got = kinds(&h);
@@ -686,7 +686,7 @@ async fn auto_free_right_after_upload_respects_keep_folders() {
     assert!(kinds(&h).contains(&(clouddrop::db::ActivityKind::AutoFreed, "loose.txt".into())));
 
     // Downloading back is respected: it stays until it changes again.
-    actions::restore(&h.ctx(), &h.drive(), &["loose.txt".into()]).await.unwrap();
+    actions::restore(&h.ctx(), &h.remote(), &["loose.txt".into()]).await.unwrap();
     h.stop().await;
     h.start();
     h.settle().await;
@@ -741,7 +741,7 @@ async fn auto_free_never_deletes_when_drive_copy_differs() {
     assert_eq!(doc.id, id, "same Drive file, no duplicate");
     assert_eq!(doc.content, b"local truth");
     assert!(doc.revisions.iter().rev().nth(1).is_some_and(|r| r.keep_forever), "the other edit is kept");
-    actions::restore(&h.ctx(), &h.drive(), &["doc.txt".into()]).await.unwrap();
+    actions::restore(&h.ctx(), &h.remote(), &["doc.txt".into()]).await.unwrap();
     assert_eq!(read(&h.path("doc.txt")), "local truth");
     h.stop().await;
 }

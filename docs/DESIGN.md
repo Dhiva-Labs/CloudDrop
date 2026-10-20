@@ -17,6 +17,10 @@ downloaded back at any time.
 | systemd user unit | | `packaging/clouddrop.service` |
 | Installer | shell | `install.sh` |
 
+The engine reaches the cloud only through `src/remote.rs`: `Remote` (one variant per provider)
+and provider-neutral metadata, errors and content hashes. Google Drive's client is
+`src/drive.rs`; [PROVIDERS.md](PROVIDERS.md) is the plan for the others.
+
 ## Files on disk
 
 | What | Default path | Override |
@@ -29,8 +33,9 @@ downloaded back at any time.
 ### config.toml
 
 ```toml
+provider = "gdrive"                  # the cloud; absent = Google Drive, the only one so far
 sync_dir = "/home/me/CloudDrop"     # absolute path
-drive_folder = "CloudDrop"           # name of the top folder created in My Drive
+drive_folder = "CloudDrop"           # name of the top folder created in My Drive (`remote_folder` is read too)
 client_id = "....apps.googleusercontent.com"
 client_secret = "...."
 parallel_uploads = 2
@@ -66,8 +71,9 @@ CREATE TABLE entries (
   retry_at    INTEGER,           -- unix ms; do not retry before this
   error       TEXT,              -- last error message (state = 'error', or transient failure text)
   updated_at  INTEGER NOT NULL,  -- unix ms
-  uploaded_at INTEGER            -- unix ms the current Drive content was uploaded; NULL after a
+  uploaded_at INTEGER,           -- unix ms the current Drive content was uploaded; NULL after a
                                  -- restore (automatic space saving skips it until re-uploaded)
+  hash_kind   TEXT               -- which hash `md5` holds; NULL = MD5 (the only kind so far)
 );
 CREATE TABLE activity (          -- history for the desktop app; newest 10 000 rows kept
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +85,10 @@ CREATE TABLE activity (          -- history for the desktop app; newest 10 000 r
   detail TEXT                    -- old path for moved, error for failed
 );
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
--- meta keys: 'schema_version' = '2' (version 1 databases gain uploaded_at on open), 'sync_root' = absolute sync_dir,
+-- meta keys: 'schema_version' = '3' (version 1 databases gain uploaded_at and version 2 ones
+--            hash_kind on open), 'sync_root' = absolute sync_dir,
+--            'provider' = the cloud the ids belong to ('gdrive'); the engine refuses a database
+--            bound to another provider, as it does one bound to another folder,
 --            'root_id' = Drive id of the top CloudDrop folder,
 --            'paused' = '1' while uploads are paused by the user
 ```

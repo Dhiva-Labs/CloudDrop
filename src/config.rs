@@ -1,3 +1,4 @@
+use crate::remote::Provider;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -9,7 +10,13 @@ const CHUNK_UNIT: usize = 256 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// The cloud to upload to; absent = Google Drive (the only one so far).
+    #[serde(skip_serializing_if = "Provider::is_default")]
+    pub provider: Provider,
     pub sync_dir: PathBuf,
+    /// Name of the top folder in the cloud. `remote_folder` is read as well, the name it
+    /// will have once there is more than one provider.
+    #[serde(alias = "remote_folder")]
     pub drive_folder: String,
     pub client_id: String,
     pub client_secret: String,
@@ -65,6 +72,7 @@ fn is_default_chunk(n: &usize) -> bool {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            provider: Provider::default(),
             sync_dir: dirs::home_dir().unwrap_or_default().join("CloudDrop"),
             drive_folder: "CloudDrop".into(),
             client_id: String::new(),
@@ -282,5 +290,15 @@ mod tests {
         assert_eq!(back.keep_local, ["Work"]);
         let old: Config = toml::from_str("sync_dir = \"/x\"").unwrap();
         assert_eq!(old.auto_free_days, None);
+    }
+
+    #[test]
+    fn provider_defaults_to_google_drive_and_stays_out_of_the_file() {
+        let old: Config = toml::from_str("sync_dir = \"/x\"\ndrive_folder = \"Backup\"").unwrap();
+        assert_eq!(old.provider, Provider::GoogleDrive);
+        assert!(!toml::to_string_pretty(&old).unwrap().contains("provider"));
+        let new: Config = toml::from_str("provider = \"gdrive\"\nremote_folder = \"Backup\"").unwrap();
+        assert_eq!((new.provider, new.drive_folder.as_str()), (Provider::GoogleDrive, "Backup"));
+        assert!(toml::from_str::<Config>("provider = \"floppy\"").is_err());
     }
 }

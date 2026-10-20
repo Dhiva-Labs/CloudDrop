@@ -155,7 +155,8 @@ impl Ops {
     }
 
     pub fn open_in_drive(&self, kind: Kind, id: &str) {
-        control::open_uri(&actions::drive_url(kind, id));
+        let provider = self.cfg.borrow().as_ref().map(|c| c.provider).unwrap_or_default();
+        control::open_uri(&provider.web_url(kind, id));
     }
 
     /// Opens a file with its default app, or a folder in Files.
@@ -203,8 +204,8 @@ impl Ops {
         rt::run(
             async move {
                 let ctx = Ctx::load()?;
-                let drive = clouddrop::drive_for(&ctx.cfg, clouddrop::auth::token_path());
-                anyhow::Ok(actions::free(&ctx, &drive, &rels).await?.summary())
+                let remote = clouddrop::remote_for(&ctx.cfg, clouddrop::auth::token_path());
+                anyhow::Ok(actions::free(&ctx, &remote, &rels).await?.summary())
             },
             move |res| {
                 me.busy.set(me.busy.get() - 1);
@@ -223,8 +224,8 @@ impl Ops {
         rt::run(
             async move {
                 let ctx = Ctx::load()?;
-                let drive = clouddrop::drive_for(&ctx.cfg, clouddrop::auth::token_path());
-                anyhow::Ok(actions::restore(&ctx, &drive, &rels).await?.summary())
+                let remote = clouddrop::remote_for(&ctx.cfg, clouddrop::auth::token_path());
+                anyhow::Ok(actions::restore(&ctx, &remote, &rels).await?.summary())
             },
             move |res| {
                 me.busy.set(me.busy.get() - 1);

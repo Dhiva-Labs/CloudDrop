@@ -9,7 +9,7 @@
 use crate::config::Config;
 use crate::control::{self, DaemonStatus, Phase, Upload};
 use crate::db::{ActivityKind, Db, Entry, Kind, State};
-use crate::drive::{Drive, DriveError};
+use crate::remote::{Remote, RemoteError};
 use crate::jobs::{self, FreeSkip, JobEvent, JobOutcome, JobSpec};
 use crate::notifier::Notifier;
 use crate::store::LocalStore;
@@ -61,7 +61,7 @@ pub struct Engine {
     cfg: Config,
     root: PathBuf,
     db: Arc<Db>,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
     ignore: GlobSet,
     root_id: String,
     /// Paths with recent filesystem events, processed once quiet for `settle_secs`.
@@ -158,18 +158,18 @@ impl Default for RunOptions {
 pub async fn run(
     cfg: Config,
     db: Arc<Db>,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
     data_dir: PathBuf,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    run_with_options(cfg, RunOptions::default(), db, drive, data_dir, shutdown).await
+    run_with_options(cfg, RunOptions::default(), db, remote, data_dir, shutdown).await
 }
 
 pub async fn run_with_options(
     cfg: Config,
     opts: RunOptions,
     db: Arc<Db>,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
     data_dir: PathBuf,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -178,6 +178,7 @@ pub async fn run_with_options(
     std::fs::create_dir_all(&root)
         .with_context(|| format!("cannot create {}", root.display()))?;
     db.bind_root(&root)?;
+    db.bind_provider(cfg.provider)?;
     let _ = control::clear_stop(&db); // a stale request must not stop this run
     let reset = db.reset_uploading()?;
     if reset > 0 {
@@ -191,7 +192,7 @@ pub async fn run_with_options(
         root,
         cfg,
         db,
-        drive,
+        remote,
         root_id: String::new(),
         dirty: HashMap::new(),
         inflight: HashMap::new(),
@@ -282,17 +283,17 @@ impl Engine {
                 Err(e) => {
                     let msg = e.to_string();
                     tracing::warn!("Drive folder unavailable: {msg}");
-                    if msg != last_msg && !matches!(e, DriveError::Transient(_)) {
+                    if msg != last_msg && !matches!(e, RemoteError::Transient(_)) {
                         self.notifier.send("CloudDrop is paused", &msg);
                     }
                     let phase = match e {
-                        DriveError::Auth(_) => Phase::NeedsSignIn,
-                        DriveError::Transient(_) => Phase::Offline,
+                        RemoteError::Auth(_) => Phase::NeedsSignIn,
+                        RemoteError::Transient(_) => Phase::Offline,
                         _ => Phase::DriveFolderMissing,
                     };
                     last_msg = msg.clone();
                     let wait = match e {
-                        DriveError::Transient(_) | DriveError::Auth(_) => 30,
+                        RemoteError::Transient(_) | RemoteError::Auth(_) => 30,
                         _ => 120,
                     };
                     // Retry early when `clouddrop login` writes a new token.
@@ -312,15 +313,15 @@ impl Engine {
         }
     }
 
-    async fn try_root(&self) -> Result<String, DriveError> {
+    async fn try_root(&self) -> Result<String, RemoteError> {
         if let Ok(Some(id)) = self.db.meta_get("root_id") {
-            return match self.drive.get(&id).await {
+            return match self.remote.get(&id).await {
                 Ok(m) if !m.trashed => Ok(id),
-                Ok(_) => Err(DriveError::Permanent(format!(
+                Ok(_) => Err(RemoteError::Permanent(format!(
                     "the \"{}\" folder is in your Google Drive trash — restore it to resume uploads",
                     self.cfg.drive_folder
                 ))),
-                Err(DriveError::NotFound) => Err(DriveError::Permanent(format!(
+                Err(RemoteError::NotFound) => Err(RemoteError::Permanent(format!(
                     "the \"{}\" folder was deleted from Google Drive — run `clouddrop reset-cloud` to upload everything again",
                     self.cfg.drive_folder
                 ))),
@@ -328,13 +329,13 @@ impl Engine {
             };
         }
         let name = &self.cfg.drive_folder;
-        let id = match self.drive.find_child(name, "root", true).await?.into_iter().next() {
+        let id = match self.remote.find_child(name, "root", true).await?.into_iter().next() {
             Some(existing) => existing.id,
-            None => self.drive.create_folder(name, "root").await?.id,
+            None => self.remote.create_folder(name, "root").await?.id,
         };
         self.db
             .meta_set("root_id", &id)
-            .map_err(|e| DriveError::Permanent(e.to_string()))?;
+            .map_err(|e| RemoteError::Permanent(e.to_string()))?;
         Ok(id)
     }
 
@@ -950,9 +951,9 @@ impl Engine {
             return;
         }
         self.last_quota = Some(Instant::now());
-        let (drive, tx) = (self.drive.clone(), self.job_tx.clone());
+        let (remote, tx) = (self.remote.clone(), self.job_tx.clone());
         tokio::spawn(async move {
-            match drive.storage_quota().await {
+            match remote.storage_quota().await {
                 Ok((limit, usage, in_drive)) => {
                     let _ = tx.send(JobEvent::Quota(limit, usage, in_drive));
                 }
@@ -1178,7 +1179,7 @@ impl Engine {
             entry: e,
         };
         tracing::debug!("job {id}: {path}{}", if free { " (free)" } else { "" });
-        let handle = tokio::spawn(jobs::run(spec, self.drive.clone(), self.job_tx.clone()));
+        let handle = tokio::spawn(jobs::run(spec, self.remote.clone(), self.job_tx.clone()));
         self.inflight.insert(
             path,
             Inflight {
@@ -1333,11 +1334,11 @@ impl Engine {
             JobOutcome::Failed(err) => {
                 let base = if job.placement_only { State::CloudOnly } else { State::Pending };
                 match err {
-                    DriveError::Auth(msg) => {
+                    RemoteError::Auth(msg) => {
                         e.state = base;
                         self.pause(msg);
                     }
-                    DriveError::Transient(msg) => {
+                    RemoteError::Transient(msg) => {
                         e.attempts += 1;
                         e.retry_at = Some(now_ms() + backoff_ms(e.attempts));
                         e.state = base;
@@ -1345,7 +1346,7 @@ impl Engine {
                         self.last_transient = Some((Instant::now(), msg.clone()));
                         e.error = Some(msg);
                     }
-                    DriveError::NotFound | DriveError::Permanent(_) => {
+                    RemoteError::NotFound | RemoteError::Permanent(_) => {
                         let msg = err.to_string();
                         tracing::error!("{path}: {msg}");
                         if job.placement_only {
@@ -1404,7 +1405,7 @@ impl Engine {
                 self.put(&e);
             }
             JobOutcome::FreeSkip(FreeSkip::LocalChanged) | JobOutcome::Vanished => self.mark_dirty(path),
-            JobOutcome::Failed(DriveError::Auth(msg)) => self.pause(msg),
+            JobOutcome::Failed(RemoteError::Auth(msg)) => self.pause(msg),
             JobOutcome::Failed(err) => tracing::debug!("{path}: free check failed: {err}"),
             JobOutcome::Done(_) => {}
         }

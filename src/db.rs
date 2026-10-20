@@ -1,3 +1,4 @@
+use crate::remote::Provider;
 use crate::util::{LocalMeta, now_ms};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -184,7 +185,8 @@ CREATE TABLE IF NOT EXISTS entries (
   retry_at INTEGER,
   error TEXT,
   updated_at INTEGER NOT NULL,
-  uploaded_at INTEGER
+  uploaded_at INTEGER,
+  hash_kind TEXT
 );
 CREATE INDEX IF NOT EXISTS entries_state ON entries(state);
 CREATE INDEX IF NOT EXISTS entries_inode ON entries(inode);
@@ -215,8 +217,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
     conn.execute_batch("CREATE INDEX IF NOT EXISTS entries_uploaded_at ON entries(uploaded_at);")?;
+    // Version 3: which hash `md5` holds (NULL = MD5, all that version 2 knew).
+    let has_hash_kind = conn
+        .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'hash_kind'")?
+        .exists([])?;
+    if !has_hash_kind {
+        conn.execute_batch("ALTER TABLE entries ADD COLUMN hash_kind TEXT;")?;
+    }
     Ok(())
 }
+
+pub const SCHEMA_VERSION: &str = "3";
 
 const COLS: &str = "path, kind, state, drive_id, cloud_name, cloud_parent, md5, cloud_size, \
     local_size, local_mtime_ns, inode, upload_url, upload_md5, pin_prev, move_pending, attempts, \
@@ -252,8 +263,8 @@ impl Db {
             conn: Mutex::new(conn),
         };
         // Only write when it changes: every write bumps other connections' data_version.
-        if db.meta_get("schema_version")?.as_deref() != Some("2") {
-            db.meta_set("schema_version", "2")?;
+        if db.meta_get("schema_version")?.as_deref() != Some(SCHEMA_VERSION) {
+            db.meta_set("schema_version", SCHEMA_VERSION)?;
         }
         Ok(db)
     }
@@ -275,6 +286,19 @@ impl Db {
             Some(r) => bail!(
                 "the state database belongs to {r}, but the config says {root}; \
                  move the folder back or start with a fresh CLOUDDROP_DATA_DIR"
+            ),
+        }
+    }
+
+    /// The cloud this database's ids belong to; refuses another one (they would mean nothing there).
+    pub fn bind_provider(&self, provider: Provider) -> Result<()> {
+        match self.meta_get("provider")? {
+            None => self.meta_set("provider", provider.as_str()),
+            Some(p) if p == provider.as_str() => Ok(()),
+            Some(p) => bail!(
+                "the state database belongs to {p}, but the config says {}; \
+                 switch back or start with a fresh CLOUDDROP_DATA_DIR",
+                provider.as_str()
             ),
         }
     }
@@ -852,11 +876,46 @@ mod tests {
         }
         let db = Db::open(&path).unwrap();
         assert_eq!(db.get("a").unwrap().unwrap().uploaded_at, Some(1234));
-        assert_eq!(db.meta_get("schema_version").unwrap().as_deref(), Some("2"));
+        assert_eq!(db.meta_get("schema_version").unwrap().as_deref(), Some("3"));
+        let kind: Option<String> = db
+            .conn()
+            .query_row("SELECT hash_kind FROM entries WHERE path = 'a'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, None, "existing hashes are MD5");
         db.log_activity(ActivityKind::Uploaded, "a", None, None).unwrap();
         // Reopening an up-to-date database is a no-op.
         drop(db);
         Db::open(&path).unwrap();
+    }
+
+    #[test]
+    fn migrates_version_2_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.db");
+        {
+            let db = Db::open(&path).unwrap();
+            db.conn().execute_batch("ALTER TABLE entries DROP COLUMN hash_kind;").unwrap();
+            db.meta_set("schema_version", "2").unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.meta_get("schema_version").unwrap().as_deref(), Some("3"));
+        let has: bool = db
+            .conn()
+            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'hash_kind'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(has);
+    }
+
+    #[test]
+    fn bind_provider_refuses_another() {
+        let (_d, db) = db();
+        db.bind_provider(Provider::GoogleDrive).unwrap();
+        db.bind_provider(Provider::GoogleDrive).unwrap();
+        assert_eq!(db.meta_get("provider").unwrap().as_deref(), Some("gdrive"));
+        db.meta_set("provider", "elsewhere").unwrap();
+        assert!(db.bind_provider(Provider::GoogleDrive).is_err());
     }
 
     #[test]

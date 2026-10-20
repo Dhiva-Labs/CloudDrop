@@ -22,7 +22,6 @@ mod ui;
 mod window;
 
 use adw::prelude::*;
-use clouddrop::actions;
 use clouddrop::control::{self, APP_ID};
 use clouddrop::db::{Db, Kind};
 use clouddrop_tray::{Tray, TrayCommand, TrayState};
@@ -372,8 +371,11 @@ impl App {
                 None => self.present(),
             },
             TrayCommand::OpenInDrive => {
-                if let Some(id) = snap.and_then(|s| s.root_id) {
-                    control::open_uri(&actions::drive_url(Kind::Dir, &id));
+                if let Some(s) = snap
+                    && let Some(id) = &s.root_id
+                {
+                    let provider = s.cfg.as_ref().map(|c| c.provider).unwrap_or_default();
+                    control::open_uri(&provider.web_url(Kind::Dir, id));
                 }
             }
             TrayCommand::TogglePause => {

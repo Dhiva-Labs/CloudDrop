@@ -1,8 +1,8 @@
 # Plan: more clouds than Google Drive
 
-Status: **plan**, nothing below is implemented yet. Target: OneDrive, Dropbox, MEGA,
-Proton Drive, and self-hosted storage (Nextcloud/ownCloud and other WebDAV servers,
-S3-compatible buckets, SFTP).
+Status: **phase 0 is done** (the provider seam, below); everything after it is still a plan.
+Target: OneDrive, Dropbox, MEGA, Proton Drive, and self-hosted storage (Nextcloud/ownCloud and
+other WebDAV servers, S3-compatible buckets, SFTP).
 
 ## What must not change
 
@@ -75,6 +75,20 @@ change it to "trust a completed upload" (size check only), with a clear warning.
   rules for third-party apps. Never store the Proton password, only the session.
 
 ## Engine changes (phase 0, no visible change)
+
+**Done**, with these differences from the list below, each deferred to the first provider that
+needs it:
+
+- `RemoteError` keeps today's four kinds (`Auth`, `Transient`, `NotFound`, `Permanent`);
+  `RateLimited` and `Quota` arrive with OneDrive/Dropbox, whose errors need them.
+- `ContentHash` is in place at the seam (provider metadata, downloads, the free check); local
+  hashing is still the MD5 helpers, since MD5 is the only kind so far.
+- Config keeps writing `drive_folder` (the Windows app and `config set` use that key) and reads
+  `remote_folder` too. `provider` is only written when it isn't Google Drive.
+- `provider` is in `status --json` and in `meta`, where the engine refuses a database bound to
+  another provider. `status.json` is unchanged (the apps read the provider from the config).
+  `meta.account` waits for a provider-neutral way to name the account.
+
 
 The Google coupling is narrow: `Drive` in `src/drive.rs` has about a dozen calls, used from
 `engine.rs`, `jobs.rs`, `actions.rs` and the Windows agent (`win/src/cloud.rs`: metadata check

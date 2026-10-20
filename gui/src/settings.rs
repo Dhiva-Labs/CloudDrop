@@ -4,7 +4,6 @@ use crate::ops::Ops;
 use crate::snapshot::Snapshot;
 use crate::{fsops, rt, ui};
 use adw::prelude::*;
-use clouddrop::actions;
 use clouddrop::control;
 use clouddrop::db::Kind;
 use clouddrop::util;
@@ -253,8 +252,12 @@ impl SettingsPage {
         {
             let me2 = Rc::downgrade(&me);
             open_drive.connect_clicked(move |_| {
-                if let Some(id) = me2.upgrade().and_then(|m| m.last.borrow().as_ref().and_then(|s| s.root_id.clone())) {
-                    control::open_uri(&actions::drive_url(Kind::Dir, &id));
+                if let Some(m) = me2.upgrade()
+                    && let Some(s) = m.last.borrow().as_ref()
+                    && let Some(id) = &s.root_id
+                {
+                    let provider = s.cfg.as_ref().map(|c| c.provider).unwrap_or_default();
+                    control::open_uri(&provider.web_url(Kind::Dir, id));
                 }
             });
         }

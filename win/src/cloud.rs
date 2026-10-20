@@ -7,7 +7,7 @@
 use anyhow::{Result, bail};
 use clouddrop::config::{self, Config};
 use clouddrop::db::{Db, State};
-use clouddrop::drive::Drive;
+use clouddrop::remote::Remote;
 use clouddrop::store::LocalStore;
 use clouddrop::winstore::{WinStore, is_sync_root};
 use cloud_filter::error::{CResult, CloudErrorKind};
@@ -26,13 +26,13 @@ const PAGE: u64 = 4096;
 
 pub struct Filter {
     rt: tokio::runtime::Handle,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
     root: PathBuf,
     db_path: PathBuf,
 }
 
 /// Registers the sync folder with File Explorer (once) and connects to it.
-pub fn connect(cfg: &Config, drive: Arc<Drive>, rt: tokio::runtime::Handle) -> Result<Connection<Filter>> {
+pub fn connect(cfg: &Config, remote: Arc<Remote>, rt: tokio::runtime::Handle) -> Result<Connection<Filter>> {
     if !is_supported()? {
         bail!("this version of Windows has no cloud files support");
     }
@@ -53,7 +53,7 @@ pub fn connect(cfg: &Config, drive: Arc<Drive>, rt: tokio::runtime::Handle) -> R
     }
     let filter = Filter {
         rt,
-        drive,
+        remote,
         root: cfg.sync_dir.clone(),
         db_path: config::data_dir().join("state.db"),
     };
@@ -135,12 +135,8 @@ impl Filter {
         if e.state != State::Synced {
             return false;
         }
-        match self.rt.block_on(self.drive.get(&id)) {
-            Ok(m) => {
-                !m.trashed
-                    && m.md5_checksum.as_deref() == Some(md5.as_str())
-                    && m.size_bytes() == e.cloud_size.map(|s| s as u64)
-            }
+        match self.rt.block_on(self.remote.get(&id)) {
+            Ok(m) => !m.trashed && m.md5() == Some(md5.as_str()) && m.size == e.cloud_size.map(|s| s as u64),
             Err(err) => {
                 tracing::warn!("cannot check {rel} in Drive: {err}");
                 false
@@ -171,7 +167,7 @@ impl SyncFilter for Filter {
             let to = (pos + CHUNK).min(size);
             let data = self
                 .rt
-                .block_on(self.drive.download_range(&id, pos, to))
+                .block_on(self.remote.download_range(&id, pos, to))
                 .map_err(|e| {
                     tracing::warn!("download of {} failed: {e}", request.path().display());
                     CloudErrorKind::NetworkUnavailable
