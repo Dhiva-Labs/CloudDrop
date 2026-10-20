@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+A new look.
+
+- New logo: a cloud on a sky-blue tile with a drop cut through it, on Linux, Windows, the
+  Microsoft Store and the notification-area icons.
+- Home: a status card in the logo's colours that shows overall progress, upload speed and
+  time left while uploading, and the latest activity with *See All*.
+- The status is on every screen: an icon in the header bar on Linux, a line under the logo
+  in the navigation pane on Windows.
+- Activity can show just uploads, freed space, downloads or problems.
+- An empty folder in Files is a drop zone; *Free Up Space* has its own broom icon.
+- About CloudDrop (main menu on Linux, Settings on Windows): version and links.
+- Setup assistant: refreshed welcome page; on Windows, the steps are named.
+
 ## 0.2.0 — 2026-10-15
 
 CloudDrop for Windows.
