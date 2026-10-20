@@ -1,3 +1,5 @@
+use crate::hash::{ContentHash, HashKind};
+use crate::remote::Provider;
 use crate::util::{LocalMeta, now_ms};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -63,16 +65,19 @@ pub struct Entry {
     pub path: String,
     pub kind: Kind,
     pub state: State,
+    /// The provider's id for the item (the column predates other providers).
     pub drive_id: Option<String>,
     pub cloud_name: Option<String>,
     pub cloud_parent: Option<String>,
-    pub md5: Option<String>,
+    /// Hash of the content last uploaded, as the provider reports it.
+    pub hash: Option<ContentHash>,
     pub cloud_size: Option<i64>,
     pub local_size: Option<i64>,
     pub local_mtime_ns: Option<i64>,
     pub inode: Option<i64>,
     pub upload_url: Option<String>,
-    pub upload_md5: Option<String>,
+    /// Hash of the content `upload_url` is uploading.
+    pub upload_hash: Option<ContentHash>,
     pub pin_prev: bool,
     pub move_pending: bool,
     pub attempts: i64,
@@ -91,13 +96,13 @@ impl Entry {
             drive_id: None,
             cloud_name: None,
             cloud_parent: None,
-            md5: None,
+            hash: None,
             cloud_size: None,
             local_size: None,
             local_mtime_ns: None,
             inode: None,
             upload_url: None,
-            upload_md5: None,
+            upload_hash: None,
             pin_prev: false,
             move_pending: false,
             attempts: 0,
@@ -123,9 +128,9 @@ impl Entry {
         self.inode = meta.map(|m| m.inode);
     }
 
-    /// Drive holds a usable copy: a folder, or a file with uploaded content.
+    /// The cloud holds a usable copy: a folder, or a file with uploaded content.
     pub fn in_cloud(&self) -> bool {
-        self.drive_id.is_some() && (self.kind == Kind::Dir || self.md5.is_some())
+        self.drive_id.is_some() && (self.kind == Kind::Dir || self.hash.is_some())
     }
 
     /// Queue for upload/placement now, clearing any failure backoff.
@@ -139,6 +144,17 @@ impl Entry {
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
         let kind: String = r.get("kind")?;
         let state: String = r.get("state")?;
+        let hash_kind: Option<String> = r.get("hash_kind")?;
+        let Some(hash_kind) = HashKind::from_db(hash_kind.as_deref()) else {
+            return Err(rusqlite::Error::InvalidColumnType(
+                0,
+                format!("hash_kind {}", hash_kind.unwrap_or_default()),
+                rusqlite::types::Type::Text,
+            ));
+        };
+        let hash = |col: &str| -> rusqlite::Result<Option<ContentHash>> {
+            Ok(r.get::<_, Option<String>>(col)?.map(|value| ContentHash { kind: hash_kind, value }))
+        };
         Ok(Entry {
             path: r.get("path")?,
             kind: if kind == "dir" { Kind::Dir } else { Kind::File },
@@ -146,13 +162,13 @@ impl Entry {
             drive_id: r.get("drive_id")?,
             cloud_name: r.get("cloud_name")?,
             cloud_parent: r.get("cloud_parent")?,
-            md5: r.get("md5")?,
+            hash: hash("md5")?,
             cloud_size: r.get("cloud_size")?,
             local_size: r.get("local_size")?,
             local_mtime_ns: r.get("local_mtime_ns")?,
             inode: r.get("inode")?,
             upload_url: r.get("upload_url")?,
-            upload_md5: r.get("upload_md5")?,
+            upload_hash: hash("upload_md5")?,
             pin_prev: r.get::<_, i64>("pin_prev")? != 0,
             move_pending: r.get::<_, i64>("move_pending")? != 0,
             attempts: r.get("attempts")?,
@@ -184,7 +200,8 @@ CREATE TABLE IF NOT EXISTS entries (
   retry_at INTEGER,
   error TEXT,
   updated_at INTEGER NOT NULL,
-  uploaded_at INTEGER
+  uploaded_at INTEGER,
+  hash_kind TEXT
 );
 CREATE INDEX IF NOT EXISTS entries_state ON entries(state);
 CREATE INDEX IF NOT EXISTS entries_inode ON entries(inode);
@@ -215,12 +232,21 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
     conn.execute_batch("CREATE INDEX IF NOT EXISTS entries_uploaded_at ON entries(uploaded_at);")?;
+    let has_hash_kind = conn
+        .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name = 'hash_kind'")?
+        .exists([])?;
+    if !has_hash_kind {
+        // Every hash so far is an md5, which NULL stands for.
+        conn.execute_batch("ALTER TABLE entries ADD COLUMN hash_kind TEXT;")?;
+    }
     Ok(())
 }
 
 const COLS: &str = "path, kind, state, drive_id, cloud_name, cloud_parent, md5, cloud_size, \
     local_size, local_mtime_ns, inode, upload_url, upload_md5, pin_prev, move_pending, attempts, \
-    retry_at, error, uploaded_at";
+    retry_at, error, uploaded_at, hash_kind";
+
+const SCHEMA_VERSION: &str = "3";
 
 /// SQL condition selecting `prefix` and everything beneath it (params ?1 = prefix, ?2 = prefix/, ?3 = prefix0).
 const SUBTREE: &str = "(path = ?1 OR (path >= ?2 AND path < ?3))";
@@ -252,8 +278,8 @@ impl Db {
             conn: Mutex::new(conn),
         };
         // Only write when it changes: every write bumps other connections' data_version.
-        if db.meta_get("schema_version")?.as_deref() != Some("2") {
-            db.meta_set("schema_version", "2")?;
+        if db.meta_get("schema_version")?.as_deref() != Some(SCHEMA_VERSION) {
+            db.meta_set("schema_version", SCHEMA_VERSION)?;
         }
         Ok(db)
     }
@@ -275,6 +301,19 @@ impl Db {
             Some(r) => bail!(
                 "the state database belongs to {r}, but the config says {root}; \
                  move the folder back or start with a fresh CLOUDDROP_DATA_DIR"
+            ),
+        }
+    }
+
+    /// Binds this database to a provider: its ids mean nothing to another one.
+    pub fn bind_provider(&self, provider: Provider) -> Result<()> {
+        match self.meta_get("provider")? {
+            None => self.meta_set("provider", provider.id()),
+            Some(p) if p == provider.id() => Ok(()),
+            Some(p) => bail!(
+                "the state database holds uploads to {p}, but the config says {}; \
+                 start with a fresh CLOUDDROP_DATA_DIR to upload somewhere else",
+                provider.id()
             ),
         }
     }
@@ -719,10 +758,12 @@ impl Db {
 }
 
 fn put_with(conn: &Connection, e: &Entry) -> Result<()> {
+    // `md5` and `upload_md5` hold the same kind of hash: the provider's.
+    let hash_kind = e.hash.as_ref().or(e.upload_hash.as_ref()).and_then(|h| h.kind.to_db());
     conn.execute(
         &format!(
             "INSERT OR REPLACE INTO entries ({COLS}, updated_at) VALUES \
-             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)"
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)"
         ),
         params![
             e.path,
@@ -731,19 +772,20 @@ fn put_with(conn: &Connection, e: &Entry) -> Result<()> {
             e.drive_id,
             e.cloud_name,
             e.cloud_parent,
-            e.md5,
+            e.hash.as_ref().map(|h| &h.value),
             e.cloud_size,
             e.local_size,
             e.local_mtime_ns,
             e.inode,
             e.upload_url,
-            e.upload_md5,
+            e.upload_hash.as_ref().map(|h| &h.value),
             e.pin_prev as i64,
             e.move_pending as i64,
             e.attempts,
             e.retry_at,
             e.error,
             e.uploaded_at,
+            hash_kind,
             now_ms(),
         ],
     )?;
@@ -852,11 +894,68 @@ mod tests {
         }
         let db = Db::open(&path).unwrap();
         assert_eq!(db.get("a").unwrap().unwrap().uploaded_at, Some(1234));
-        assert_eq!(db.meta_get("schema_version").unwrap().as_deref(), Some("2"));
+        assert_eq!(db.meta_get("schema_version").unwrap().as_deref(), Some("3"));
         db.log_activity(ActivityKind::Uploaded, "a", None, None).unwrap();
         // Reopening an up-to-date database is a no-op.
         drop(db);
         Db::open(&path).unwrap();
+    }
+
+    #[test]
+    fn migrates_version_2_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE entries (path TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL,
+                   drive_id TEXT, cloud_name TEXT, cloud_parent TEXT, md5 TEXT, cloud_size INTEGER,
+                   local_size INTEGER, local_mtime_ns INTEGER, inode INTEGER, upload_url TEXT,
+                   upload_md5 TEXT, pin_prev INTEGER NOT NULL DEFAULT 0,
+                   move_pending INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+                   retry_at INTEGER, error TEXT, updated_at INTEGER NOT NULL, uploaded_at INTEGER);
+                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta VALUES ('schema_version', '2');
+                 INSERT INTO entries (path, kind, state, drive_id, md5, upload_md5, updated_at, uploaded_at)
+                   VALUES ('a', 'file', 'synced', 'D1', 'x', 'y', 1, 1234);",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let a = db.get("a").unwrap().unwrap();
+        assert_eq!((a.hash, a.upload_hash), (Some(ContentHash::md5("x")), Some(ContentHash::md5("y"))));
+        assert_eq!((a.drive_id.as_deref(), a.uploaded_at), (Some("D1"), Some(1234)));
+        assert_eq!(db.meta_get("schema_version").unwrap().as_deref(), Some("3"));
+        db.bind_provider(Provider::GoogleDrive).unwrap();
+        assert_eq!(db.meta_get("provider").unwrap().as_deref(), Some("gdrive"));
+        drop(db);
+        Db::open(&path).unwrap();
+    }
+
+    #[test]
+    fn md5_is_stored_as_before() {
+        let (_d, db) = db();
+        let mut e = Entry::new("a", Kind::File, None);
+        e.hash = Some(ContentHash::md5("abc"));
+        db.put(&e).unwrap();
+        // Readers of the md5 column (older apps) see what they always did.
+        let (md5, kind): (Option<String>, Option<String>) = db
+            .conn()
+            .query_row("SELECT md5, hash_kind FROM entries WHERE path = 'a'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((md5.as_deref(), kind), (Some("abc"), None));
+        assert_eq!(db.get("a").unwrap().unwrap(), e);
+        db.conn().execute("UPDATE entries SET hash_kind = 'future'", []).unwrap();
+        assert!(db.get("a").is_err(), "an unknown hash is never compared as md5");
+    }
+
+    #[test]
+    fn bind_provider_refuses_another_one() {
+        let (_d, db) = db();
+        db.bind_provider(Provider::GoogleDrive).unwrap();
+        db.bind_provider(Provider::GoogleDrive).unwrap();
+        db.meta_set("provider", "elsewhere").unwrap();
+        assert!(db.bind_provider(Provider::GoogleDrive).is_err());
     }
 
     #[test]

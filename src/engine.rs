@@ -1,5 +1,5 @@
 //! The daemon: watches the sync folder, keeps the state database current and
-//! schedules Drive jobs.
+//! schedules cloud jobs.
 //!
 //! The engine task is the only writer of entry rows while it runs (the CLI's
 //! `free`/`restore` edit rows of idle entries only). Jobs report back through a
@@ -9,9 +9,9 @@
 use crate::config::Config;
 use crate::control::{self, DaemonStatus, Phase, Upload};
 use crate::db::{ActivityKind, Db, Entry, Kind, State};
-use crate::drive::{Drive, DriveError};
 use crate::jobs::{self, FreeSkip, JobEvent, JobOutcome, JobSpec};
 use crate::notifier::Notifier;
+use crate::remote::{Remote, RemoteError};
 use crate::store::LocalStore;
 use crate::util::{self, LocalMeta, now_ms};
 use anyhow::{Context, Result};
@@ -61,7 +61,7 @@ pub struct Engine {
     cfg: Config,
     root: PathBuf,
     db: Arc<Db>,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
     ignore: GlobSet,
     root_id: String,
     /// Paths with recent filesystem events, processed once quiet for `settle_secs`.
@@ -116,18 +116,18 @@ fn build_ignore(patterns: &[String]) -> Result<GlobSet> {
     Ok(b.build()?)
 }
 
-/// The Drive copy can't be trusted: upload the local file again. If Drive still has
-/// a (different) file, the local content becomes its new version and the other
-/// version is pinned so it is never purged; otherwise a new Drive file is made.
-pub fn mark_for_reupload(e: &mut Entry, drive_file_exists: bool) {
-    if drive_file_exists {
+/// The cloud copy can't be trusted: upload the local file again. If the cloud still
+/// has a (different) file, the local content becomes its new version and the other
+/// version is kept so it is never purged; otherwise a new cloud file is made.
+pub fn mark_for_reupload(e: &mut Entry, cloud_file_exists: bool) {
+    if cloud_file_exists {
         e.pin_prev = true;
     } else {
         e.drive_id = None;
         e.cloud_name = None;
         e.cloud_parent = None;
     }
-    e.md5 = None;
+    e.hash = None;
     e.uploaded_at = None;
     e.requeue();
 }
@@ -139,7 +139,7 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 /// Optional parts of a daemon run.
 pub struct RunOptions {
     /// Apply edits to this config file while running (no restart needed except for
-    /// the folder, Drive folder name, Google client or endpoints).
+    /// the folder, cloud folder name, provider, Google client or endpoints).
     pub config_file: Option<PathBuf>,
     /// How local copies are represented (plain files, or Windows placeholders).
     pub store: Arc<dyn LocalStore>,
@@ -158,18 +158,18 @@ impl Default for RunOptions {
 pub async fn run(
     cfg: Config,
     db: Arc<Db>,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
     data_dir: PathBuf,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    run_with_options(cfg, RunOptions::default(), db, drive, data_dir, shutdown).await
+    run_with_options(cfg, RunOptions::default(), db, remote, data_dir, shutdown).await
 }
 
 pub async fn run_with_options(
     cfg: Config,
     opts: RunOptions,
     db: Arc<Db>,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
     data_dir: PathBuf,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -178,6 +178,7 @@ pub async fn run_with_options(
     std::fs::create_dir_all(&root)
         .with_context(|| format!("cannot create {}", root.display()))?;
     db.bind_root(&root)?;
+    db.bind_provider(remote.provider())?;
     let _ = control::clear_stop(&db); // a stale request must not stop this run
     let reset = db.reset_uploading()?;
     if reset > 0 {
@@ -191,7 +192,7 @@ pub async fn run_with_options(
         root,
         cfg,
         db,
-        drive,
+        remote,
         root_id: String::new(),
         dirty: HashMap::new(),
         inflight: HashMap::new(),
@@ -271,9 +272,9 @@ pub async fn run_with_options(
 }
 
 impl Engine {
-    // ---------- Drive root ----------
+    // ---------- cloud root ----------
 
-    /// Finds or creates the top folder in My Drive, waiting out network/sign-in problems.
+    /// Finds or creates the top folder in the cloud, waiting out network/sign-in problems.
     async fn ensure_root(&mut self, shutdown: &mut watch::Receiver<bool>) -> Option<String> {
         let mut last_msg = String::new();
         loop {
@@ -281,20 +282,17 @@ impl Engine {
                 Ok(id) => return Some(id),
                 Err(e) => {
                     let msg = e.to_string();
-                    tracing::warn!("Drive folder unavailable: {msg}");
-                    if msg != last_msg && !matches!(e, DriveError::Transient(_)) {
+                    tracing::warn!("cloud folder unavailable: {msg}");
+                    if msg != last_msg && !e.is_transient() {
                         self.notifier.send("CloudDrop is paused", &msg);
                     }
                     let phase = match e {
-                        DriveError::Auth(_) => Phase::NeedsSignIn,
-                        DriveError::Transient(_) => Phase::Offline,
-                        _ => Phase::DriveFolderMissing,
+                        RemoteError::Auth(_) => Phase::NeedsSignIn,
+                        _ if e.is_transient() => Phase::Offline,
+                        _ => Phase::RemoteFolderMissing,
                     };
                     last_msg = msg.clone();
-                    let wait = match e {
-                        DriveError::Transient(_) | DriveError::Auth(_) => 30,
-                        _ => 120,
-                    };
+                    let wait = if e.is_transient() || matches!(e, RemoteError::Auth(_)) { 30 } else { 120 };
                     // Retry early when `clouddrop login` writes a new token.
                     let token_mtime = mtime(&self.token_path);
                     for _ in 0..wait {
@@ -312,29 +310,25 @@ impl Engine {
         }
     }
 
-    async fn try_root(&self) -> Result<String, DriveError> {
+    async fn try_root(&self) -> Result<String, RemoteError> {
         if let Ok(Some(id)) = self.db.meta_get("root_id") {
-            return match self.drive.get(&id).await {
+            return match self.remote.get(&id).await {
                 Ok(m) if !m.trashed => Ok(id),
-                Ok(_) => Err(DriveError::Permanent(format!(
+                Ok(_) => Err(RemoteError::Permanent(format!(
                     "the \"{}\" folder is in your Google Drive trash — restore it to resume uploads",
-                    self.cfg.drive_folder
+                    self.cfg.remote_folder
                 ))),
-                Err(DriveError::NotFound) => Err(DriveError::Permanent(format!(
+                Err(RemoteError::NotFound) => Err(RemoteError::Permanent(format!(
                     "the \"{}\" folder was deleted from Google Drive — run `clouddrop reset-cloud` to upload everything again",
-                    self.cfg.drive_folder
+                    self.cfg.remote_folder
                 ))),
                 Err(e) => Err(e),
             };
         }
-        let name = &self.cfg.drive_folder;
-        let id = match self.drive.find_child(name, "root", true).await?.into_iter().next() {
-            Some(existing) => existing.id,
-            None => self.drive.create_folder(name, "root").await?.id,
-        };
+        let id = self.remote.ensure_root(&self.cfg.remote_folder).await?;
         self.db
             .meta_set("root_id", &id)
-            .map_err(|e| DriveError::Permanent(e.to_string()))?;
+            .map_err(|e| RemoteError::Permanent(e.to_string()))?;
         Ok(id)
     }
 
@@ -371,7 +365,7 @@ impl Engine {
         }
     }
 
-    /// Drive id of the folder that should contain `rel`, if it exists yet.
+    /// Cloud id of the folder that should contain `rel`, if it exists yet.
     fn parent_drive_id(&self, rel: &str) -> Option<String> {
         let parent = util::parent_of(rel);
         if parent.is_empty() {
@@ -497,7 +491,7 @@ impl Engine {
         }
     }
 
-    /// Applies a local rename/move to the database so Drive gets a rename instead of a re-upload.
+    /// Applies a local rename/move to the database so the cloud gets a rename instead of a re-upload.
     fn rename_entries(&mut self, from: &str, to: &str) {
         let Some(fe) = self.get(from) else {
             return;
@@ -540,7 +534,7 @@ impl Engine {
         tracing::info!("moved {from} -> {to}");
     }
 
-    /// Moves an entry out of the way of a local item that took its path. Its Drive
+    /// Moves an entry out of the way of a local item that took its path. Its cloud
     /// copy is kept and renamed "name (n)" so nothing in the cloud is lost.
     fn displace(&mut self, e: Entry) {
         let dest = self.unique_path(&e.path);
@@ -714,7 +708,7 @@ impl Engine {
                 self.put(&Entry::new(rel, Kind::Dir, Some(meta)));
             }
             Some(mut e) if e.state == State::CloudOnly => {
-                // Folder is back locally: reuse its Drive folder.
+                // Folder is back locally: reuse its cloud folder.
                 e.requeue();
                 e.move_pending = false;
                 e.set_local(Some(meta));
@@ -761,7 +755,7 @@ impl Engine {
                     self.put(&e);
                     self.store.pending(&self.abs(rel));
                 } else if e.state == State::Synced && self.store.free_requested(&self.abs(rel)) {
-                    // "Free up space" in the file manager: same Drive check as always.
+                    // "Free up space" in the file manager: same cloud check as always.
                     self.dispatch(e, String::new(), String::new(), false, true);
                 }
             }
@@ -780,7 +774,7 @@ impl Engine {
         if e.state != State::CloudOnly && e.in_cloud() {
             e.state = State::CloudOnly;
             e.upload_url = None;
-            e.upload_md5 = None;
+            e.upload_hash = None;
             e.error = None;
             e.retry_at = None;
             self.activity(ActivityKind::Freed, rel, e.cloud_size, None);
@@ -811,8 +805,8 @@ impl Engine {
         });
     }
 
-    /// The local item at `rel` is gone. Drive is never touched: whatever it holds
-    /// becomes cloud-only; entries that never reached Drive are dropped.
+    /// The local item at `rel` is gone. The cloud is never touched: whatever it holds
+    /// becomes cloud-only; entries that never reached it are dropped.
     fn handle_removed(&mut self, rel: &str) {
         let rows = self.db.subtree(rel).unwrap_or_default();
         for e in rows.into_iter().rev() {
@@ -833,7 +827,7 @@ impl Engine {
         if e.in_cloud() || has_children {
             e.state = State::CloudOnly;
             e.upload_url = None;
-            e.upload_md5 = None;
+            e.upload_hash = None;
             e.pin_prev = false;
             e.attempts = 0;
             e.retry_at = None;
@@ -892,11 +886,12 @@ impl Engine {
             }
         };
         if new.sync_dir != self.cfg.sync_dir
-            || new.drive_folder != self.cfg.drive_folder
+            || new.provider != self.cfg.provider
+            || new.remote_folder != self.cfg.remote_folder
             || new.client_id != self.cfg.client_id
             || new.endpoints != self.cfg.endpoints
         {
-            tracing::warn!("folder, Drive folder or Google client changed; restart CloudDrop to apply");
+            tracing::warn!("folder, provider, cloud folder or Google client changed; restart CloudDrop to apply");
         }
         if new.ignore != self.cfg.ignore {
             match build_ignore(&new.ignore) {
@@ -950,11 +945,11 @@ impl Engine {
             return;
         }
         self.last_quota = Some(Instant::now());
-        let (drive, tx) = (self.drive.clone(), self.job_tx.clone());
+        let (remote, tx) = (self.remote.clone(), self.job_tx.clone());
         tokio::spawn(async move {
-            match drive.storage_quota().await {
-                Ok((limit, usage, in_drive)) => {
-                    let _ = tx.send(JobEvent::Quota(limit, usage, in_drive));
+            match remote.quota().await {
+                Ok(storage) => {
+                    let _ = tx.send(JobEvent::Quota(storage));
                 }
                 Err(e) => tracing::debug!("storage quota unavailable: {e}"),
             }
@@ -962,7 +957,7 @@ impl Engine {
     }
 
     /// Automatic space saving: frees local copies of files uploaded long enough ago,
-    /// after the same Drive checksum check as Free Up Space.
+    /// after the same cloud hash check as Free Up Space.
     fn schedule_auto_free(&mut self) {
         let Some(days) = self.cfg.auto_free_days else {
             return;
@@ -1084,6 +1079,7 @@ impl Engine {
             uploads: key.2.clone(),
             waiting: key.3,
             quota: key.4,
+            provider: self.remote.provider(),
         };
         if let Err(e) = control::write_status(&self.data_dir, &status) {
             tracing::debug!("cannot write status: {e}");
@@ -1127,7 +1123,7 @@ impl Engine {
                 continue;
             }
             let Some(parent_id) = self.parent_drive_id(&e.path) else {
-                continue; // parent folder not in Drive yet
+                continue; // parent folder not in the cloud yet
             };
             let placement_only = e.state == State::CloudOnly;
             let name = util::name_of(&e.path).to_string();
@@ -1178,7 +1174,7 @@ impl Engine {
             entry: e,
         };
         tracing::debug!("job {id}: {path}{}", if free { " (free)" } else { "" });
-        let handle = tokio::spawn(jobs::run(spec, self.drive.clone(), self.job_tx.clone()));
+        let handle = tokio::spawn(jobs::run(spec, self.remote.clone(), self.job_tx.clone()));
         self.inflight.insert(
             path,
             Inflight {
@@ -1203,24 +1199,23 @@ impl Engine {
 
     fn on_job(&mut self, ev: JobEvent) {
         match ev {
-            JobEvent::Quota(limit, usage, usage_in_drive) => {
-                self.quota = Some(control::Quota {
-                    limit,
-                    usage,
-                    usage_in_drive,
-                });
+            JobEvent::Quota(storage) => {
+                self.quota = Some(storage.quota);
+                if let Some(account) = storage.account {
+                    self.record_account(&account);
+                }
             }
             JobEvent::Progress { id, sent, total } => {
                 if let Some(job) = self.inflight.values_mut().find(|j| j.id == id) {
                     job.progress = (sent, total);
                 }
             }
-            JobEvent::Session { id, url, md5 } => {
+            JobEvent::Session { id, url, hash } => {
                 if let Some(path) = self.path_of_job(id)
                     && let Some(mut e) = self.get(&path)
                 {
                     e.upload_url = Some(url);
-                    e.upload_md5 = Some(md5);
+                    e.upload_hash = Some(hash);
                     self.put(&e);
                 }
             }
@@ -1235,6 +1230,15 @@ impl Engine {
         }
     }
 
+    /// Remembers who is signed in (meta `account`), writing only when it changes.
+    fn record_account(&self, account: &str) {
+        if self.db.meta_get("account").ok().flatten().as_deref() != Some(account)
+            && let Err(err) = self.db.meta_set("account", account)
+        {
+            tracing::debug!("cannot record the account: {err}");
+        }
+    }
+
     fn apply(&mut self, path: &str, job: Inflight, outcome: JobOutcome) {
         let Some(mut e) = self.get(path) else {
             return;
@@ -1245,18 +1249,18 @@ impl Engine {
         match outcome {
             JobOutcome::FreeReady(_) | JobOutcome::FreeSkip(_) => {}
             JobOutcome::Done(d) => {
-                let content_changed = e.kind == Kind::File && e.md5 != d.md5;
-                let had_cloud_copy = e.md5.is_some();
+                let content_changed = e.kind == Kind::File && e.hash != d.hash;
+                let had_cloud_copy = e.hash.is_some();
                 let came_back_from_cloud = e.pin_prev;
                 e.drive_id = Some(d.drive_id);
                 e.cloud_name = Some(d.cloud_name);
                 e.cloud_parent = Some(d.cloud_parent);
                 if e.kind == Kind::File {
-                    e.md5 = d.md5;
+                    e.hash = d.hash;
                     e.cloud_size = d.size;
                 }
                 e.upload_url = None;
-                e.upload_md5 = None;
+                e.upload_hash = None;
                 e.error = None;
                 e.retry_at = None;
                 e.move_pending = false;
@@ -1333,11 +1337,11 @@ impl Engine {
             JobOutcome::Failed(err) => {
                 let base = if job.placement_only { State::CloudOnly } else { State::Pending };
                 match err {
-                    DriveError::Auth(msg) => {
+                    RemoteError::Auth(msg) => {
                         e.state = base;
                         self.pause(msg);
                     }
-                    DriveError::Transient(msg) => {
+                    RemoteError::Transient(msg) | RemoteError::RateLimited { message: msg, .. } => {
                         e.attempts += 1;
                         e.retry_at = Some(now_ms() + backoff_ms(e.attempts));
                         e.state = base;
@@ -1345,7 +1349,7 @@ impl Engine {
                         self.last_transient = Some((Instant::now(), msg.clone()));
                         e.error = Some(msg);
                     }
-                    DriveError::NotFound | DriveError::Permanent(_) => {
+                    RemoteError::NotFound | RemoteError::Quota(_) | RemoteError::Permanent(_) => {
                         let msg = err.to_string();
                         tracing::error!("{path}: {msg}");
                         if job.placement_only {
@@ -1370,7 +1374,7 @@ impl Engine {
     }
 
     /// Result of a free check: delete the local copy only if it is still exactly
-    /// the file that was verified against Drive.
+    /// the file that was verified against the cloud.
     fn apply_free(&mut self, mut e: Entry, job: Inflight, outcome: JobOutcome) {
         let path = e.path.clone();
         match outcome {
@@ -1399,12 +1403,12 @@ impl Engine {
                 self.activity(kind, &path, Some(checked.size), None);
             }
             JobOutcome::FreeSkip(skip @ (FreeSkip::CloudDiffers | FreeSkip::CloudGone)) => {
-                tracing::warn!("{path}: Drive copy is not identical ({skip:?}); uploading the local copy again");
+                tracing::warn!("{path}: cloud copy is not identical ({skip:?}); uploading the local copy again");
                 mark_for_reupload(&mut e, skip == FreeSkip::CloudDiffers);
                 self.put(&e);
             }
             JobOutcome::FreeSkip(FreeSkip::LocalChanged) | JobOutcome::Vanished => self.mark_dirty(path),
-            JobOutcome::Failed(DriveError::Auth(msg)) => self.pause(msg),
+            JobOutcome::Failed(RemoteError::Auth(msg)) => self.pause(msg),
             JobOutcome::Failed(err) => tracing::debug!("{path}: free check failed: {err}"),
             JobOutcome::Done(_) => {}
         }

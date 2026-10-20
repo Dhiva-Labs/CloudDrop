@@ -455,9 +455,12 @@ async fn about(AxState(s): AxState<Shared>, h: HeaderMap) -> Response {
         return unauthorized();
     }
     let used: usize = st.items.values().map(|i| i.content.len()).sum();
-    axum::Json(json!({ "storageQuota": {
-        "limit": "16106127360", "usage": (used + 1000).to_string(), "usageInDrive": used.to_string()
-    }}))
+    axum::Json(json!({
+        "storageQuota": {
+            "limit": "16106127360", "usage": (used + 1000).to_string(), "usageInDrive": used.to_string()
+        },
+        "user": { "emailAddress": "me@example.com" },
+    }))
     .into_response()
 }
 
@@ -547,8 +550,8 @@ impl Harness {
         self.data.join("token.json")
     }
 
-    pub fn drive(&self) -> Arc<clouddrop::drive::Drive> {
-        clouddrop::drive_for(&self.cfg, self.token_path())
+    pub fn drive(&self) -> Arc<clouddrop::remote::Remote> {
+        clouddrop::remote_for(&self.cfg, self.token_path())
     }
 
     /// A second database handle, like a separate `clouddrop` CLI process.
@@ -607,17 +610,17 @@ impl Harness {
 
     pub fn cloud(&self, rel: &str) -> Option<Item> {
         let st = self.mock.lock().unwrap();
-        let root = st.lookup(&self.cfg.drive_folder)?;
+        let root = st.lookup(&self.cfg.remote_folder)?;
         if rel.is_empty() {
             return Some(root);
         }
-        st.lookup(&format!("{}/{rel}", self.cfg.drive_folder))
+        st.lookup(&format!("{}/{rel}", self.cfg.remote_folder))
     }
 
     pub fn cloud_tree(&self) -> Vec<(String, String)> {
         let st = self.mock.lock().unwrap();
         let mut out = Vec::new();
-        if let Some(root) = st.lookup(&self.cfg.drive_folder) {
+        if let Some(root) = st.lookup(&self.cfg.remote_folder) {
             st.tree(&root.id, "", &mut out);
         }
         out

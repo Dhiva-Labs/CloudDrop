@@ -183,7 +183,7 @@ Everything is in **Settings**; the file is `~/.config/clouddrop/config.toml`:
 
 ```toml
 sync_dir = "/home/you/CloudDrop"
-drive_folder = "CloudDrop"     # top folder in My Drive
+remote_folder = "CloudDrop"    # top folder in My Drive (`drive_folder` in older configs)
 parallel_uploads = 2
 settle_secs = 2                # wait after the last change before uploading
 notifications = true

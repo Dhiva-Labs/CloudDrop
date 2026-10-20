@@ -18,6 +18,12 @@ A new look, and ARM64.
   x64 (Linux tests, Debian package and snap; Windows engine, Cloud Files test, app and
   packages). Releases carry `CloudDrop-<version>-windows-arm64.zip` next to the x64 zip.
   `snap/snapcraft.yaml` and `debian/` now build for arm64.
+- Under the hood, the first step towards more clouds than Google Drive (docs/PROVIDERS.md):
+  the engine talks to the cloud through one provider-neutral layer. Nothing changes for
+  Google Drive. The config gains `provider = "gdrive"`, and `drive_folder` is now
+  `remote_folder` (the old name is still read). The state database is upgraded to version 3
+  on open (a `hash_kind` column, and `provider` and `account` meta keys); the columns apps
+  read are unchanged. status.json and `status --json` gain `provider`.
 
 ## 0.2.0 — 2026-10-15
 

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-use md5::{Digest, Md5};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 pub fn now_ms() -> i64 {
@@ -124,27 +123,6 @@ pub fn rel_path(root: &Path, path: &Path) -> Option<String> {
     #[cfg(windows)]
     let rel = rel.replace('\\', "/");
     Some(rel.trim_end_matches('/').to_string())
-}
-
-/// md5 (hex) of everything left in `r`.
-pub fn md5_reader(r: &mut impl Read) -> std::io::Result<String> {
-    let mut hasher = Md5::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = r.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
-/// Hashes a file, returning (md5 hex, metadata before reading).
-pub fn md5_file(path: &Path) -> std::io::Result<(String, LocalMeta)> {
-    let mut f = std::fs::File::open(path)?;
-    let meta = LocalMeta::of_file(&f)?;
-    Ok((md5_reader(&mut f)?, meta))
 }
 
 /// "report.pdf" → "report (2).pdf"; ".bashrc" → ".bashrc (2)".

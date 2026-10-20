@@ -3,6 +3,7 @@
 
 use crate::config::{self, Config};
 use crate::db::Db;
+use crate::remote::Provider;
 use crate::util::now_ms;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -28,8 +29,10 @@ pub enum Phase {
     /// Recent network/server failures; retrying with backoff.
     Offline,
     NeedsSignIn,
-    /// The top folder in Drive was trashed or deleted.
-    DriveFolderMissing,
+    /// The top folder in the cloud was trashed or deleted. The name in status.json
+    /// stays `drive_folder_missing`, which the apps know.
+    #[serde(rename = "drive_folder_missing")]
+    RemoteFolderMissing,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,6 +64,9 @@ pub struct DaemonStatus {
     /// Refreshed every few minutes; absent until first fetched.
     #[serde(default)]
     pub quota: Option<Quota>,
+    /// Where the files go (absent from engines that only knew Google Drive).
+    #[serde(default)]
+    pub provider: Provider,
 }
 
 impl DaemonStatus {
@@ -184,7 +190,7 @@ pub struct SetupParams {
     /// None = use the built-in client.
     pub client: Option<(String, String)>,
     pub sync_dir: PathBuf,
-    pub drive_folder: String,
+    pub remote_folder: String,
 }
 
 /// Writes the config (keeping other settings) and creates the folder.
@@ -212,7 +218,7 @@ pub fn apply_setup(p: &SetupParams) -> Result<Config> {
     cfg.client_id = id;
     cfg.client_secret = secret;
     cfg.sync_dir = std::path::absolute(&p.sync_dir)?;
-    cfg.drive_folder = p.drive_folder.trim().to_string();
+    cfg.remote_folder = p.remote_folder.trim().to_string();
     cfg.validate()?;
     std::fs::create_dir_all(&cfg.sync_dir)
         .with_context(|| format!("cannot create {}", cfg.sync_dir.display()))?;
@@ -678,6 +684,7 @@ mod tests {
             uploads: vec![],
             waiting: 0,
             quota: None,
+            provider: Provider::GoogleDrive,
         };
         assert!(s.is_live());
         s.updated_ms -= 60_000;
@@ -685,5 +692,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_status(dir.path(), &s).unwrap();
         assert_eq!(read_status(dir.path()), Some(s));
+    }
+
+    #[test]
+    fn status_json_keeps_its_names() {
+        let s = DaemonStatus {
+            pid: 1,
+            updated_ms: 0,
+            phase: Phase::RemoteFolderMissing,
+            message: None,
+            uploads: vec![],
+            waiting: 0,
+            quota: None,
+            provider: Provider::GoogleDrive,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!((v["phase"].as_str(), v["provider"].as_str()), (Some("drive_folder_missing"), Some("gdrive")));
+        // Written by an engine from before `provider`.
+        let old: DaemonStatus = serde_json::from_str(
+            r#"{"pid":1,"updated_ms":0,"phase":"needs_sign_in","message":null,"uploads":[],"waiting":0}"#,
+        )
+        .unwrap();
+        assert_eq!((old.phase, old.provider), (Phase::NeedsSignIn, Provider::GoogleDrive));
     }
 }

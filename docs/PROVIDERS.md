@@ -1,8 +1,12 @@
 # Plan: more clouds than Google Drive
 
-Status: **plan**, nothing below is implemented yet. Target: OneDrive, Dropbox, MEGA,
-Proton Drive, and self-hosted storage (Nextcloud/ownCloud and other WebDAV servers,
-S3-compatible buckets, SFTP).
+Status: **plan**, with phase 0 partly done: engine changes 1–5 below (the `Remote` seam,
+`RemoteError`, `ContentHash` with MD5, database v3, `provider` in the config and status). Still
+to do in phase 0: provider-neutral strings, the keyring (6) and `account` in status.json (7; the
+database already records it). Google Drive is still the only provider.
+
+Target: OneDrive, Dropbox, MEGA, Proton Drive, and self-hosted storage (Nextcloud/ownCloud
+and other WebDAV servers, S3-compatible buckets, SFTP).
 
 ## What must not change
 
@@ -132,7 +136,7 @@ Drive" strings across the apps.
 
 | Phase | What | Done when |
 | --- | --- | --- |
-| 0 | `Remote` seam, `ContentHash`, DB v3, provider-neutral strings, `provider` in status. Google Drive only. | All current tests pass unchanged; Drive behaviour identical. |
+| 0 (partly done, see Status) | `Remote` seam, `ContentHash`, DB v3, provider-neutral strings, `provider` in status. Google Drive only. | All current tests pass unchanged; Drive behaviour identical. |
 | 1 | **OneDrive** and **Dropbox**. Mock servers for both in `tests/common`, like the Drive one. Setup provider picker. | e2e suite green against all three mocks; live smoke test with real accounts. |
 | 2 | **Self-hosted**: Nextcloud (first-class), generic WebDAV, S3-compatible, SFTP. Verify-by-download and keep-aside copy land here. | e2e against real servers in CI containers: Nextcloud, MinIO, OpenSSH. |
 | 3 | **MEGA** (SDK or native, from the spike). | Resume, 2FA and verify-by-download tested; PPA and Windows builds reproducible. |

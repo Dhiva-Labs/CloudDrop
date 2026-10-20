@@ -4,7 +4,7 @@ library;
 import 'package:clouddrop_app/data/state_reader.dart';
 import 'package:sqlite3/sqlite3.dart';
 
-/// Copied from `SCHEMA` in `src/db.rs` (schema_version 2).
+/// Copied from `SCHEMA` in `src/db.rs` (schema_version 3).
 const String engineSchema = '''
 CREATE TABLE IF NOT EXISTS entries (
   path TEXT PRIMARY KEY,
@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS entries (
   retry_at INTEGER,
   error TEXT,
   updated_at INTEGER NOT NULL,
-  uploaded_at INTEGER
+  uploaded_at INTEGER,
+  hash_kind TEXT
 );
 CREATE INDEX IF NOT EXISTS entries_state ON entries(state);
 CREATE INDEX IF NOT EXISTS entries_inode ON entries(inode);
@@ -50,7 +51,7 @@ class TestDb {
   factory TestDb.memory() {
     final db = sqlite3.openInMemory();
     db.execute(engineSchema);
-    db.execute("INSERT INTO meta VALUES ('schema_version', '2')");
+    db.execute("INSERT INTO meta VALUES ('schema_version', '3')");
     return TestDb._(db, null);
   }
 
@@ -59,7 +60,7 @@ class TestDb {
     final db = sqlite3.open(path);
     db.execute('PRAGMA journal_mode=WAL');
     db.execute(engineSchema);
-    db.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '2')");
+    db.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '3')");
     return TestDb._(db, path);
   }
 

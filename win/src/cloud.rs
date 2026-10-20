@@ -1,13 +1,13 @@
 //! The File Explorer cloud folder (Cloud Files API): registering the sync root,
 //! and the callbacks Windows makes when a placeholder is opened, freed, deleted
 //! or renamed. Upload-only rules hold here too: deletes and renames are allowed
-//! locally and never touch Drive; freeing is allowed only for files whose Drive
-//! copy is verified.
+//! locally and never touch the cloud; freeing is allowed only for files whose
+//! cloud copy is verified.
 
 use anyhow::{Result, bail};
 use clouddrop::config::{self, Config};
 use clouddrop::db::{Db, State};
-use clouddrop::drive::Drive;
+use clouddrop::remote::Remote;
 use clouddrop::store::LocalStore;
 use clouddrop::winstore::{WinStore, is_sync_root};
 use cloud_filter::error::{CResult, CloudErrorKind};
@@ -26,13 +26,13 @@ const PAGE: u64 = 4096;
 
 pub struct Filter {
     rt: tokio::runtime::Handle,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
     root: PathBuf,
     db_path: PathBuf,
 }
 
 /// Registers the sync folder with File Explorer (once) and connects to it.
-pub fn connect(cfg: &Config, drive: Arc<Drive>, rt: tokio::runtime::Handle) -> Result<Connection<Filter>> {
+pub fn connect(cfg: &Config, remote: Arc<Remote>, rt: tokio::runtime::Handle) -> Result<Connection<Filter>> {
     if !is_supported()? {
         bail!("this version of Windows has no cloud files support");
     }
@@ -53,7 +53,7 @@ pub fn connect(cfg: &Config, drive: Arc<Drive>, rt: tokio::runtime::Handle) -> R
     }
     let filter = Filter {
         rt,
-        drive,
+        remote,
         root: cfg.sync_dir.clone(),
         db_path: config::data_dir().join("state.db"),
     };
@@ -83,7 +83,7 @@ pub fn unregister(sync_dir: Option<&Path>) -> Result<()> {
 
 /// Turns the placeholders under `dir` back into ordinary files and folders.
 /// Placeholders without local data would be unreadable without CloudDrop, so they
-/// are removed; those files stay in Drive.
+/// are removed; those files stay in the cloud.
 pub fn release(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -118,8 +118,8 @@ impl Filter {
         })
     }
 
-    /// The file's content is in Drive, identical to what was uploaded.
-    fn verified_in_drive(&self, path: &Path) -> bool {
+    /// The file's content is in the cloud, identical to what was uploaded.
+    fn verified_in_cloud(&self, path: &Path) -> bool {
         let Some(rel) = self.rel(path) else {
             return false;
         };
@@ -129,18 +129,14 @@ impl Filter {
         let Ok(Some(e)) = db.get(&rel) else {
             return false;
         };
-        let (Some(id), Some(md5)) = (e.drive_id.clone(), e.md5.clone()) else {
+        let (Some(id), Some(hash)) = (e.drive_id.clone(), e.hash.clone()) else {
             return false;
         };
         if e.state != State::Synced {
             return false;
         }
-        match self.rt.block_on(self.drive.get(&id)) {
-            Ok(m) => {
-                !m.trashed
-                    && m.md5_checksum.as_deref() == Some(md5.as_str())
-                    && m.size_bytes() == e.cloud_size.map(|s| s as u64)
-            }
+        match self.rt.block_on(self.remote.get(&id)) {
+            Ok(m) => !m.trashed && m.hash == Some(hash) && m.size == e.cloud_size.map(|s| s as u64),
             Err(err) => {
                 tracing::warn!("cannot check {rel} in Drive: {err}");
                 false
@@ -150,7 +146,7 @@ impl Filter {
 }
 
 impl SyncFilter for Filter {
-    /// A placeholder was opened: download the requested range from Drive.
+    /// A placeholder was opened: download the requested range from the cloud.
     fn fetch_data(
         &self,
         request: Request,
@@ -171,7 +167,7 @@ impl SyncFilter for Filter {
             let to = (pos + CHUNK).min(size);
             let data = self
                 .rt
-                .block_on(self.drive.download_range(&id, pos, to))
+                .block_on(self.remote.download_range(&id, pos, to))
                 .map_err(|e| {
                     tracing::warn!("download of {} failed: {e}", request.path().display());
                     CloudErrorKind::NetworkUnavailable
@@ -188,7 +184,7 @@ impl SyncFilter for Filter {
         Ok(())
     }
 
-    /// "Free up space" in Explorer: only once Drive's checksum matches.
+    /// "Free up space" in Explorer: only once the cloud's hash matches.
     fn dehydrate(
         &self,
         request: Request,
@@ -196,7 +192,7 @@ impl SyncFilter for Filter {
         _info: info::Dehydrate,
     ) -> CResult<()> {
         let path = request.path();
-        if self.verified_in_drive(&path) {
+        if self.verified_in_cloud(&path) {
             ticket.pass().map_err(|_| CloudErrorKind::Unsuccessful)
         } else {
             tracing::warn!("kept {}: its Drive copy couldn't be verified", path.display());
@@ -204,12 +200,12 @@ impl SyncFilter for Filter {
         }
     }
 
-    /// Deleting locally never deletes in Drive; the engine records it as cloud-only.
+    /// Deleting locally never deletes in the cloud; the engine records it as cloud-only.
     fn delete(&self, _request: Request, ticket: ticket::Delete, _info: info::Delete) -> CResult<()> {
         ticket.pass().map_err(|_| CloudErrorKind::Unsuccessful)
     }
 
-    /// Renames and moves are mirrored to Drive by the engine.
+    /// Renames and moves are mirrored to the cloud by the engine.
     fn rename(&self, _request: Request, ticket: ticket::Rename, _info: info::Rename) -> CResult<()> {
         ticket.pass().map_err(|_| CloudErrorKind::Unsuccessful)
     }

@@ -71,7 +71,7 @@ impl Wiz {
                 .or_else(|| cfg.as_ref().map(|c| c.sync_dir.clone()))
                 .unwrap_or(defaults.sync_dir),
             folder_locked: locked_root.is_some(),
-            drive_folder: cfg.map(|c| c.drive_folder).unwrap_or(defaults.drive_folder),
+            drive_folder: cfg.map(|c| c.remote_folder).unwrap_or(defaults.remote_folder),
             sidebar: true,
             login: None,
             url: Rc::default(),
@@ -82,7 +82,7 @@ impl Wiz {
         SetupParams {
             client: self.client.clone(),
             sync_dir: self.folder.clone(),
-            drive_folder: self.drive_folder.clone(),
+            remote_folder: self.drive_folder.clone(),
         }
     }
 }

@@ -5,7 +5,7 @@ use clouddrop::config::{self, Config};
 use clouddrop::db::{Db, Kind, State};
 use clouddrop::notifier::Notifier;
 use clouddrop::control::{self, Phase};
-use clouddrop::{auth, drive_for, engine, util};
+use clouddrop::{auth, engine, remote_for, util};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -210,7 +210,7 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             let cfg = control::apply_setup(&control::SetupParams {
                 client,
                 sync_dir,
-                drive_folder,
+                remote_folder: drive_folder,
             })?;
             println!("Config written to {}", config::config_path().display());
             if !no_bookmark && actions::add_bookmark(&cfg.sync_dir).unwrap_or(false) {
@@ -261,7 +261,7 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             }
             let cfg = Config::load()?;
             let db = Arc::new(Db::open_default()?);
-            let drive = drive_for(&cfg, auth::token_path());
+            let remote = remote_for(&cfg, auth::token_path());
             let (tx, rx) = tokio::sync::watch::channel(false);
             tokio::spawn(async move {
                 #[cfg(unix)]
@@ -282,7 +282,7 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
                 config_file: Some(config::config_path()),
                 ..Default::default()
             };
-            engine::run_with_options(cfg, opts, db, drive, config::data_dir(), rx).await?;
+            engine::run_with_options(cfg, opts, db, remote, config::data_dir(), rx).await?;
             Ok(String::new())
         }
         Cmd::Status { json } => status(json),
@@ -372,14 +372,14 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
         Cmd::Free { paths } => {
             let ctx = Ctx::load()?;
             let rels = resolve_all(&ctx, &paths)?;
-            let drive = drive_for(&ctx.cfg, auth::token_path());
-            Ok(actions::free(&ctx, &drive, &rels).await?.summary())
+            let remote = remote_for(&ctx.cfg, auth::token_path());
+            Ok(actions::free(&ctx, &remote, &rels).await?.summary())
         }
         Cmd::Restore { paths } => {
             let ctx = Ctx::load()?;
             let rels = resolve_all(&ctx, &paths)?;
-            let drive = drive_for(&ctx.cfg, auth::token_path());
-            Ok(actions::restore(&ctx, &drive, &rels).await?.summary())
+            let remote = remote_for(&ctx.cfg, auth::token_path());
+            Ok(actions::restore(&ctx, &remote, &rels).await?.summary())
         }
         Cmd::Open { path } => {
             let ctx = Ctx::load()?;
@@ -529,7 +529,7 @@ fn status(json: bool) -> Result<String> {
                 Phase::Paused => "paused — clouddrop resume".to_string(),
                 Phase::Offline => "can't reach Google Drive, retrying".to_string(),
                 Phase::NeedsSignIn => "needs sign-in — clouddrop login".to_string(),
-                Phase::DriveFolderMissing => "Drive folder missing".to_string(),
+                Phase::RemoteFolderMissing => "Drive folder missing".to_string(),
             };
             match &s.message {
                 Some(m) => format!("{what} ({m})"),
@@ -547,7 +547,10 @@ fn status(json: bool) -> Result<String> {
             "paused": control::is_paused(&ctx.db),
             "root_id": ctx.db.meta_get("root_id")?,
             "folder": ctx.cfg.sync_dir,
-            "drive_folder": ctx.cfg.drive_folder,
+            "provider": ctx.cfg.provider.id(),
+            "remote_folder": ctx.cfg.remote_folder,
+            // The name apps that predate other providers read.
+            "drive_folder": ctx.cfg.remote_folder,
             "signed_in": signed_in,
             "has_builtin_client": control::builtin_client().is_some(),
             "daemon": daemon,
@@ -560,7 +563,7 @@ fn status(json: bool) -> Result<String> {
     }
     let mut out = vec![
         format!("Folder:       {}", ctx.cfg.sync_dir.display()),
-        format!("Drive folder: My Drive/{}", ctx.cfg.drive_folder),
+        format!("Drive folder: My Drive/{}", ctx.cfg.remote_folder),
         format!("Signed in:    {}", if signed_in { "yes" } else { "no — run `clouddrop login`" }),
         format!("Service:      {activity}"),
         String::new(),

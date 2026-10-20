@@ -4,7 +4,6 @@ use crate::ops::Ops;
 use crate::snapshot::Snapshot;
 use crate::{fsops, rt, ui};
 use adw::prelude::*;
-use clouddrop::actions;
 use clouddrop::control;
 use clouddrop::db::Kind;
 use clouddrop::util;
@@ -253,8 +252,15 @@ impl SettingsPage {
         {
             let me2 = Rc::downgrade(&me);
             open_drive.connect_clicked(move |_| {
-                if let Some(id) = me2.upgrade().and_then(|m| m.last.borrow().as_ref().and_then(|s| s.root_id.clone())) {
-                    control::open_uri(&actions::drive_url(Kind::Dir, &id));
+                let Some(me) = me2.upgrade() else {
+                    return;
+                };
+                let last = me.last.borrow();
+                if let Some(s) = last.as_ref()
+                    && let Some(id) = &s.root_id
+                    && let Some(url) = s.cfg.as_ref().map(|c| c.provider).unwrap_or_default().web_url(Kind::Dir, id)
+                {
+                    control::open_uri(&url);
                 }
             });
         }
@@ -405,7 +411,7 @@ impl SettingsPage {
         self.service.set_subtitle(if s.daemon.is_some() { "Running" } else { "Not running" });
         if let Some(cfg) = &s.cfg {
             self.folder.set_subtitle(&ui::pretty_path(&cfg.sync_dir));
-            self.drive.set_subtitle(&format!("My Drive → {}", cfg.drive_folder));
+            self.drive.set_subtitle(&format!("My Drive → {}", cfg.remote_folder));
             self.sync_space_saving(cfg);
             if !self.filled.get() {
                 self.filling.set(true);

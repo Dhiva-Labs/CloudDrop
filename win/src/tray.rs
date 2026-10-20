@@ -56,7 +56,7 @@ fn current() -> (Look, String, bool) {
         Phase::Starting => (Look::Syncing, "Starting…".into(), false),
         Phase::Offline => (Look::Attention, "Offline — retrying".into(), false),
         Phase::NeedsSignIn => (Look::Attention, "Sign-in needed".into(), false),
-        Phase::DriveFolderMissing => (Look::Attention, "Drive folder missing".into(), false),
+        Phase::RemoteFolderMissing => (Look::Attention, "Drive folder missing".into(), false),
     }
 }
 
@@ -128,8 +128,11 @@ pub fn run() {
                     open(&cfg.sync_dir.display().to_string());
                 }
             } else if ev.id == open_drive.id() {
-                if let Ok(Some(id)) = Db::open_default().and_then(|db| db.meta_get("root_id")) {
-                    open(&clouddrop::actions::drive_url(Kind::Dir, &id));
+                let provider = Config::load().map(|c| c.provider).unwrap_or_default();
+                if let Ok(Some(id)) = Db::open_default().and_then(|db| db.meta_get("root_id"))
+                    && let Some(url) = provider.web_url(Kind::Dir, &id)
+                {
+                    open(&url);
                 }
             } else if ev.id == show.id() {
                 show_app();

@@ -1,7 +1,7 @@
 //! Google OAuth for an installed app: loopback redirect + PKCE, refresh-token storage.
 
 use crate::config::Config;
-use crate::drive::{DResult, DriveError};
+use crate::remote::{RResult, RemoteError};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -71,16 +71,16 @@ impl Auth {
     }
 
     /// Loads the token file when first needed or when `clouddrop login` rewrote it.
-    fn reload_if_needed(&self, slot: &mut Option<Loaded>) -> DResult<()> {
+    fn reload_if_needed(&self, slot: &mut Option<Loaded>) -> RResult<()> {
         let mtime = self.file_mtime();
         if slot.as_ref().is_some_and(|l| l.file_mtime == mtime) {
             return Ok(());
         }
         let text = std::fs::read_to_string(&self.path).map_err(|_| {
-            DriveError::Auth("not signed in — run `clouddrop login`".into())
+            RemoteError::Auth("not signed in — run `clouddrop login`".into())
         })?;
         let token: Token = serde_json::from_str(&text)
-            .map_err(|_| DriveError::Auth("token file is corrupt — run `clouddrop login`".into()))?;
+            .map_err(|_| RemoteError::Auth("token file is corrupt — run `clouddrop login`".into()))?;
         *slot = Some(Loaded {
             token,
             file_mtime: mtime,
@@ -89,7 +89,7 @@ impl Auth {
     }
 
     /// A valid access token, refreshed when it is about to expire.
-    pub async fn token(&self) -> DResult<String> {
+    pub async fn token(&self) -> RResult<String> {
         let mut slot = self.state.lock().await;
         self.reload_if_needed(&mut slot)?;
         let loaded = slot.as_ref().expect("loaded");
@@ -99,13 +99,13 @@ impl Auth {
         self.refresh_locked(&mut slot).await
     }
 
-    pub async fn refresh(&self) -> DResult<String> {
+    pub async fn refresh(&self) -> RResult<String> {
         let mut slot = self.state.lock().await;
         self.reload_if_needed(&mut slot)?;
         self.refresh_locked(&mut slot).await
     }
 
-    async fn refresh_locked(&self, slot: &mut Option<Loaded>) -> DResult<String> {
+    async fn refresh_locked(&self, slot: &mut Option<Loaded>) -> RResult<String> {
         let refresh_token = slot.as_ref().expect("loaded").token.refresh_token.clone();
         let resp = self
             .http
@@ -118,29 +118,29 @@ impl Auth {
             ])
             .send()
             .await
-            .map_err(|e| DriveError::Transient(format!("cannot reach Google sign-in: {e}")))?;
+            .map_err(|e| RemoteError::Transient(format!("cannot reach Google sign-in: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             if status.is_client_error() {
-                return Err(DriveError::Auth(format!(
+                return Err(RemoteError::Auth(format!(
                     "Google rejected the saved sign-in ({}) — run `clouddrop login`",
                     body.trim()
                 )));
             }
-            return Err(DriveError::Transient(format!("token refresh failed: {status}")));
+            return Err(RemoteError::Transient(format!("token refresh failed: {status}")));
         }
         let tr: TokenResponse = resp
             .json()
             .await
-            .map_err(|e| DriveError::Transient(format!("bad token response: {e}")))?;
+            .map_err(|e| RemoteError::Transient(format!("bad token response: {e}")))?;
         let token = Token {
             access_token: tr.access_token,
             refresh_token: tr.refresh_token.unwrap_or(refresh_token),
             expires_at: unix_now() + tr.expires_in.unwrap_or(3600),
         };
         save_token(&self.path, &token)
-            .map_err(|e| DriveError::Permanent(format!("cannot save token: {e}")))?;
+            .map_err(|e| RemoteError::Permanent(format!("cannot save token: {e}")))?;
         let access = token.access_token.clone();
         *slot = Some(Loaded {
             token,
@@ -190,7 +190,7 @@ pub async fn login(cfg: &Config, token_file: &Path, show_url: impl FnOnce(&str))
         .await
         .map_err(|_| anyhow!("timed out waiting for the browser sign-in"))??;
 
-    let http = crate::drive::http_client();
+    let http = crate::remote::http_client();
     let resp = http
         .post(&cfg.endpoints.token_url)
         .form(&[

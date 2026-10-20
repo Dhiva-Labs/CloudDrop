@@ -753,9 +753,13 @@ async fn status_reports_drive_storage() {
     h.start();
     h.settle().await;
     h.wait("quota", |h| clouddrop::control::read_status(&h.data).is_some_and(|s| s.quota.is_some())).await;
-    let q = clouddrop::control::read_status(&h.data).unwrap().quota.unwrap();
+    let status = clouddrop::control::read_status(&h.data).unwrap();
+    let q = status.quota.unwrap();
     assert_eq!(q.limit, Some(16106127360));
     assert!(q.usage >= q.usage_in_drive);
+    assert_eq!(status.provider, clouddrop::remote::Provider::GoogleDrive);
+    assert_eq!(h.db.meta_get("account").unwrap().as_deref(), Some("me@example.com"));
+    assert_eq!(h.db.meta_get("provider").unwrap().as_deref(), Some("gdrive"));
     h.stop().await;
 }
 

@@ -1,3 +1,4 @@
+use crate::remote::Provider;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -10,7 +11,11 @@ const CHUNK_UNIT: usize = 256 * 1024;
 #[serde(default)]
 pub struct Config {
     pub sync_dir: PathBuf,
-    pub drive_folder: String,
+    /// Where to upload; absent = `gdrive`, the only provider so far.
+    pub provider: Provider,
+    /// Name of the top folder in the cloud; `drive_folder` in older configs.
+    #[serde(alias = "drive_folder")]
+    pub remote_folder: String,
     pub client_id: String,
     pub client_secret: String,
     pub parallel_uploads: usize,
@@ -66,7 +71,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             sync_dir: dirs::home_dir().unwrap_or_default().join("CloudDrop"),
-            drive_folder: "CloudDrop".into(),
+            provider: Provider::default(),
+            remote_folder: "CloudDrop".into(),
             client_id: String::new(),
             client_secret: String::new(),
             parallel_uploads: 2,
@@ -142,7 +148,7 @@ impl Config {
         if !self.sync_dir.is_absolute() {
             bail!("sync_dir must be an absolute path");
         }
-        if self.drive_folder.trim().is_empty() {
+        if self.remote_folder.trim().is_empty() {
             bail!("drive_folder must not be empty");
         }
         if self.chunk_size == 0 || !self.chunk_size.is_multiple_of(CHUNK_UNIT) {
@@ -215,6 +221,8 @@ impl Config {
                 "client_secret".into(),
                 serde_json::Value::Bool(!self.client_secret.is_empty()),
             );
+            // The name apps that predate other providers read.
+            obj.insert("drive_folder".into(), serde_json::json!(self.remote_folder));
             obj.insert("auto_free_days".into(), serde_json::json!(self.auto_free_days));
             obj.insert("keep_local".into(), serde_json::json!(self.keep_local));
             obj.insert("config_path".into(), serde_json::json!(config_path()));
@@ -282,5 +290,17 @@ mod tests {
         assert_eq!(back.keep_local, ["Work"]);
         let old: Config = toml::from_str("sync_dir = \"/x\"").unwrap();
         assert_eq!(old.auto_free_days, None);
+    }
+
+    #[test]
+    fn provider_defaults_to_drive_and_old_folder_key_is_read() {
+        let old: Config = toml::from_str("sync_dir = \"/x\"\ndrive_folder = \"Backup\"").unwrap();
+        assert_eq!((old.provider, old.remote_folder.as_str()), (Provider::GoogleDrive, "Backup"));
+        let text = toml::to_string_pretty(&old).unwrap();
+        assert!(text.contains("provider = \"gdrive\"") && text.contains("remote_folder = \"Backup\""), "{text}");
+        assert!(!text.contains("drive_folder"), "{text}");
+        let json = old.public_json();
+        assert_eq!((json["remote_folder"].as_str(), json["drive_folder"].as_str()), (Some("Backup"), Some("Backup")));
+        assert_eq!(json["provider"], "gdrive");
     }
 }

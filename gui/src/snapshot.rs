@@ -245,7 +245,7 @@ pub fn summarize(s: &Snapshot) -> Summary {
             "Sign-in needed".into(),
             Some(Action::SignIn),
         ),
-        Phase::DriveFolderMissing => mk(
+        Phase::RemoteFolderMissing => mk(
             "clouddrop-attention-symbolic",
             "The CloudDrop folder is missing in Google Drive".into(),
             capitalize(&message),
@@ -361,6 +361,7 @@ mod tests {
                 uploads: vec![],
                 waiting: 0,
                 quota: None,
+                provider: Default::default(),
             }),
             paused: false,
             counts: Counts::default(),
@@ -381,6 +382,7 @@ mod tests {
             uploads: sent.iter().map(|(p, s)| Upload { path: (*p).into(), sent: *s, total: 1 << 30 }).collect(),
             waiting: 0,
             quota: None,
+            provider: Default::default(),
         }
     }
 

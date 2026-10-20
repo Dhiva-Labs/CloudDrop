@@ -30,7 +30,9 @@ downloaded back at any time.
 
 ```toml
 sync_dir = "/home/me/CloudDrop"     # absolute path
-drive_folder = "CloudDrop"           # name of the top folder created in My Drive
+provider = "gdrive"                  # where to upload; absent = gdrive (Google Drive, the only one so far)
+remote_folder = "CloudDrop"          # name of the top folder created in My Drive; older configs say
+                                     # drive_folder, which is still read
 client_id = "....apps.googleusercontent.com"
 client_secret = "...."
 parallel_uploads = 2
@@ -50,24 +52,28 @@ CREATE TABLE entries (
   path        TEXT PRIMARY KEY,  -- relative to sync_dir, '/' separated, no leading or trailing slash
   kind        TEXT NOT NULL,     -- 'file' | 'dir'
   state       TEXT NOT NULL,     -- see below
-  drive_id    TEXT,              -- Drive file/folder id once it exists in Drive
+  drive_id    TEXT,              -- the provider's file/folder id once it exists in the cloud
+                                 -- (named before there were other providers; kept for older readers)
   cloud_name  TEXT,              -- name in Drive as last set
   cloud_parent TEXT,             -- Drive id of the parent folder as last set
-  md5         TEXT,              -- md5 (hex) of the content last uploaded (= Drive md5Checksum)
+  md5         TEXT,              -- content hash (hex) of the content last uploaded, as the provider
+                                 -- reports it; its kind is in hash_kind (Drive: md5Checksum)
   cloud_size  INTEGER,           -- size in bytes of the content last uploaded
   local_size  INTEGER,           -- local file metadata at last observation
   local_mtime_ns INTEGER,
   inode       INTEGER,
-  upload_url  TEXT,              -- resumable upload session in progress
-  upload_md5  TEXT,              -- md5 of the content that upload_url is uploading
+  upload_url  TEXT,              -- upload session in progress (opaque to everything but the provider)
+  upload_md5  TEXT,              -- hash (same kind) of the content that upload_url is uploading
   pin_prev    INTEGER NOT NULL DEFAULT 0, -- keep the previous Drive revision forever before replacing it
   move_pending INTEGER NOT NULL DEFAULT 0, -- cloud_only entry whose Drive name/parent must be updated
   attempts    INTEGER NOT NULL DEFAULT 0, -- consecutive failed attempts (drives the backoff)
   retry_at    INTEGER,           -- unix ms; do not retry before this
   error       TEXT,              -- last error message (state = 'error', or transient failure text)
   updated_at  INTEGER NOT NULL,  -- unix ms
-  uploaded_at INTEGER            -- unix ms the current Drive content was uploaded; NULL after a
+  uploaded_at INTEGER,           -- unix ms the current Drive content was uploaded; NULL after a
                                  -- restore (automatic space saving skips it until re-uploaded)
+  hash_kind   TEXT               -- kind of hash in md5 and upload_md5: NULL = md5, the only kind
+                                 -- so far (Google Drive). Readers must not compare other kinds as md5
 );
 CREATE TABLE activity (          -- history for the desktop app; newest 10 000 rows kept
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,8 +85,12 @@ CREATE TABLE activity (          -- history for the desktop app; newest 10 000 r
   detail TEXT                    -- old path for moved, error for failed
 );
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
--- meta keys: 'schema_version' = '2' (version 1 databases gain uploaded_at on open), 'sync_root' = absolute sync_dir,
---            'root_id' = Drive id of the top CloudDrop folder,
+-- meta keys: 'schema_version' = '3' (on open, version 1 databases gain uploaded_at and version 2
+--            databases gain hash_kind), 'sync_root' = absolute sync_dir,
+--            'provider' = the config's provider ('gdrive') this database holds ids of; the engine
+--            refuses to start with a config naming another one,
+--            'account' = email address of the signed-in account, once the provider has reported it,
+--            'root_id' = the provider's id of the top CloudDrop folder,
 --            'paused' = '1' while uploads are paused by the user
 ```
 
@@ -144,10 +154,12 @@ at least every 2 s as a heartbeat:
 ```
 
 It also carries `quota` (`{"limit": …, "usage": …, "usage_in_drive": …}` bytes,
-refreshed every 10 minutes from `about.get`; `limit` null = unlimited).
+refreshed every 10 minutes from `about.get`; `limit` null = unlimited) and `provider`
+(`"gdrive"`; absent from older engines, meaning the same).
 
 `phase` is one of `starting`, `idle`, `waiting`, `uploading`, `paused`, `offline`,
-`needs_sign_in`, `drive_folder_missing`. Readers treat the file as stale when
+`needs_sign_in`, `drive_folder_missing` (the cloud's top folder was trashed or deleted,
+whatever the provider). Readers treat the file as stale when
 `updated_ms` is older than 10 s or the pid is gone (daemon not running); it is
 removed on clean exit.
 
@@ -183,12 +195,20 @@ Drive URLs: files `https://drive.google.com/file/d/<id>/view`, folders
 
 ## Google API
 
+The engine, the CLI and the Windows agent reach the cloud only through `remote::Remote`
+(`src/remote/`): an enum with one variant per provider, its errors (`RemoteError`: auth,
+not found, quota, rate limited, transient, permanent) and content hashes (`ContentHash`,
+`src/hash.rs`) are provider-neutral. Google Drive (`src/remote/gdrive.rs`) is the only
+provider so far; docs/PROVIDERS.md has the plan for others.
+
 - OAuth 2.0 installed-app flow with loopback redirect + PKCE; scope
   `https://www.googleapis.com/auth/drive.file` (only files the app created; no
   restricted-scope audit needed).
 - Drive v3 REST: folders via `files.create`, content via resumable upload sessions
   (8 MiB chunks, sessions persisted in `upload_url` so restarts resume), renames/moves
   via `files.update` with `addParents`/`removeParents`, downloads via `alt=media`.
+- `about.get` (`storageQuota`, `user(emailAddress)`) every 10 minutes: the quota in
+  status.json and meta `account`.
 - 401 → refresh token once; 429/5xx/rate-limit 403 → exponential backoff via `retry_at`
   (5 s doubling to 15 min); other 4xx → `error`. A rejected refresh token pauses all
   uploads until `clouddrop login` rewrites the token file.

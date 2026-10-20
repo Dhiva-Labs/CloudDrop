@@ -1,8 +1,9 @@
-//! CLI operations on the sync folder: free up space, restore, open in Drive, status.
+//! CLI operations on the sync folder: free up space, restore, open in the cloud, status.
 
 use crate::config::Config;
 use crate::db::{ActivityKind, Db, Entry, Kind, State};
-use crate::drive::{Drive, DriveError};
+use crate::hash;
+use crate::remote::{Remote, RemoteError};
 use crate::util::{self, LocalMeta};
 use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Component, Path, PathBuf};
@@ -18,6 +19,7 @@ impl Ctx {
         let cfg = Config::load()?;
         let db = Db::open_default()?;
         db.bind_root(&cfg.sync_dir)?;
+        db.bind_provider(cfg.provider)?;
         Ok(Self { cfg, db })
     }
 
@@ -64,30 +66,28 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-pub fn drive_url(kind: Kind, id: &str) -> String {
-    match kind {
-        Kind::Dir => format!("https://drive.google.com/drive/folders/{id}"),
-        Kind::File => format!("https://drive.google.com/file/d/{id}/view"),
-    }
-}
-
-/// Drive URL for an entry path ("" = the top CloudDrop folder).
+/// Web link for an entry path ("" = the top CloudDrop folder).
 pub fn url_for(ctx: &Ctx, rel: &str) -> Result<String> {
-    if rel.is_empty() {
+    let provider = ctx.cfg.provider;
+    let (kind, id) = if rel.is_empty() {
         let id = ctx
             .db
             .meta_get("root_id")?
             .ok_or_else(|| anyhow!("the CloudDrop folder has not been created in Drive yet"))?;
-        return Ok(drive_url(Kind::Dir, &id));
-    }
-    let e = ctx
-        .db
-        .get(rel)?
-        .ok_or_else(|| anyhow!("{rel} is not tracked by CloudDrop yet"))?;
-    let id = e
-        .drive_id
-        .ok_or_else(|| anyhow!("{rel} has not been uploaded yet"))?;
-    Ok(drive_url(e.kind, &id))
+        (Kind::Dir, id)
+    } else {
+        let e = ctx
+            .db
+            .get(rel)?
+            .ok_or_else(|| anyhow!("{rel} is not tracked by CloudDrop yet"))?;
+        let id = e
+            .drive_id
+            .ok_or_else(|| anyhow!("{rel} has not been uploaded yet"))?;
+        (e.kind, id)
+    };
+    provider
+        .web_url(kind, &id)
+        .ok_or_else(|| anyhow!("{} has no web page for {rel}", provider.display_name()))
 }
 
 fn tracked_subtree(ctx: &Ctx, rel: &str) -> Result<Vec<Entry>> {
@@ -146,8 +146,8 @@ impl FreeReport {
     }
 }
 
-/// Deletes local copies that are verifiably identical to their Drive copy.
-pub async fn free(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<FreeReport> {
+/// Deletes local copies that are verifiably identical to their cloud copy.
+pub async fn free(ctx: &Ctx, remote: &Remote, rels: &[String]) -> Result<FreeReport> {
     let mut report = FreeReport::default();
     let mut files = Vec::new();
     for rel in rels {
@@ -167,31 +167,32 @@ pub async fn free(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<FreeRepor
         }
         let abs = ctx.abs(&e.path);
         let path = abs.clone();
-        let hashed = tokio::task::spawn_blocking(move || util::md5_file(&path)).await?;
-        let Ok((md5, meta)) = hashed else {
+        let kind = e.hash.as_ref().map_or(remote.capabilities().hash, |h| h.kind);
+        let hashed = tokio::task::spawn_blocking(move || hash::hash_file(kind, &path)).await?;
+        let Ok((hash, meta)) = hashed else {
             continue; // already gone
         };
-        if Some(meta) != e.local() || Some(&md5) != e.md5.as_ref() {
+        if Some(meta) != e.local() || Some(&hash) != e.hash.as_ref() {
             report.changed += 1;
             continue;
         }
-        let id = e.drive_id.clone().expect("synced files have a Drive id");
-        let cloud = match drive.get(&id).await {
+        let id = e.drive_id.clone().expect("synced files have a cloud id");
+        let cloud = match remote.get(&id).await {
             Ok(m) if !m.trashed => Some(m),
-            Ok(_) | Err(DriveError::NotFound) => None,
+            Ok(_) | Err(RemoteError::NotFound) => None,
             Err(err) => return Err(anyhow!("cannot check {} in Drive: {err}", e.path)),
         };
-        let cloud_ok = cloud.as_ref().is_some_and(|m| {
-            m.md5_checksum.as_deref() == Some(md5.as_str()) && m.size_bytes() == Some(meta.size as u64)
-        });
+        let cloud_ok = cloud
+            .as_ref()
+            .is_some_and(|m| m.hash.as_ref() == Some(&hash) && m.size == Some(meta.size as u64));
         if !cloud_ok {
-            // Drive lost or changed it: upload the local copy again rather than free it.
+            // The cloud lost or changed it: upload the local copy again rather than free it.
             report.cloud_mismatch += 1;
             crate::engine::mark_for_reupload(&mut e, cloud.is_some());
             ctx.db.put(&e)?;
             continue;
         }
-        // Re-check right before deleting, in case it was edited during the Drive call.
+        // Re-check right before deleting, in case it was edited during the cloud call.
         if LocalMeta::read(&abs).ok() != Some(meta) {
             report.changed += 1;
             continue;
@@ -263,7 +264,7 @@ fn reactivate_ancestors(ctx: &Ctx, rel: &str) -> Result<()> {
 }
 
 /// Downloads cloud-only files (and recreates cloud-only folders) under each path.
-pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<RestoreReport> {
+pub async fn restore(ctx: &Ctx, remote: &Remote, rels: &[String]) -> Result<RestoreReport> {
     let mut report = RestoreReport::default();
     let store = crate::store::platform();
     // Placeholders (Windows) the service is downloading: (path, entry path, size).
@@ -296,7 +297,7 @@ pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<Restor
                         report.blocked.push(e.path.clone());
                         continue;
                     }
-                    let n = restore_file(ctx, drive, e).await?;
+                    let n = restore_file(ctx, remote, e).await?;
                     report.files += 1;
                     report.bytes += n;
                 }
@@ -327,12 +328,12 @@ pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<Restor
     Ok(report)
 }
 
-async fn restore_file(ctx: &Ctx, drive: &Drive, mut e: Entry) -> Result<u64> {
+async fn restore_file(ctx: &Ctx, remote: &Remote, mut e: Entry) -> Result<u64> {
     let id = e
         .drive_id
         .clone()
         .ok_or_else(|| anyhow!("{} has no Drive copy", e.path))?;
-    let cloud = drive
+    let cloud = remote
         .get(&id)
         .await
         .map_err(|err| anyhow!("cannot find {} in Drive: {err}", e.path))?;
@@ -344,11 +345,11 @@ async fn restore_file(ctx: &Ctx, drive: &Drive, mut e: Entry) -> Result<u64> {
     let tmp = dir.join(format!(".clouddrop-restore-{:016x}.part", rand::random::<u64>()));
     let result: Result<u64> = async {
         let mut out = tokio::fs::File::create(&tmp).await?;
-        let (md5, n) = drive
+        let (hash, n) = remote
             .download(&id, &mut out)
             .await
             .map_err(|err| anyhow!("download of {} failed: {err}", e.path))?;
-        if cloud.md5_checksum.as_deref().is_some_and(|c| c != md5) {
+        if cloud.hash.as_ref().is_some_and(|c| *c != hash) {
             bail!("download of {} was corrupted (checksum mismatch)", e.path);
         }
         let out = out.into_std().await;
@@ -360,7 +361,7 @@ async fn restore_file(ctx: &Ctx, drive: &Drive, mut e: Entry) -> Result<u64> {
         drop(out);
 
         // Record first, then move into place: the daemon then sees a known, synced file.
-        e.md5 = Some(md5);
+        e.hash = Some(hash);
         e.cloud_size = Some(n as i64);
         e.set_local(Some(LocalMeta::read(&tmp)?));
         e.state = if e.move_pending { State::Pending } else { State::Synced };
@@ -402,8 +403,8 @@ pub fn cloud_only_children(ctx: &Ctx, rel: &str) -> Result<Vec<Entry>> {
     Ok(v)
 }
 
-/// Forgets every Drive id so everything is uploaded again into a fresh top folder.
-/// Used when the CloudDrop folder was permanently deleted from Drive.
+/// Forgets every cloud id so everything is uploaded again into a fresh top folder.
+/// Used when the CloudDrop folder was permanently deleted from the cloud.
 pub fn reset_cloud(ctx: &Ctx) -> Result<(usize, usize)> {
     let mut requeued = 0;
     let mut dropped = 0;
@@ -414,12 +415,12 @@ pub fn reset_cloud(ctx: &Ctx) -> Result<(usize, usize)> {
             continue;
         }
         e.drive_id = None;
-        e.md5 = None;
+        e.hash = None;
         e.cloud_size = None;
         e.cloud_name = None;
         e.cloud_parent = None;
         e.upload_url = None;
-        e.upload_md5 = None;
+        e.upload_hash = None;
         e.pin_prev = false;
         e.move_pending = false;
         e.requeue();
@@ -465,11 +466,5 @@ mod tests {
     #[test]
     fn normalizes_lexically() {
         assert_eq!(normalize(Path::new("/a/b/../c/./d")), PathBuf::from("/a/c/d"));
-    }
-
-    #[test]
-    fn urls() {
-        assert_eq!(drive_url(Kind::Dir, "X"), "https://drive.google.com/drive/folders/X");
-        assert_eq!(drive_url(Kind::File, "Y"), "https://drive.google.com/file/d/Y/view");
     }
 }
