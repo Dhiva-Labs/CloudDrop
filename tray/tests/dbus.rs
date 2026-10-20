@@ -170,6 +170,8 @@ fn idle() -> TrayState {
         paused: false,
         can_pause: true,
         has_drive_folder: false,
+        provider_name: "Google Drive".into(),
+        web_links: true,
     }
 }
 
@@ -387,6 +389,8 @@ async fn registers_and_follows_state_updates() {
         paused: true,
         can_pause: true,
         has_drive_folder: true,
+        provider_name: "Google Drive".into(),
+        web_links: true,
     })
     .await;
     timeout(WAIT, new_icon.next())
@@ -428,6 +432,8 @@ async fn registers_and_follows_state_updates() {
         paused: false,
         can_pause: false,
         has_drive_folder: false,
+        provider_name: "Google Drive".into(),
+        web_links: true,
     })
     .await;
     assert_eq!(
@@ -492,6 +498,8 @@ async fn menu_clicks_and_icon_activation_reach_the_callback() {
     let (tray, mut commands) = spawn_tray(
         TrayState {
             has_drive_folder: true,
+            provider_name: "Google Drive".into(),
+            web_links: true,
             ..idle()
         },
         None,

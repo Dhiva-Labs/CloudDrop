@@ -5,10 +5,10 @@ use crate::activity::activity_row;
 use crate::fmt;
 use crate::model::Filter;
 use crate::ops::{Nav, Ops};
-use crate::snapshot::{Action, Snapshot, summarize};
+use crate::snapshot::{Action, Snapshot, cloud_storage, summarize};
 use crate::{rt, ui};
 use adw::prelude::*;
-use clouddrop::control::{self, Quota};
+use clouddrop::control;
 use clouddrop::db::Kind;
 use clouddrop::util::{self, human_bytes};
 use clouddrop_tray::TrayIcon;
@@ -24,6 +24,8 @@ struct UploadRow {
 /// One storage card: title, headline, bar and a footnote.
 struct Card {
     root: gtk::Box,
+    icon: gtk::Image,
+    title: gtk::Label,
     headline: gtk::Label,
     bar: gtk::ProgressBar,
     note: gtk::Label,
@@ -38,8 +40,10 @@ impl Card {
             .css_classes(["card", "storage-card"])
             .build();
         let head = gtk::Box::builder().spacing(8).build();
-        head.append(&gtk::Image::from_icon_name(icon));
-        head.append(&gtk::Label::builder().label(title).xalign(0.0).hexpand(true).css_classes(["heading"]).build());
+        let icon = gtk::Image::from_icon_name(icon);
+        let title = gtk::Label::builder().label(title).xalign(0.0).hexpand(true).css_classes(["heading"]).build();
+        head.append(&icon);
+        head.append(&title);
         let headline = gtk::Label::builder()
             .xalign(0.0)
             .wrap(true)
@@ -52,7 +56,7 @@ impl Card {
         root.append(&headline);
         root.append(&bar);
         root.append(&note);
-        (Card { root, headline, bar, note }, head)
+        (Card { root, icon, title, headline, bar, note }, head)
     }
 
     fn set_fraction(&self, frac: Option<f64>) {
@@ -109,6 +113,7 @@ pub struct HomePage {
     pause_icon: gtk::Image,
     pause_label: gtk::Label,
     drive: Card,
+    open_drive: gtk::Button,
     computer: Card,
     recent: adw::PreferencesGroup,
     recent_rows: RefCell<Vec<adw::ActionRow>>,
@@ -224,6 +229,7 @@ impl HomePage {
             pause_icon,
             pause_label,
             drive,
+            open_drive: open_drive.clone(),
             computer,
             recent,
             recent_rows: RefCell::default(),
@@ -288,8 +294,9 @@ impl HomePage {
     fn run_action(self: &Rc<Self>) {
         let hooks = self.ops.hooks().clone();
         match self.action.get() {
-            Some(Action::Setup) => (hooks.setup)(),
+            Some(Action::Setup) => (hooks.setup)(crate::setup::Start::Welcome),
             Some(Action::SignIn) => (hooks.sign_in)(),
+            Some(Action::Connect) => (hooks.setup)(crate::setup::Start::SignIn),
             Some(Action::Resume) => self.ops.set_paused(false),
             Some(Action::StartService) => {
                 let ops = self.ops.clone();
@@ -305,7 +312,8 @@ impl HomePage {
     }
 
     fn confirm_free(self: &Rc<Self>) {
-        let Some(synced) = self.last.borrow().as_ref().map(|s| s.counts.synced) else {
+        let Some((synced, cloud)) = self.last.borrow().as_ref().map(|s| (s.counts.synced, s.provider.name.clone()))
+        else {
             return;
         };
         self.ops.confirm_free(
@@ -313,7 +321,7 @@ impl HomePage {
             "Free up space?",
             &format!(
                 "This removes the local copies of all {synced} uploaded files. They stay in \
-                 Google Drive, and you can download them again from Files at any time. \
+                 {cloud}, and you can download them again from Files at any time. \
                  Folders are kept.",
             ),
             || {},
@@ -343,6 +351,7 @@ impl HomePage {
                 self.action_btn.set_label(match a {
                     Action::Setup => "Set Up CloudDrop",
                     Action::SignIn => "Sign In",
+                    Action::Connect => "Connect",
                     Action::StartService => "Start CloudDrop",
                     Action::Resume => "Resume Uploads",
                 });
@@ -357,6 +366,10 @@ impl HomePage {
 
         self.refresh_uploads(s);
 
+        self.free_tile.set_tooltip_text(Some(&format!(
+            "Remove local copies of uploaded files; they stay in {}",
+            s.provider.name
+        )));
         self.add_tile.set_sensitive(s.ready());
         self.free_tile.set_sensitive(s.counts.synced > 0 && !self.ops.busy());
         self.pause_tile.set_sensitive(s.ready());
@@ -399,29 +412,17 @@ impl HomePage {
 
     fn update_drive(&self, s: &Snapshot) {
         let c = &self.drive;
-        let holds = format!("CloudDrop holds {}", human_bytes(s.cloud_bytes));
-        match s.quota() {
-            Some(Quota { limit: Some(limit), usage, .. }) if limit > 0 => {
-                c.headline.set_label(&format!("{} of {} used", human_bytes(usage), human_bytes(limit)));
-                c.set_fraction(Some(usage as f64 / limit as f64));
-                c.note.set_label(&holds);
-            }
-            Some(Quota { usage, .. }) => {
-                c.headline.set_label(&format!("{} used", human_bytes(usage)));
-                c.set_fraction(None);
-                c.note.set_label(&format!("{holds} · unlimited storage"));
-            }
-            None => {
-                c.headline.set_label(if s.daemon.is_some() { "Checking…" } else { "Not connected" });
-                c.set_fraction(None);
-                c.note.set_label(&holds);
-            }
-        }
-        c.headline.set_css_classes(if s.quota().is_some() {
-            &["title-3", "numeric"]
-        } else {
-            &["title-3", "dim-label"]
-        });
+        let p = &s.provider;
+        c.icon.set_icon_name(Some(p.icon));
+        c.title.set_label(&p.name);
+        // Providers without web pages (WebDAV, S3, SFTP) have nothing to open.
+        self.open_drive.set_visible(p.can_open_web());
+        self.open_drive.set_tooltip_text(Some(&format!("Open in {}", p.name)));
+        let t = cloud_storage(s);
+        c.headline.set_label(&t.headline);
+        c.set_fraction(t.fraction);
+        c.note.set_label(&t.note);
+        c.headline.set_css_classes(if t.muted { &["title-3", "dim-label"] } else { &["title-3", "numeric"] });
     }
 
     fn update_computer(&self, s: &Snapshot) {

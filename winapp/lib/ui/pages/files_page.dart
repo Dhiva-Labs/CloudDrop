@@ -1,4 +1,4 @@
-/// Files: a browser for everything in CloudDrop, on this computer or only in Drive
+/// Files: a browser for everything in CloudDrop, on this computer or only in the cloud
 /// (`gui/src/files.rs`).
 library;
 
@@ -298,11 +298,13 @@ class _FilesPageState extends State<FilesPage> {
           onPressed: files.retrySelected,
         ),
       const MenuFlyoutSeparator(),
-      MenuFlyoutItem(
-        leading: const Icon(FluentIcons.open_in_new_window),
-        text: const Text('Open in Google Drive'),
-        onPressed: caps.openDrive ? files.openSelectedInDrive : null,
-      ),
+      // Providers without web pages (WebDAV, S3, SFTP) have nothing to open.
+      if (files.app.provider.webLinks)
+        MenuFlyoutItem(
+          leading: const Icon(FluentIcons.open_in_new_window),
+          text: Text('Open in ${files.app.provider.name}'),
+          onPressed: caps.openDrive ? files.openSelectedInDrive : null,
+        ),
       MenuFlyoutItem(
         leading: const Icon(FluentIcons.fabric_folder),
         text: const Text('Show in File Explorer'),
@@ -331,11 +333,12 @@ class _FilesPageState extends State<FilesPage> {
 Future<void> _free(BuildContext context, FilesController files) async {
   final sel = files.selectedItems;
   if (sel.isEmpty) return;
+  final cloud = files.app.provider.name;
   final body = sel.length == 1 && !sel.first.isDir
-      ? 'This removes the local copy of ${files.what(sel)}. It stays in Google Drive, and '
+      ? 'This removes the local copy of ${files.what(sel)}. It stays in $cloud, and '
             'you can download it again at any time.'
       : 'This removes the local copies of the uploaded files in ${files.what(sel)}. They '
-            'stay in Google Drive, and you can download them again at any time. Folders are kept.';
+            'stay in $cloud, and you can download them again at any time. Folders are kept.';
   final ok = await confirmFree(context, body: body);
   if (ok) await files.freeSelected();
 }
@@ -655,10 +658,10 @@ class _SelectionBar extends StatelessWidget {
               ? () => files.setKeepSelected(caps.keep == Keep.off)
               : null,
         ),
-      if (caps.count == 1)
+      if (caps.count == 1 && files.app.provider.webLinks)
         button(
           FluentIcons.open_in_new_window,
-          'Open in Google Drive',
+          'Open in ${files.app.provider.name}',
           caps.openDrive ? files.openSelectedInDrive : null,
         ),
       if (caps.show)

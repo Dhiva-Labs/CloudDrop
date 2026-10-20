@@ -1,9 +1,10 @@
 """CloudDrop integration for Nautilus (Files).
 
 Shows the upload state of files in the CloudDrop folder as emblems and in a
-"Google Drive" column, and adds context-menu actions that run the
-``clouddrop`` CLI. State is read from the daemon's SQLite database, opened
-read-only; this module never touches the network.
+column named after the cloud provider ("Google Drive" unless config.toml
+names another), and adds context-menu actions that run the ``clouddrop`` CLI.
+State is read from the daemon's SQLite database, opened read-only; this
+module never touches the network.
 
 The first half of the file is plain Python with no Nautilus objects (database
 access and decisions); the Nautilus glue is at the bottom.
@@ -132,6 +133,54 @@ def keep_local_folders():
         folders = []
     _keep_cache = (key, folders)
     return folders
+
+
+class Provider(NamedTuple):
+    id: str
+    name: str          # shown in menus and as the column title
+    web_links: bool    # items have a web page, so "Open in …" makes sense
+
+
+# Mirrors the id, name and web links of each provider's INFO in src/<id>.rs.
+PROVIDERS = {p.id: p for p in (
+    Provider('gdrive', 'Google Drive', True),
+    Provider('onedrive', 'OneDrive', True),
+    Provider('dropbox', 'Dropbox', True),
+    Provider('nextcloud', 'Nextcloud', True),
+    Provider('webdav', 'WebDAV', False),
+    Provider('s3', 'S3', False),
+    Provider('sftp', 'SFTP', False),
+    Provider('mega', 'MEGA', False),
+)}
+GOOGLE_DRIVE = PROVIDERS['gdrive']
+
+_provider_cache = (None, GOOGLE_DRIVE)
+
+
+def configured_provider():
+    """The provider config.toml names; Google Drive if it names none.
+
+    Cached by file mtime. An unknown id is shown as itself, without web links.
+    """
+    global _provider_cache
+    path = config_path()
+    try:
+        key = (path, os.stat(path).st_mtime_ns)
+    except OSError:
+        return GOOGLE_DRIVE
+    if _provider_cache[0] == key:
+        return _provider_cache[1]
+    try:
+        with open(path, 'rb') as f:
+            value = tomllib.load(f).get('provider')
+    except (OSError, ValueError):
+        value = None
+    if isinstance(value, str) and value:
+        provider = PROVIDERS.get(value) or Provider(value, value, False)
+    else:
+        provider = GOOGLE_DRIVE
+    _provider_cache = (key, provider)
+    return provider
 
 
 def _is_busy(exc):
@@ -317,7 +366,7 @@ def find_binary():
     return None
 
 
-def plan_file_menu(db, selection, binary):
+def plan_file_menu(db, selection, binary, provider=GOOGLE_DRIVE):
     """Menu for selected items; selection is [(abs_path, rel, is_dir)]."""
     free, retry = [], []
     for path, rel, is_dir in selection:
@@ -332,12 +381,13 @@ def plan_file_menu(db, selection, binary):
     if free:
         specs.append(MenuSpec(
             'CloudDrop::free', 'Free Up Space',
-            'Remove local copies that are safely stored in Google Drive',
+            'Remove local copies that are safely stored in %s' % provider.name,
             (binary, '--notify', 'free', *free)))
-    if len(selection) == 1 and db.drive_id(selection[0][1]):
+    if (provider.web_links and len(selection) == 1
+            and db.drive_id(selection[0][1])):
         specs.append(MenuSpec(
-            'CloudDrop::open', 'Open in Google Drive',
-            'Open this item in Google Drive',
+            'CloudDrop::open', 'Open in %s' % provider.name,
+            'Open this item in %s' % provider.name,
             (binary, 'open', selection[0][0])))
     if retry:
         specs.append(MenuSpec(
@@ -360,7 +410,7 @@ def plan_file_menu(db, selection, binary):
     return specs
 
 
-def plan_background_menu(db, folder, rel, binary):
+def plan_background_menu(db, folder, rel, binary, provider=GOOGLE_DRIVE):
     """Menu for empty space in `folder` (absolute path, `rel` inside root)."""
     specs = []
     total, shown = db.cloud_children(rel, CLOUD_MENU_LIMIT)
@@ -372,7 +422,7 @@ def plan_background_menu(db, folder, rel, binary):
         for index, (name, _is_dir) in enumerate(shown):
             children.append(MenuSpec(
                 'CloudDrop::restore_%d' % index, name,
-                'Download %s from Google Drive' % name,
+                'Download %s from %s' % (name, provider.name),
                 (binary, '--notify', 'restore', os.path.join(folder, name))))
         if total > len(shown):
             children.append(MenuSpec(
@@ -381,12 +431,12 @@ def plan_background_menu(db, folder, rel, binary):
                 sensitive=False))
         specs.append(MenuSpec(
             'CloudDrop::cloud_only', 'Cloud-only Files (%d)' % total,
-            'Files kept in Google Drive but removed from this computer',
+            'Files kept in %s but removed from this computer' % provider.name,
             children=tuple(children)))
-    if db.drive_id(rel):
+    if provider.web_links and db.drive_id(rel):
         specs.append(MenuSpec(
-            'CloudDrop::open_folder', 'Open Folder in Google Drive',
-            'Open this folder in Google Drive',
+            'CloudDrop::open_folder', 'Open Folder in %s' % provider.name,
+            'Open this folder in %s' % provider.name,
             (binary, 'open', folder)))
     return specs
 
@@ -449,9 +499,11 @@ class CloudDropExtension(GObject.GObject, Nautilus.InfoProvider,
     # -- ColumnProvider ----------------------------------------------------
 
     def get_columns(self):
+        # Asked once at startup, so a provider switch shows after a restart.
+        name = configured_provider().name
         return [Nautilus.Column(
             name='CloudDrop::status', attribute=STATUS_ATTRIBUTE,
-            label='Google Drive', description='Upload status in Google Drive')]
+            label=name, description='Upload status in %s' % name)]
 
     # -- InfoProvider ------------------------------------------------------
 
@@ -549,7 +601,8 @@ class CloudDropExtension(GObject.GObject, Nautilus.InfoProvider,
             binary = find_binary()
             if binary is None:
                 return []
-            specs = plan_file_menu(self._db, selection, binary)
+            specs = plan_file_menu(self._db, selection, binary,
+                                   configured_provider())
         except Unavailable:
             return []
         return [self._make_item(spec) for spec in specs]
@@ -568,7 +621,8 @@ class CloudDropExtension(GObject.GObject, Nautilus.InfoProvider,
             if binary is None:
                 return []
             specs = plan_background_menu(
-                self._db, os.path.normpath(path), rel, binary)
+                self._db, os.path.normpath(path), rel, binary,
+                configured_provider())
         except Unavailable:
             return []
         return [self._make_item(spec) for spec in specs]

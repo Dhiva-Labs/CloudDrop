@@ -209,4 +209,39 @@ void main() {
     pane: AppPane.settings,
     tall: 1100,
   );
+
+  // ---------- another provider: WebDAV (no web links, proves copies by downloading) ----------
+  DaemonStatus verifyingDaemon() => DaemonStatus(
+    pid: 1,
+    updatedMs: nowMs,
+    phase: Phase.idle,
+    message: 'Verifying…',
+    quota: const Quota(usage: 0, usageInDrive: 0),
+  );
+  screen('home_webdav_verifying', () => calmApp(provider: webdav, daemon: verifyingDaemon()));
+  screen(
+    'home_s3',
+    () => calmApp(
+      provider: s3,
+      daemon: DaemonStatus(pid: 1, updatedMs: nowMs, phase: Phase.idle),
+    ),
+  );
+  screen(
+    'files_webdav_selection',
+    () => busyApp(provider: webdav, daemon: verifyingDaemon()),
+    pane: AppPane.files,
+    act: (tester, t) async {
+      scopeOf(tester).files.selectOnly('setup-guide.md');
+    },
+  );
+  screen('settings_webdav', () => busyApp(provider: webdav), pane: AppPane.settings, tall: 1250);
+  screen(
+    'settings_switch_dialog',
+    () => busyApp(provider: oneDrive),
+    pane: AppPane.settings,
+    tall: 1250,
+    act: (tester, t) async {
+      await tester.tap(find.text('Switch Provider…'));
+    },
+  );
 }

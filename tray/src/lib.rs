@@ -76,6 +76,10 @@ pub struct TrayState {
     pub can_pause: bool,
     /// Show "Open in Google Drive" (false until the Drive folder exists).
     pub has_drive_folder: bool,
+    /// Where CloudDrop uploads, for "Open in Google Drive" ("OneDrive", …).
+    pub provider_name: String,
+    /// The provider has web pages to open (WebDAV, S3 and SFTP have none).
+    pub web_links: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,7 +224,7 @@ impl ksni::Tray for SniTray {
                 .into(),
                 Entry::Separator => MenuItem::Separator,
                 Entry::Action(label, command) => StandardItem {
-                    label: label.into(),
+                    label,
                     activate: Box::new(move |this: &mut Self| (this.on_command)(command)),
                     ..Default::default()
                 }
@@ -236,23 +240,25 @@ enum Entry {
     /// The disabled first row. The label is already menu-escaped.
     Status(String),
     Separator,
-    Action(&'static str, TrayCommand),
+    /// The label is already menu-escaped.
+    Action(String, TrayCommand),
 }
 
-/// The context menu for a state: status line, folder/Drive/window shortcuts,
+/// The context menu for a state: status line, folder/cloud/window shortcuts,
 /// the optional pause toggle, then Quit.
 fn menu_model(state: &TrayState) -> Vec<Entry> {
-    use Entry::{Action, Separator};
+    use Entry::Separator;
+    let action = |label: &str, command| Entry::Action(escape_mnemonics(label), command);
 
     let mut menu = vec![
         Entry::Status(escape_mnemonics(&state.status_line)),
         Separator,
-        Action("Open CloudDrop Folder", TrayCommand::OpenFolder),
+        action("Open CloudDrop Folder", TrayCommand::OpenFolder),
     ];
-    if state.has_drive_folder {
-        menu.push(Action("Open in Google Drive", TrayCommand::OpenInDrive));
+    if state.has_drive_folder && state.web_links {
+        menu.push(action(&format!("Open in {}", state.provider_name), TrayCommand::OpenInDrive));
     }
-    menu.push(Action("Show CloudDrop", TrayCommand::ShowWindow));
+    menu.push(action("Show CloudDrop", TrayCommand::ShowWindow));
     if state.can_pause {
         menu.push(Separator);
         let label = if state.paused {
@@ -260,10 +266,10 @@ fn menu_model(state: &TrayState) -> Vec<Entry> {
         } else {
             "Pause Uploads"
         };
-        menu.push(Action(label, TrayCommand::TogglePause));
+        menu.push(action(label, TrayCommand::TogglePause));
     }
     menu.push(Separator);
-    menu.push(Action("Quit", TrayCommand::Quit));
+    menu.push(action("Quit", TrayCommand::Quit));
     menu
 }
 
@@ -295,6 +301,8 @@ mod tests {
             paused: false,
             can_pause: true,
             has_drive_folder: true,
+            provider_name: "Google Drive".into(),
+            web_links: true,
         }
     }
 
@@ -304,7 +312,7 @@ mod tests {
             .map(|e| match e {
                 Entry::Status(s) => s,
                 Entry::Separator => "---".into(),
-                Entry::Action(label, _) => label.into(),
+                Entry::Action(label, _) => label,
             })
             .collect()
     }
@@ -346,6 +354,16 @@ mod tests {
         };
         assert!(labels(&s).contains(&"Resume Uploads".to_string()));
         assert!(!labels(&s).contains(&"Pause Uploads".to_string()));
+    }
+
+    #[test]
+    fn the_cloud_item_names_the_provider_and_needs_web_links() {
+        let s = TrayState { provider_name: "OneDrive".into(), ..state() };
+        assert!(labels(&s).contains(&"Open in OneDrive".to_string()));
+        let s = TrayState { provider_name: "WebDAV".into(), web_links: false, ..state() };
+        assert!(!labels(&s).iter().any(|l| l.starts_with("Open in")));
+        let s = TrayState { provider_name: "My_Cloud".into(), ..state() };
+        assert!(labels(&s).contains(&"Open in My__Cloud".to_string()), "menu-escaped");
     }
 
     #[test]

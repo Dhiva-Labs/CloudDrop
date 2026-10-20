@@ -13,6 +13,7 @@ import '../data/engine_api.dart';
 import '../data/fs_ops.dart';
 import '../data/models.dart';
 import '../data/paths.dart';
+import '../data/providers.dart';
 import '../data/state_reader.dart';
 import '../data/status_source.dart';
 import '../data/system_actions.dart';
@@ -134,6 +135,21 @@ class AppController extends ChangeNotifier {
   String? get syncDir => config?.syncDir ?? engineStatus?.folder;
   bool get hasBuiltinClient => engineStatus?.hasBuiltinClient ?? false;
 
+  /// Every cloud CloudDrop can upload to (asked once; just Google Drive until then).
+  List<CloudProvider> providers = const [CloudProvider.google];
+  bool _providersLoaded = false;
+
+  /// The configured cloud: its entry in [providers], or what `status --json` says about it.
+  CloudProvider get provider {
+    final st = engineStatus;
+    final id = st?.provider ?? CloudProvider.google.id;
+    for (final p in providers) {
+      if (p.id == id) return p;
+    }
+    if (id == CloudProvider.google.id) return CloudProvider.google;
+    return CloudProvider(id: id, name: st?.providerName ?? id);
+  }
+
   /// The settings file exists but can't be read: the sentence from the engine.
   String? get configError => engineStatus?.configError;
 
@@ -178,9 +194,17 @@ class AppController extends ChangeNotifier {
 
   Future<void> _readEngine() async {
     try {
-      final results = await Future.wait<Object?>([engine.status(), engine.configGet()]);
+      final results = await Future.wait<Object?>([
+        engine.status(),
+        engine.configGet(),
+        if (!_providersLoaded) engine.providers(),
+      ]);
       engineStatus = results[0] as EngineStatus;
       config = results[1] as AppConfig?;
+      if (results.length > 2) {
+        providers = results[2] as List<CloudProvider>;
+        _providersLoaded = true;
+      }
       fatal = null;
       fatalIsMissingCli = false;
       _failures = 0;
@@ -276,8 +300,9 @@ class AppController extends ChangeNotifier {
             root: _root,
             rootId: _rootId,
             rate: _rate.bytesPerSecond,
+            provider: provider,
           )
-        : Snapshot(signedIn: st?.signedIn ?? false);
+        : Snapshot(signedIn: st?.signedIn ?? false, provider: provider);
     final changed =
         !_published ||
         next != snapshot ||
@@ -333,10 +358,21 @@ class AppController extends ChangeNotifier {
   /// Which page the next assistant starts on.
   bool setupAtSignIn = false;
 
-  /// Opens the setup assistant ([atSignIn]: straight on its sign-in page).
-  void beginSetup({bool atSignIn = false}) {
+  /// The next assistant moves CloudDrop to another provider (Settings › Switch Provider…).
+  bool setupSwitching = false;
+
+  /// Opens the setup assistant ([atSignIn]: straight on its sign-in page; [switching]: to
+  /// choose another provider, with a way back).
+  void beginSetup({bool atSignIn = false, bool switching = false}) {
     setupAtSignIn = atSignIn;
+    setupSwitching = switching;
     setupActive = true;
+    notifyListeners();
+  }
+
+  /// Leaves an assistant that changed nothing yet (switching providers, then Cancel).
+  void cancelSetup() {
+    setupActive = false;
     notifyListeners();
   }
 
@@ -513,14 +549,27 @@ class AppController extends ChangeNotifier {
     services.system.reveal(abs);
   }
 
+  /// Opens an item's web page in the cloud: built from its Drive id for Google Drive, asked of
+  /// the engine (`clouddrop url`) for the others.
   Future<void> openInDrive(Entry e) async {
     final id = e.driveId;
     if (id == null) return;
-    await services.system.openUrl(driveUrl(e.kind, id));
+    if (provider.isGoogle) {
+      await services.system.openUrl(driveUrl(e.kind, id));
+      return;
+    }
+    final root = syncDir;
+    if (root == null) return;
+    final r = await engine.driveUrl(paths.absolute(root, e.path));
+    if (r.ok && r.message.isNotEmpty) {
+      await services.system.openUrl(r.message);
+    } else {
+      say(r.message, Severity.error);
+    }
   }
 
-  /// The top CloudDrop folder in My Drive: the engine's `clouddrop url` link, or the folder
-  /// id recorded in the database if the CLI can't say.
+  /// The top CloudDrop folder in the cloud: the engine's `clouddrop url` link, or (Google
+  /// Drive) the folder id recorded in the database if the CLI can't say.
   Future<void> openRootInDrive() async {
     final root = syncDir;
     if (root != null) {
@@ -530,13 +579,15 @@ class AppController extends ChangeNotifier {
         return;
       }
       final id = snapshot.rootId;
-      if (id == null) {
+      if (id == null || !provider.isGoogle) {
         say(r.message, Severity.error);
         return;
       }
     }
     final id = snapshot.rootId;
-    if (id != null) await services.system.openUrl(driveUrl(EntryKind.dir, id));
+    if (id != null && provider.isGoogle) {
+      await services.system.openUrl(driveUrl(EntryKind.dir, id));
+    }
   }
 
   bool _exists(String path) =>

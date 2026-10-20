@@ -2,6 +2,7 @@
 library;
 
 import 'package:clouddrop_app/data/engine_api.dart';
+import 'package:clouddrop_app/data/providers.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -9,13 +10,30 @@ import '../support/fakes.dart';
 import '../support/harness.dart';
 import '../support/scenarios.dart';
 
-TestApp fresh({bool builtin = false, bool signedIn = false}) {
+TestApp fresh({bool builtin = false, bool signedIn = false, bool many = false}) {
   final t = TestApp(
     windows: true,
     status: EngineStatus(configured: false, hasBuiltinClient: builtin, signedIn: signedIn),
   );
   t.engine.config = null;
+  if (many) t.engine.providerList = allProviders;
   return t;
+}
+
+/// Welcome -> where to upload, choosing [provider] -> folders -> its sign-in page.
+Future<void> toSignIn(WidgetTester tester, CloudProvider provider) async {
+  await tapText(tester, 'Get Started');
+  await tapText(tester, provider.name);
+  await tapText(tester, 'Continue');
+  await tapText(tester, 'Continue');
+}
+
+Future<void> fillWebdav(WidgetTester tester) async {
+  final boxes = find.byType(TextBox);
+  await tester.enterText(boxes.at(0), 'https://nas.example.com/dav/files/dhiva');
+  await tester.enterText(boxes.at(1), 'dhiva');
+  await tester.enterText(find.byType(PasswordBox), 'app-password');
+  await tester.settle();
 }
 
 typedef Act = Future<void> Function(WidgetTester tester, TestApp t);
@@ -69,6 +87,7 @@ void main() {
     tall: 1250,
     act: (tester, t) async {
       await tapText(tester, 'Get Started');
+      await tapText(tester, 'Continue');
     },
   );
 
@@ -78,6 +97,7 @@ void main() {
     tall: 1250,
     act: (tester, t) async {
       await tapText(tester, 'Get Started');
+      await tapText(tester, 'Continue');
       await fillKey(tester);
     },
   );
@@ -88,6 +108,7 @@ void main() {
     tall: 1250,
     act: (tester, t) async {
       await tapText(tester, 'Get Started');
+      await tapText(tester, 'Continue');
       await tester.enterText(find.byType(TextBox).first, '{ not json');
       await tester.settle();
     },
@@ -98,6 +119,7 @@ void main() {
     () => fresh(builtin: true),
     act: (tester, t) async {
       await tapText(tester, 'Get Started');
+      await tapText(tester, 'Continue');
     },
   );
 
@@ -107,6 +129,7 @@ void main() {
     act: (tester, t) async {
       await tapText(tester, 'Get Started');
       await tapText(tester, 'Continue');
+      await tapText(tester, 'Continue');
     },
   );
 
@@ -115,6 +138,7 @@ void main() {
     () => fresh(builtin: true),
     act: (tester, t) async {
       await tapText(tester, 'Get Started');
+      await tapText(tester, 'Continue');
       await tapText(tester, 'Continue');
       await tapText(tester, 'Sign In with Google');
       t.engine.logins.single.urlC.complete(
@@ -141,6 +165,7 @@ void main() {
     act: (tester, t) async {
       await tapText(tester, 'Get Started');
       await tapText(tester, 'Continue');
+      await tapText(tester, 'Continue');
       await tapText(tester, 'Sign In with Google');
       t.engine.logins.single.urlC.complete(
         'https://accounts.google.com/o/oauth2/v2/auth?client_id=123',
@@ -158,6 +183,7 @@ void main() {
     act: (tester, t) async {
       await tapText(tester, 'Get Started');
       await tapText(tester, 'Continue');
+      await tapText(tester, 'Continue');
     },
   );
 
@@ -167,6 +193,7 @@ void main() {
     tall: 900,
     act: (tester, t) async {
       await tapText(tester, 'Get Started');
+      await tapText(tester, 'Continue');
       await tapText(tester, 'Continue');
       await tapText(tester, 'Sign In with Google');
       t.engine.logins.single.urlC.complete(
@@ -191,11 +218,161 @@ void main() {
     act: (tester, t) async {
       await tapText(tester, 'Get Started');
       await tapText(tester, 'Continue');
+      await tapText(tester, 'Continue');
       await tapText(tester, 'Sign In with Google');
       t.engine.logins.single.urlC.complete(
         'https://accounts.google.com/o/oauth2/v2/auth?client_id=123',
       );
       t.engine.logins.single.doneC.complete(const ActionResult(true, 'Signed in.'));
+      await tester.settle();
+    },
+  );
+
+  // ---------- other providers ----------
+
+  setup(
+    'provider',
+    () => fresh(builtin: true, many: true),
+    tall: 1100,
+    act: (tester, t) async {
+      await tapText(tester, 'Get Started');
+    },
+  );
+
+  setup(
+    'provider_chosen',
+    () => fresh(builtin: true, many: true),
+    tall: 1100,
+    act: (tester, t) async {
+      await tapText(tester, 'Get Started');
+      await tapText(tester, 'WebDAV');
+    },
+  );
+
+  setup(
+    'folder_onedrive',
+    () => fresh(builtin: true, many: true),
+    act: (tester, t) async {
+      await tapText(tester, 'Get Started');
+      await tapText(tester, 'OneDrive');
+      await tapText(tester, 'Continue');
+    },
+  );
+
+  setup(
+    'signin_onedrive',
+    () => fresh(builtin: true, many: true),
+    act: (tester, t) async {
+      await toSignIn(tester, oneDrive);
+    },
+  );
+
+  setup(
+    'signin_onedrive_waiting',
+    () => fresh(builtin: true, many: true),
+    act: (tester, t) async {
+      await toSignIn(tester, oneDrive);
+      await tapText(tester, 'Sign In with OneDrive');
+      t.engine.logins.single.urlC.complete(
+        'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=123',
+      );
+      await tester.settle();
+    },
+  );
+
+  setup(
+    'signin_nextcloud',
+    () => fresh(builtin: true, many: true),
+    act: (tester, t) async {
+      await toSignIn(tester, nextcloud);
+      await tester.enterText(find.byType(TextBox), 'cloud.example');
+      await tester.settle();
+    },
+  );
+
+  setup(
+    'connect_webdav',
+    () => fresh(builtin: true, many: true),
+    tall: 900,
+    act: (tester, t) async {
+      await toSignIn(tester, webdav);
+    },
+  );
+
+  setup(
+    'connect_webdav_ok',
+    () {
+      final t = fresh(builtin: true, many: true);
+      t.engine.result = (c) => c == 'check'
+          ? const ActionResult(true, 'Connected to nas.example.com as dhiva.')
+          : const ActionResult(true, 'ok');
+      return t;
+    },
+    tall: 900,
+    act: (tester, t) async {
+      await toSignIn(tester, webdav);
+      await fillWebdav(tester);
+      await tapText(tester, 'Test Connection');
+    },
+  );
+
+  setup(
+    'connect_webdav_failed',
+    () {
+      final t = fresh(builtin: true, many: true);
+      t.engine.result = (c) => c == 'check'
+          ? const ActionResult(false, 'The server refused the user name or password (401).')
+          : const ActionResult(true, 'ok');
+      return t;
+    },
+    tall: 900,
+    act: (tester, t) async {
+      await toSignIn(tester, webdav);
+      await fillWebdav(tester);
+      await tapText(tester, 'Test Connection');
+    },
+  );
+
+  setup(
+    'connect_sftp',
+    () => fresh(builtin: true, many: true),
+    tall: 900,
+    act: (tester, t) async {
+      await toSignIn(tester, sftp);
+      await tester.enterText(find.byType(TextBox).at(1), '22x');
+      await tester.settle();
+    },
+  );
+
+  setup(
+    'done_webdav',
+    () {
+      final t = fresh(builtin: true, many: true);
+      t.engine.result = (c) => c == 'check'
+          ? const ActionResult(true, 'Connected to nas.example.com as dhiva.')
+          : const ActionResult(true, 'ok');
+      return t;
+    },
+    tall: 900,
+    act: (tester, t) async {
+      await toSignIn(tester, webdav);
+      await fillWebdav(tester);
+      await tapText(tester, 'Test Connection');
+      await tapText(tester, 'Continue');
+    },
+  );
+
+  // Settings › Switch Provider…: no welcome, the old provider named, a way out.
+  setup(
+    'switch_provider',
+    () {
+      final t = TestApp(windows: true, config: busyConfig, daemon: idleDaemon());
+      t.engine.providerList = allProviders;
+      return t;
+    },
+    tall: 1100,
+    act: (tester, t) async {
+      t.controller.beginSetup(switching: true);
       await tester.settle();
     },
   );

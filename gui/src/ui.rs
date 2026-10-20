@@ -61,8 +61,18 @@ pub fn body(content: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 
 /// A navigation page with a header bar, scrolling body and an optional bottom button.
 pub fn nav_page(title: &str, content: &impl IsA<gtk::Widget>, bottom: Option<&gtk::Button>) -> adw::NavigationPage {
+    nav_page_with_header(title, content, bottom).0
+}
+
+/// [`nav_page`], with its header bar for extra buttons.
+pub fn nav_page_with_header(
+    title: &str,
+    content: &impl IsA<gtk::Widget>,
+    bottom: Option<&gtk::Button>,
+) -> (adw::NavigationPage, adw::HeaderBar) {
+    let header = adw::HeaderBar::new();
     let tv = adw::ToolbarView::new();
-    tv.add_top_bar(&adw::HeaderBar::new());
+    tv.add_top_bar(&header);
     tv.set_content(Some(&body(content)));
     if let Some(b) = bottom {
         let bar = gtk::Box::builder()
@@ -73,7 +83,16 @@ pub fn nav_page(title: &str, content: &impl IsA<gtk::Widget>, bottom: Option<&gt
         bar.append(b);
         tv.add_bottom_bar(&bar);
     }
-    adw::NavigationPage::builder().title(title).child(&tv).build()
+    (adw::NavigationPage::builder().title(title).child(&tv).build(), header)
+}
+
+/// A left-aligned wrapping label (form hints, provider descriptions).
+pub fn start_label(text: &str, classes: &[&str]) -> gtk::Label {
+    let l = gtk::Label::builder().label(text).wrap(true).xalign(0.0).build();
+    for c in classes {
+        l.add_css_class(c);
+    }
+    l
 }
 
 /// A row that opens a web page (used for the Google Cloud steps).
@@ -150,6 +169,8 @@ const CSS: &str = "
 .feature-icon { border-radius: 999px; padding: 8px; color: @accent_color; background-color: alpha(@accent_bg_color, 0.16); }
 .drop-zone { border: 2px dashed alpha(@window_fg_color, 0.18); border-radius: 18px; margin: 24px; }
 columnview.files row { min-height: 40px; }
+.provider-row { padding: 10px 12px; }
+.own-folder { color: @success_color; }
 ";
 
 /// Loads the app's small stylesheet (status pills, cards, the Home hero, drop zones).

@@ -343,6 +343,8 @@ enum Phase {
   final String wire;
 
   static Phase? parse(String? s) {
+    // The provider-neutral name the engine may use for a missing top folder.
+    if (s == 'remote_folder_missing') return driveFolderMissing;
     for (final v in values) {
       if (v.wire == s) return v;
     }
@@ -373,7 +375,7 @@ class Upload {
   int get hashCode => Object.hash(path, sent, total);
 }
 
-/// Google Drive storage of the signed-in account, in bytes.
+/// Cloud storage of the signed-in account, in bytes.
 @immutable
 class Quota {
   const Quota({this.limit, required this.usage, required this.usageInDrive});
@@ -381,7 +383,7 @@ class Quota {
   /// null = unlimited.
   final int? limit;
 
-  /// Everything counted against the limit (Drive, Gmail, Photos).
+  /// Everything counted against the limit (for Google: Drive, Gmail, Photos).
   final int usage;
   final int usageInDrive;
 

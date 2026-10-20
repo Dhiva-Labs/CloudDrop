@@ -1,5 +1,5 @@
-/// The first-run assistant: Welcome -> Google key (only without a built-in client) ->
-/// Folder -> Sign in -> Done (`gui/src/setup.rs`).
+/// The first-run assistant: Welcome -> where to upload -> Google key (only Google without a
+/// built-in client) -> Folder -> Sign in (or a form's Connect) -> Done (`gui/src/setup.rs`).
 library;
 
 import 'dart:async';
@@ -9,6 +9,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../data/engine_api.dart';
+import '../data/providers.dart';
 import '../data/system_actions.dart';
 import 'app_controller.dart';
 
@@ -168,13 +169,20 @@ class SignInFlow extends ChangeNotifier {
   }
 }
 
-enum SetupStep { welcome, key, folder, signIn, done }
+enum SetupStep { welcome, provider, key, folder, signIn, done }
 
 enum ServiceStart { starting, running, failed }
 
+/// Test Connection on a form provider's page.
+enum ConnectionTest { idle, testing, ok, failed }
+
 class SetupController extends ChangeNotifier {
-  SetupController(this.app, {String? lockedRoot, bool startAtSignIn = false})
-    : signIn = SignInFlow(app.engine, app.services.system) {
+  SetupController(
+    this.app, {
+    String? lockedRoot,
+    bool startAtSignIn = false,
+    this.switching = false,
+  }) : signIn = SignInFlow(app.engine, app.services.system) {
     final cfg = app.config;
     final existingKey = cfg != null && cfg.hasClient;
     if (existingKey) {
@@ -186,6 +194,9 @@ class SetupController extends ChangeNotifier {
     folder = lockedRoot ?? cfg?.syncDir ?? app.paths.defaultSyncDir;
     folderLocked = lockedRoot != null;
     driveFolder = cfg?.driveFolder ?? 'CloudDrop';
+    final current = app.provider;
+    chosen = providers.firstWhere((p) => p.id == current.id, orElse: () => providers.first);
+    _fillSaved();
     signIn.addListener(notifyListeners);
     // After signing out the assistant has nothing to ask but the sign-in.
     if (startAtSignIn) _index = steps.indexOf(SetupStep.signIn);
@@ -193,6 +204,30 @@ class SetupController extends ChangeNotifier {
 
   final AppController app;
   final SignInFlow signIn;
+
+  /// Moving CloudDrop to another provider (Settings › Switch Provider…): no welcome, a way out
+  /// until something is written, and everything uploads again at the end.
+  final bool switching;
+
+  // ---------- provider page ----------
+
+  List<CloudProvider> get providers =>
+      app.providers.isEmpty ? const [CloudProvider.google] : app.providers;
+
+  /// Where to upload.
+  late CloudProvider chosen;
+
+  /// The provider CloudDrop uploads to now.
+  CloudProvider get current => app.provider;
+
+  void choose(CloudProvider p) {
+    if (p.id == chosen.id) return;
+    chosen = p;
+    _fillSaved();
+    _clearTest();
+    setupError = null;
+    notifyListeners();
+  }
 
   // The Google key.
   String clientId = '';
@@ -214,8 +249,9 @@ class SetupController extends ChangeNotifier {
   // Steps.
   int _index = 0;
   List<SetupStep> get steps => [
-    SetupStep.welcome,
-    if (!app.hasBuiltinClient) SetupStep.key,
+    if (!switching) SetupStep.welcome,
+    SetupStep.provider,
+    if (chosen.isGoogle && !app.hasBuiltinClient) SetupStep.key,
     SetupStep.folder,
     SetupStep.signIn,
     SetupStep.done,
@@ -226,6 +262,19 @@ class SetupController extends ChangeNotifier {
   int get stepCount => steps.length;
 
   bool get canGoBack => index > 0 && step != SetupStep.done;
+
+  /// Switching providers can be called off until the new provider's settings are written.
+  bool get canCancel => switching && !_switchStarted && step != SetupStep.done;
+
+  /// The header label of the current step.
+  String get stepLabel => switch (step) {
+    SetupStep.welcome => 'Welcome',
+    SetupStep.provider => 'Upload to',
+    SetupStep.key => 'Google key',
+    SetupStep.folder => 'Folders',
+    SetupStep.signIn => chosen.stepLabel,
+    SetupStep.done => 'Done',
+  };
 
   void next() {
     if (_index < steps.length - 1) {
@@ -242,6 +291,13 @@ class SetupController extends ChangeNotifier {
       _index--;
       notifyListeners();
     }
+  }
+
+  /// Leaves the assistant without changing anything ([canCancel]).
+  void cancel() {
+    if (!canCancel) return;
+    signIn.cancel();
+    app.cancelSetup();
   }
 
   // ---------- key page ----------
@@ -325,23 +381,105 @@ class SetupController extends ChangeNotifier {
     }
   }
 
+  // ---------- sign-in page: Nextcloud's server, a form's fields ----------
+
+  /// The Nextcloud/ownCloud server ([SignInKind.nextcloud]).
+  String serverUrl = '';
+
+  bool get serverValid => looksLikeUrl(serverUrl);
+
+  void setServerUrl(String v) {
+    serverUrl = v;
+    setupError = null;
+    notifyListeners();
+  }
+
+  /// What the form's fields hold, by key ([SignInKind.form]).
+  final Map<String, String> fieldValues = {};
+
+  String fieldValue(String key) => fieldValues[key] ?? '';
+
+  void setField(String key, String v) {
+    fieldValues[key] = v;
+    _clearTest();
+    notifyListeners();
+  }
+
+  /// Picks a file for a [FieldKind.file] field (an SSH key).
+  Future<void> chooseFieldFile(ProviderField f) async {
+    final path = await app.services.system.pickFile(title: f.label);
+    if (path != null) setField(f.key, path);
+  }
+
+  /// Every field can be saved.
+  bool get formValid => chosen.fields.every((f) => f.problem(fieldValue(f.key)) == null);
+
+  ConnectionTest test = ConnectionTest.idle;
+  String? testMessage;
+
+  void _clearTest() {
+    test = ConnectionTest.idle;
+    testMessage = null;
+  }
+
+  /// Settings saved for the chosen provider earlier (signed out, or set up again) prefill
+  /// the page; secrets never come back.
+  void _fillSaved() {
+    final saved = app.config?.sections[chosen.id] ?? const <String, String>{};
+    fieldValues.clear();
+    for (final f in chosen.fields) {
+      final v = saved[f.key];
+      if (v != null && f.kind != FieldKind.secret) fieldValues[f.key] = v;
+    }
+    serverUrl = saved['url'] ?? '';
+  }
+
   // ---------- sign-in page ----------
 
   String? setupError;
   bool settingUp = false;
+  bool _switchStarted = false;
 
-  Future<ActionResult> _runSetup() => app.engine.setup(
-    folder: folder,
-    driveFolder: driveFolder.trim(),
-    clientJsonPath: keyFile,
-    clientId: app.hasBuiltinClient || (hasStoredSecret && keyFile == null) ? null : clientId.trim(),
-    clientSecret: app.hasBuiltinClient || (hasStoredSecret && keyFile == null)
-        ? null
-        : clientSecret.trim(),
-  );
+  /// `--provider` only where the config's provider changes, so a Google setup runs exactly
+  /// the command it always did.
+  String? get _providerArg => chosen.isGoogle && current.isGoogle ? null : chosen.id;
 
-  /// Writes the config, then signs in with Google. Moves on when signed in.
-  Future<void> signInWithGoogle() async {
+  Future<ActionResult> _runSetup() async {
+    if (switching && !_switchStarted) {
+      // The old provider's engine must not upload into a database that is about to move on.
+      _switchStarted = true;
+      await app.engine.serviceStop();
+    }
+    final google = chosen.isGoogle;
+    final keepKey = app.hasBuiltinClient || (hasStoredSecret && keyFile == null);
+    return app.engine.setup(
+      folder: folder,
+      driveFolder: driveFolder.trim(),
+      clientJsonPath: google ? keyFile : null,
+      clientId: !google || keepKey ? null : clientId.trim(),
+      clientSecret: !google || keepKey ? null : clientSecret.trim(),
+      provider: _providerArg,
+      settings: switch (chosen.signIn) {
+        SignInKind.nextcloud => {'url': serverUrl.trim()},
+        SignInKind.form => {
+          for (final f in chosen.fields)
+            if (f.kind != FieldKind.secret && fieldValue(f.key).trim().isNotEmpty)
+              f.key: fieldValue(f.key).trim(),
+        },
+        SignInKind.google || SignInKind.oauth => const {},
+      },
+      secrets: {
+        if (chosen.signIn == SignInKind.form)
+          for (final f in chosen.fields)
+            if (f.kind == FieldKind.secret && fieldValue(f.key).isNotEmpty)
+              f.key: fieldValue(f.key),
+      },
+    );
+  }
+
+  /// Writes the config, then signs in in the browser (Google, OAuth, Nextcloud). Moves on
+  /// when signed in.
+  Future<void> signInWithBrowser() async {
     setupError = null;
     settingUp = true;
     notifyListeners();
@@ -353,7 +491,7 @@ class SetupController extends ChangeNotifier {
       return;
     }
     final ok = await signIn.start();
-    if (ok && step == SetupStep.signIn) next();
+    if (ok && step == SetupStep.signIn) await _connected();
   }
 
   /// Already signed in: just write the config and move on.
@@ -368,10 +506,50 @@ class SetupController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    next();
+    await _connected();
   }
 
-  bool get alreadySignedIn => app.engineStatus?.signedIn ?? false;
+  /// Signed in to the provider CloudDrop uploads to now (the sign-in there still works).
+  bool get alreadySignedIn =>
+      (app.engineStatus?.signedIn ?? false) && chosen.id == current.id && !switching;
+
+  /// Saves the form's settings and secrets, then asks the engine to connect (`check`).
+  Future<void> testConnection() async {
+    if (!formValid || test == ConnectionTest.testing) return;
+    setupError = null;
+    test = ConnectionTest.testing;
+    testMessage = null;
+    notifyListeners();
+    var r = await _runSetup();
+    if (r.ok) r = await app.engine.check();
+    test = r.ok ? ConnectionTest.ok : ConnectionTest.failed;
+    testMessage = r.ok
+        ? (r.message.trim().isEmpty ? 'Connected to ${chosen.name}.' : r.message.trim())
+        : r.message;
+    notifyListeners();
+  }
+
+  /// Continue after a successful Test Connection.
+  Future<void> continueConnected() async {
+    if (test != ConnectionTest.ok) return;
+    await _connected();
+  }
+
+  /// The new provider works: when switching, everything goes up again; then Done.
+  Future<void> _connected() async {
+    if (switching) {
+      settingUp = true;
+      notifyListeners();
+      final r = await app.engine.resetCloud();
+      settingUp = false;
+      if (!r.ok) {
+        setupError = r.message;
+        notifyListeners();
+        return;
+      }
+    }
+    if (step == SetupStep.signIn) next();
+  }
 
   // ---------- done page ----------
 
