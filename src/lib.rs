@@ -9,6 +9,7 @@ pub mod dropbox;
 pub mod engine;
 pub mod hash;
 pub mod jobs;
+pub mod mega;
 pub mod notifier;
 pub mod oauth;
 pub mod onedrive;
@@ -59,6 +60,11 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
             let secrets = sftp::Secrets::from_map(&secrets.unwrap_or_default());
             let client = sftp::Sftp::new(cfg.sftp.clone(), secrets, Some(config::config_path()));
             Arc::new(remote::Remote::Sftp(client))
+        }
+        // The session lives in credentials.json next to the token file (the data directory).
+        remote::Provider::Mega => {
+            let data_dir = token_file.parent().map(PathBuf::from).unwrap_or_default();
+            Arc::new(remote::Remote::Mega(mega::Mega::new(drive::http_client(), &cfg.mega, &data_dir)))
         }
     }
 }

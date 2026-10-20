@@ -12,6 +12,7 @@ pub mod onedrive_mock;
 pub mod dropbox_mock;
 pub mod webdav_mock;
 pub mod s3_mock;
+pub mod mega_mock;
 
 use axum::Router;
 use axum::body::Bytes;

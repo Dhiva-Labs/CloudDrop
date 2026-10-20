@@ -695,6 +695,7 @@ dependencies = [
 name = "clouddrop"
 version = "0.2.0"
 dependencies = [
+ "aes",
  "anyhow",
  "axum",
  "base64",
@@ -710,6 +711,8 @@ dependencies = [
  "mime_guess",
  "notify",
  "notify-rust",
+ "num-bigint",
+ "pbkdf2",
  "rand",
  "reqwest",
  "rusqlite",
