@@ -28,7 +28,7 @@ Least privilege wherever the provider allows it: today CloudDrop only sees the f
 | **Other WebDAV** | URL, user, app password | one folder | none: a failed upload starts over | none → verify by download | keep-aside copy (`COPY`) | `quota-*-bytes` if offered | S (after Nextcloud) |
 | **S3-compatible** (AWS, Backblaze B2, Wasabi, R2, MinIO, Garage) | endpoint, bucket, access key | a key scoped to one bucket + prefix | multipart, resume via `ListParts` | `x-amz-checksum-sha256` where supported, else single-part ETag (MD5), else verify by download | bucket versioning, else keep-aside copy | none ("CloudDrop holds …") | M |
 | **SFTP** | host-key check (shown, trust on first use), SSH key or agent | one directory | write at offset | none → `sha256sum` over SSH if allowed, else verify by download | keep-aside copy | `statvfs@openssh.com` | M |
-| **MEGA** | email + password (+2FA) → session | whole account (no app folder), one folder used | via SDK | none server-side (end-to-end encrypted) → verify by download | MEGA versioning; keep-aside copy | account quota | L |
+| **MEGA** (built, see [MEGA](#mega)) | email + password (+2FA) → session | whole account (no app folder), one folder used | upload URL + local record of confirmed chunks | none server-side (end-to-end encrypted) → verify by download (plus MEGA's MAC) | keep-aside copy (server-side); MEGA versioning too | account quota | L |
 | **Proton Drive** | Proton login (SRP, 2FA, maybe a second password) → session | whole account, one folder used | via SDK (encrypted blocks) | via SDK (signed manifests; plaintext digest in encrypted attributes) or verify by download | revisions; keep-aside copy | account quota | XL, blocked (below) |
 
 S/M/L/XL are relative sizes once the provider seam (phase 0) exists.
@@ -60,11 +60,8 @@ change it to "trust a completed upload" (size check only), with a clear warning.
   setup.
 - **SFTP.** Upload to `.clouddrop-<id>.part` and rename into place, so a half-written file never
   looks complete. Pin the host key in the config.
-- **MEGA.** The official C++ SDK is BSD-2 licensed and does the crypto, transfers and resume,
-  but it is a large C++ build (SWIG bindings, its own dependencies) that has to be vendored for
-  the offline PPA build and cross-built for Windows. The other option is a native Rust client of
-  MEGA's protocol (community crates exist, maturity varies). **Decide with a one-week spike**:
-  resume after a crash, 10 GB files, 2FA, session reuse.
+- **MEGA.** Decided by the spike: a native Rust client of MEGA's API, not the C++ SDK. See
+  [MEGA](#mega) below.
 - **Proton Drive.** Proton's SDK (JavaScript and C#, with Swift and Kotlin bindings) is **not
   yet supported for third-party integrations**. Authentication isn't in it yet, and general
   availability with a new cryptographic model is targeted for end 2026 / early 2027. Proton has
@@ -280,6 +277,112 @@ The engine reads `Capabilities` and does the rest; providers don't touch `engine
 - **The existing e2e tests (`tests/e2e.rs`) run once per provider.**
 - **Self-hosted backends run for real in CI** (Nextcloud, MinIO and OpenSSH containers), which is
   cheap and catches more than a mock.
+
+## MEGA
+
+Status: **built** (`src/mega.rs`), tested against a fake MEGA, **not yet tried against a real
+account** (none was created for this). Needs the engine's verify-by-download for freeing space.
+
+### Decision: a native client of MEGA's API
+
+MEGA encrypts everything on the client, so CloudDrop has to do MEGA's cryptography itself. The
+spike compared:
+
+| | Sign-in, 2FA, session reuse | Resume after a crash | Ranges (placeholders) | Copy (keep_version) | Build |
+| --- | --- | --- | --- | --- | --- |
+| MEGA's C++ SDK (BSD-2) | yes | yes | yes | yes | large C++ build to vendor for the PPA and cross-build for Windows |
+| `mega` crate 0.8.0 (MIT/Apache, last release Oct 2024) | yes | no: one request per file | no: whole files | no | ~30 crates, several a second version of ours (reqwest 0.12, rand 0.8, sha2 0.10, base64 0.22, thiserror 1) |
+| **Native client (chosen)** | yes | yes | yes | yes | three pure-Rust crates: `aes`, `pbkdf2`, `num-bigint` |
+
+The native client is the dozen API commands CloudDrop needs (`us0`/`us` sign-in, `f` tree, `u`
+upload URL, `p` create nodes, `a` rename, `m` move, `g` download URL, `uq` quota). It follows
+MEGA's C++ SDK, which is BSD-2 and has unit-test vectors. MEGA's web client source is under a
+review-only licence, so it was not used. The new crates are the versions the SFTP session's
+`russh` already pulls (`aes` 0.9.3, `pbkdf2` 0.13 with `hmac` 0.13, `num-bigint` 0.5.1), and
+the PPA's `crates-*.tar.xz` needs regenerating (`packaging/vendor/make-crates.sh`).
+
+### How it fits the contract
+
+- **Sign-in** is a form: e-mail (`[mega] email`), password and an optional 2FA code (both
+  secrets). The first connection, such as `clouddrop check`, signs in and **replaces them with the
+  session**: `sid`, the account's master key and user handle, in `credentials.json` (readable
+  only by you). The password is never kept. It is also dropped after a rejected sign-in, so a
+  wrong password or code means running setup again. The master key is what decrypts names and
+  file keys, so it is as sensitive as the session. Ending sessions on mega.nz ("log out of other
+  devices") revokes it; CloudDrop then asks for sign-in. MEGA sometimes asks for a proof of work
+  at sign-in (HTTP 402 with `X-Hashcash`), which the client does (a few seconds of SHA-256).
+- **Capabilities:** `hash: None`, because MEGA's fingerprint (a sparse CRC plus the mtime) is no
+  proof, so freeing space verifies by download, and the download also checks MEGA's own MAC.
+  `pin_versions: false`, `stable_ids: true` (node handles), `resumable: true`, case-sensitive,
+  no forbidden characters, `chunk_unit` 1 MiB.
+- **Ids:** handles survive renames and moves. **Replacing content makes a new node** with a new
+  handle (MEGA has no in-place update); `Done(meta)` carries it.
+- **keep_version** makes a server-side copy, `<stem> (replaced YYYY-MM-DD).<ext>` (UTC date),
+  with the same key, so nothing is uploaded again. A copy already there for that key is not made
+  twice.
+- **MEGA's own versioning:** the replacing upload names the old file as its previous version
+  (`ov`). With versioning on (MEGA's default), the old content also stays in the file's version
+  history, which counts towards storage. With it off, MEGA drops the old content on replace. The
+  keep-aside copy is what CloudDrop relies on, so the setting doesn't matter for its promises.
+- **Uploads:** `start_upload` gets an upload URL and picks the file's AES key and nonce. The
+  session string is JSON with the URL, key, nonce, size, target and name. Each `put_chunk`
+  encrypts (AES-CTR), computes MEGA's chunk MACs, and POSTs up to the last MEGA chunk boundary in
+  the data (128 KiB, 256 KiB … then every 1 MiB), returning `Next(boundary)`; the engine re-reads
+  the tail. The server doesn't say what it holds, so after each confirmed POST the client records
+  the offset and the MAC so far in `mega-uploads/<id>.json` in the data directory: that is what
+  `query_upload` answers after a crash. The last POST answers a completion token, then `p`
+  creates the node. A retry of that step first looks for a node with the file's key, so a lost
+  answer doesn't make a second file. Records of abandoned uploads are removed after 30 days. An
+  upload server that can't continue (`-4`) or an expired URL is `NotFound`, so the engine starts
+  over.
+- **Downloads:** `download` decrypts, checks the MAC (a mismatch is a Permanent error) and
+  returns the SHA-256. `download_range` decrypts CTR from the 16-byte block holding the start.
+  Download URLs are reused for 5 minutes.
+- **The tree:** `f` fetches the whole tree, cached for 30 seconds; the client's own changes update
+  the cache at once, and an unknown handle fetches again, at most every 5 seconds. So changes made
+  elsewhere, such as a file moved to the rubbish bin on the web, show up within 30 seconds.
+  Anything under the rubbish bin is `trashed`.
+- **Quota:** `uq` (limit, usage including versions, usage of the cloud drive).
+- **web_url:** `https://mega.nz/fm/<handle>` for folders. Files get none: MEGA's web app has no
+  address for a single file of your own, only share links.
+- **Errors:** `-15` ESID and `-26` (2FA) → Auth; `-3` EAGAIN (retried twice first), `-4`, `-6`,
+  `-19`, HTTP 429/509 → RateLimited; `-17`, `-24`, `-29` → Quota; `-9` ENOENT → NotFound; `-18`,
+  5xx, network → Transient; anything else → Permanent, with a short sentence.
+
+### Not done yet
+
+- **A real account.** Everything was checked against the SDK's sources and a fake, not MEGA
+  itself. The likeliest to need a fix: the upload servers' answers (empty or `"0"`, text or
+  binary token), `ov` details, the hashcash header, and `f` for very large accounts.
+- **Incremental updates.** No `sc` action packets: the tree is fetched whole, which is heavy for
+  accounts with hundreds of thousands of items.
+- No fingerprint attribute (`c`) on uploads, so MEGA's apps can't deduplicate against them, and no
+  thumbnails. Uploads don't send the SDK's `d=` checksum; they rely on HTTPS.
+- Items the client can't decrypt (in folders shared with the account, or keyed with keys it
+  doesn't hold) are skipped. Accounts without an RSA key pair are refused with a message.
+- The master key is kept as is (file permissions only). The SDK can also wrap it with a key the
+  server holds; not done.
+- Chunks must be at least 1 MiB (anything smaller is a clear Permanent error, not a stall).
+
+### How it was tested
+
+- **Cryptography** (`src/mega.rs` unit tests): AES-CTR and chunk MACs against the SDK's
+  `CtrCrypt_RegressionVectors`; the v2 PBKDF2 keys against OpenSSL (Node and Python); the v1 key
+  derivation, the MAC fold, attributes and hashcash nonces (on the SDK's test tokens) against
+  independent Python ports of the SDK's code. Those last ones are self-consistency only: MEGA
+  publishes no vectors for them. Also round trips, chunk boundaries, RSA (CRT) decryption and
+  error mapping.
+- **A fake MEGA** (`tests/common/mega_mock.rs`) does the server side with its own small crypto
+  (salted sign-in, RSA-wrapped session id, hashcash, 2FA), accepts only whole MEGA chunks, and
+  can decrypt what was uploaded and check its MAC independently. `tests/mega.rs` covers: sign-in
+  with a proof of work, keeping only the session, session reuse and ended sessions; wrong
+  password and 2FA codes; an upload resumed by a new process after a simulated crash (only the
+  rest is sent); whole and ranged downloads; empty files; keep_version, then replacing (old
+  content kept twice: copy and version); renames, moves, rubbish bin, missing parents; EAGAIN,
+  rate limits, full storage, an upload server giving up, chunks too small; and the engine
+  uploading a folder into the fake.
+- Not run here: real MEGA, clippy (CI runs it), the Windows build (no new C code; the crates are
+  pure Rust).
 
 ## Open questions
 

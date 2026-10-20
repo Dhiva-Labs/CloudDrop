@@ -36,6 +36,8 @@ pub struct Config {
     pub chunk_size: usize,
     #[serde(skip_serializing_if = "Endpoints::is_default")]
     pub endpoints: Endpoints,
+    #[serde(default, skip_serializing_if = "crate::mega::MegaConfig::is_default")]
+    pub mega: crate::mega::MegaConfig,
 }
 
 /// Google endpoints; overridable so tests can point at a local fake.
@@ -86,6 +88,7 @@ impl Default for Config {
             keep_local: Vec::new(),
             chunk_size: DEFAULT_CHUNK,
             endpoints: Endpoints::default(),
+            mega: Default::default(),
         }
     }
 }
