@@ -3,7 +3,9 @@ library;
 
 import 'dart:async';
 
+import 'package:clouddrop_app/data/app_prefs.dart';
 import 'package:clouddrop_app/data/cli_runner.dart';
+import 'package:clouddrop_app/data/connections.dart';
 import 'package:clouddrop_app/data/engine_api.dart';
 import 'package:clouddrop_app/data/models.dart';
 import 'package:clouddrop_app/data/paths.dart';
@@ -100,9 +102,23 @@ class FakeLogin implements LoginSession {
   }
 }
 
+/// The last part of a path, Windows or POSIX.
+String baseName(String path) => (path.contains('\\') ? p.windows : p.posix).basename(path);
+
 /// Records what the UI asks the engine to do; answers come from the public fields.
+///
+/// It is the default connection's engine; [forConnection] gives another connection's, a
+/// [FakeEngine] of its own (in [views]) whose calls also land in the shared [log].
 class FakeEngine implements EngineApi {
-  FakeEngine({this.statusValue, this.config});
+  FakeEngine({this.statusValue, this.config}) : connection = Connection.defaultName, _root = null;
+
+  FakeEngine._view(FakeEngine root, this.connection) : _root = root;
+
+  final FakeEngine? _root;
+  FakeEngine get root => _root ?? this;
+
+  @override
+  final String connection;
 
   EngineStatus? statusValue;
   AppConfig? config;
@@ -111,13 +127,132 @@ class FakeEngine implements EngineApi {
 
   /// What `providers --json` lists.
   List<CloudProvider> providerList = const [CloudProvider.google];
+
+  /// This connection's calls.
   final calls = <String>[];
+
+  /// Every connection's calls, as "connection: call" (on the root).
+  final log = <String>[];
   final logins = <FakeLogin>[];
   ActionResult Function(String call) result = (c) => ActionResult(true, 'Done: $c');
 
+  /// The other connections' engines, by name.
+  final Map<String, FakeEngine> views = {};
+
+  /// What `connections --json` lists; null: the default connection, once it has a config (as
+  /// the CLI, which lists a connection once its config file exists).
+  List<Connection>? connectionList;
+
+  /// false: an engine from before connections (`connections --json` fails).
+  bool connectionsSupported = true;
+
   ActionResult _do(String call) {
     calls.add(call);
+    root.log.add('$connection: $call');
     return result(call);
+  }
+
+  @override
+  EngineApi forConnection(String name) => view(name);
+
+  /// The engine of connection [name] (made on first use).
+  FakeEngine view(String name) {
+    final r = root;
+    if (name == Connection.defaultName) return r;
+    return r.views[name] ??= FakeEngine._view(r, name);
+  }
+
+  /// The connections as the CLI would list them now.
+  List<Connection> get listed {
+    final r = root;
+    final list = r.connectionList;
+    if (list != null) return list;
+    final folder = r.config?.syncDir ?? r.statusValue?.folder;
+    if (r.config == null && !(r.statusValue?.configured ?? false)) return const [];
+    return [
+      Connection(
+        name: Connection.defaultName,
+        label: folder == null ? 'CloudDrop' : baseName(folder),
+        folder: folder,
+        provider: r.statusValue?.provider ?? CloudProvider.google.id,
+        driveFolder: r.config?.driveFolder,
+        configured: r.statusValue?.configured ?? true,
+      ),
+    ];
+  }
+
+  @override
+  Future<List<Connection>?> connections() async =>
+      root.connectionsSupported ? List.of(listed) : null;
+
+  @override
+  Future<ActionResult> addConnection(
+    String name, {
+    required String folder,
+    required String driveFolder,
+    String? clientJsonPath,
+    String? clientId,
+    String? clientSecret,
+    String? provider,
+    Map<String, String> settings = const {},
+    Map<String, String> secrets = const {},
+  }) async {
+    final r = root;
+    var call = 'connections add $name folder=$folder drive=$driveFolder';
+    if (clientJsonPath != null) call += ' json=$clientJsonPath';
+    if (clientId != null) call += ' id=$clientId secret=$clientSecret';
+    if (provider != null) call += ' provider=$provider';
+    for (final e in settings.entries) {
+      call += ' --set ${e.key}=${e.value}';
+    }
+    for (final e in secrets.entries) {
+      call += ' --secret ${e.key}=${e.value}';
+    }
+    final res = r._do(call);
+    if (res.ok) {
+      r.connectionList = [
+        ...r.listed,
+        Connection(
+          name: name,
+          label: name,
+          folder: folder,
+          provider: provider ?? CloudProvider.google.id,
+          driveFolder: driveFolder,
+          configured: true,
+        ),
+      ];
+      final v = view(name);
+      v.statusValue ??= EngineStatus(
+        configured: true,
+        folder: folder,
+        driveFolder: driveFolder,
+        provider: provider,
+      );
+      v.config ??= AppConfig(
+        syncDir: folder,
+        driveFolder: driveFolder,
+        clientId: '',
+        hasClientSecret: false,
+      );
+    }
+    return res;
+  }
+
+  @override
+  Future<ActionResult> removeConnection(String name) async {
+    final r = root;
+    final res = r._do('connections remove $name');
+    if (res.ok) {
+      r.connectionList = [
+        for (final c in r.listed)
+          if (c.name != name) c,
+      ];
+      if (name == Connection.defaultName) {
+        r.config = null;
+        r.statusValue = const EngineStatus.unconfigured();
+      }
+    }
+    return res;
   }
 
   @override
@@ -270,6 +405,19 @@ class FakeSystem implements SystemActions {
 
 // ---------- a whole app wired to fakes ----------
 
+/// Another connection of a [TestApp]: its engine (a view of the app's), database and status.
+class TestConnection {
+  TestConnection(this.name, this.engine) : db = TestDb.memory() {
+    reader = db.reader();
+  }
+
+  final String name;
+  final FakeEngine engine;
+  final TestDb db;
+  late final StateReader reader;
+  final FakeStatus status = FakeStatus();
+}
+
 /// An [AppController] over an in-memory database and fakes, without the polling timer
 /// (tests call `poll()` themselves).
 class TestApp {
@@ -286,7 +434,8 @@ class TestApp {
     this.cloudFiles = false,
     StateReader? reader,
     CloudProvider? provider,
-  }) : syncDir = syncDir ?? (windows ? 'C:\\Users\\$windowsUser\\CloudDrop' : '/home/me/CloudDrop'),
+  }) : isWindows = windows,
+       syncDir = syncDir ?? (windows ? 'C:\\Users\\$windowsUser\\CloudDrop' : '/home/me/CloudDrop'),
        db = db ?? TestDb.memory(),
        engine = engine ?? FakeEngine(),
        statusSource = FakeStatus(daemon),
@@ -336,13 +485,15 @@ class TestApp {
                 homeDir: '/home/me',
               ),
         engine: this.engine,
-        db: reader ?? this.db.reader(),
+        db: _reader = reader ?? this.db.reader(),
         status: statusSource,
         system: system,
         searchDelay: Duration.zero,
         caseInsensitiveFs: false,
         cloudFilesSyncRoot: cloudFiles,
         pathExists: (path) async => onDisk.contains(path),
+        prefs: prefs,
+        connect: _connect,
       ),
     );
   }
@@ -352,6 +503,72 @@ class TestApp {
   final FakeStatus statusSource;
   final FakeSystem system;
   final String syncDir;
+  final bool isWindows;
+  late final StateReader _reader;
+
+  /// `app.json`, in memory.
+  final MemoryAppPrefs prefs = MemoryAppPrefs();
+
+  /// The other connections, by name (the default one is [db], [engine] and [statusSource]).
+  final Map<String, TestConnection> others = {};
+
+  ConnectionServices _connect(Connection c) {
+    if (c.isDefault) return ConnectionServices(engine: engine, db: _reader, status: statusSource);
+    final o = others[c.name] ??= TestConnection(c.name, engine.view(c.name));
+    return ConnectionServices(engine: o.engine, db: o.reader, status: o.status);
+  }
+
+  /// The default connection as `connections --json` lists it.
+  Connection get defaultConnection => engine.listed.firstWhere(
+    (c) => c.isDefault,
+    orElse: () => Connection(name: Connection.defaultName, label: baseName(syncDir)),
+  );
+
+  /// Adds another connection [name] uploading [folder] (by default a folder of that name next
+  /// to the default one's), set up and signed in, with its own database, engine and status.
+  TestConnection addConnection(
+    String name, {
+    String? folder,
+    CloudProvider provider = CloudProvider.google,
+    DaemonStatus? daemon,
+    bool signedIn = true,
+    String driveFolder = 'CloudDrop',
+  }) {
+    final ctx = isWindows ? p.windows : p.posix;
+    final dir = folder ?? ctx.join(ctx.dirname(syncDir), name);
+    final view = engine.view(name)
+      ..statusValue = EngineStatus(
+        configured: true,
+        signedIn: signedIn,
+        folder: dir,
+        driveFolder: driveFolder,
+        provider: provider.id,
+        providerName: provider.name,
+      )
+      ..config = AppConfig(
+        syncDir: dir,
+        driveFolder: driveFolder,
+        clientId: '',
+        hasClientSecret: false,
+      );
+    if (!engine.providerList.contains(provider)) {
+      engine.providerList = [...engine.providerList, provider];
+    }
+    final o = others[name] = TestConnection(name, view)..status.value = daemon;
+    engine.connectionList = [
+      ...engine.listed,
+      Connection(
+        name: name,
+        label: name,
+        folder: dir,
+        provider: provider.id,
+        providerName: provider.name,
+        driveFolder: driveFolder,
+        configured: true,
+      ),
+    ];
+    return o;
+  }
 
   /// Windows behaviour: freed items stay on disk as placeholders (the paths in [onDisk]).
   final bool cloudFiles;

@@ -9,6 +9,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import 'cli_runner.dart';
+import 'connections.dart';
 import 'models.dart';
 import 'providers.dart';
 
@@ -281,7 +282,40 @@ abstract class LoginSession {
 }
 
 /// What the UI needs from the engine. [CliEngineApi] is the real one; tests inject fakes.
+///
+/// Each instance works on one connection ([connection], passed as `--connection` to every
+/// command that concerns one); [forConnection] gives the same engine for another. The
+/// installation-wide commands (`connections`, `providers`, `service`) ignore it.
 abstract class EngineApi {
+  /// The connection the commands work on; null for an engine from before connections (it has
+  /// just the one and takes no `--connection`).
+  String? get connection;
+
+  /// The same engine, working on the connection [name].
+  EngineApi forConnection(String name);
+
+  /// Every connection (`connections --json`): the default one first, then by name; empty before
+  /// the first setup. null when the engine predates connections or can't be asked.
+  Future<List<Connection>?> connections();
+
+  /// `connections add NAME`: sets up a new connection uploading [folder] (no sign-in yet: that
+  /// is [forConnection]`(name).login()` or `.check()`). The arguments are [setup]'s.
+  Future<ActionResult> addConnection(
+    String name, {
+    required String folder,
+    required String driveFolder,
+    String? clientJsonPath,
+    String? clientId,
+    String? clientSecret,
+    String? provider,
+    Map<String, String> settings = const {},
+    Map<String, String> secrets = const {},
+  });
+
+  /// `connections remove NAME`: stops uploading it and forgets its settings and state. Nothing
+  /// in its folder or in the cloud is deleted.
+  Future<ActionResult> removeConnection(String name);
+
   /// Overall state (`status --json`, which also works before setup). Throws [CliUnavailable]
   /// when the CLI can't be run, [StateError] when it ran and complained.
   Future<EngineStatus> status();
@@ -346,11 +380,26 @@ abstract class EngineApi {
 
 /// Talks to the engine by running `clouddrop`.
 class CliEngineApi implements EngineApi {
-  CliEngineApi(this.runner);
+  CliEngineApi(this.runner, {this.connection});
 
   final CliRunner runner;
 
-  Future<ActionResult> _do(List<String> args) async {
+  @override
+  final String? connection;
+
+  @override
+  EngineApi forConnection(String name) =>
+      name == connection ? this : CliEngineApi(runner, connection: name);
+
+  /// [args] for this connection: `--connection NAME` first, so the CLI never picks one from the
+  /// working directory or a path.
+  List<String> _on(List<String> args) {
+    final c = connection;
+    return c == null ? args : ['--connection', c, ...args];
+  }
+
+  /// Runs an installation-wide command as is.
+  Future<ActionResult> _doAll(List<String> args) async {
     try {
       final r = await runner.run(args);
       return ActionResult(r.ok, r.message);
@@ -359,9 +408,51 @@ class CliEngineApi implements EngineApi {
     }
   }
 
+  /// Runs a command on this connection.
+  Future<ActionResult> _do(List<String> args) => _doAll(_on(args));
+
+  @override
+  Future<List<Connection>?> connections() async {
+    try {
+      final r = await runner.run(['connections', '--json'], timeout: const Duration(seconds: 30));
+      if (!r.ok) return null;
+      return parseConnections(r.stdout);
+    } on CliUnavailable {
+      return null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  @override
+  Future<ActionResult> addConnection(
+    String name, {
+    required String folder,
+    required String driveFolder,
+    String? clientJsonPath,
+    String? clientId,
+    String? clientSecret,
+    String? provider,
+    Map<String, String> settings = const {},
+    Map<String, String> secrets = const {},
+  }) => _withClientJson(
+    clientJsonPath,
+    clientId,
+    clientSecret,
+    (json) => _doAll([
+      'connections',
+      'add',
+      name,
+      ..._setupArgs(folder, driveFolder, json, provider, settings, secrets),
+    ]),
+  );
+
+  @override
+  Future<ActionResult> removeConnection(String name) => _doAll(['connections', 'remove', name]);
+
   @override
   Future<EngineStatus> status() async {
-    final r = await runner.run(['status', '--json'], timeout: const Duration(seconds: 30));
+    final r = await runner.run(_on(['status', '--json']), timeout: const Duration(seconds: 30));
     if (!r.ok) throw StateError(r.errorMessage);
     try {
       final j = jsonDecode(r.stdout);
@@ -374,7 +465,10 @@ class CliEngineApi implements EngineApi {
 
   @override
   Future<AppConfig?> configGet() async {
-    final r = await runner.run(['config', 'get', '--json'], timeout: const Duration(seconds: 30));
+    final r = await runner.run(
+      _on(['config', 'get', '--json']),
+      timeout: const Duration(seconds: 30),
+    );
     if (!r.ok) return null;
     try {
       final j = jsonDecode(r.stdout);
@@ -413,7 +507,42 @@ class CliEngineApi implements EngineApi {
     String? provider,
     Map<String, String> settings = const {},
     Map<String, String> secrets = const {},
-  }) async {
+  }) => _withClientJson(
+    clientJsonPath,
+    clientId,
+    clientSecret,
+    (json) => _do([
+      'setup',
+      '--no-login',
+      ..._setupArgs(folder, driveFolder, json, provider, settings, secrets),
+    ]),
+  );
+
+  /// What `setup` and `connections add` take.
+  List<String> _setupArgs(
+    String folder,
+    String driveFolder,
+    String? clientJsonPath,
+    String? provider,
+    Map<String, String> settings,
+    Map<String, String> secrets,
+  ) => [
+    '--folder=$folder',
+    '--drive-folder=$driveFolder',
+    if (clientJsonPath != null) '--client-json=$clientJsonPath',
+    if (provider != null) '--provider=$provider',
+    for (final e in settings.entries) ...['--set', '${e.key}=${e.value}'],
+    for (final e in secrets.entries) ...['--secret', '${e.key}=${e.value}'],
+  ];
+
+  /// Runs [body] with the Google key as a client JSON file: [clientJsonPath] as is, or a key
+  /// given as [clientId]/[clientSecret] written to a temporary file (never on the command line).
+  Future<ActionResult> _withClientJson(
+    String? clientJsonPath,
+    String? clientId,
+    String? clientSecret,
+    Future<ActionResult> Function(String? jsonPath) body,
+  ) async {
     Directory? tmp;
     try {
       var jsonPath = clientJsonPath;
@@ -427,16 +556,7 @@ class CliEngineApi implements EngineApi {
         );
         jsonPath = f.path;
       }
-      return await _do([
-        'setup',
-        '--no-login',
-        '--folder=$folder',
-        '--drive-folder=$driveFolder',
-        if (jsonPath != null) '--client-json=$jsonPath',
-        if (provider != null) '--provider=$provider',
-        for (final e in settings.entries) ...['--set', '${e.key}=${e.value}'],
-        for (final e in secrets.entries) ...['--secret', '${e.key}=${e.value}'],
-      ]);
+      return await body(jsonPath);
     } finally {
       if (tmp != null) {
         try {
@@ -447,7 +567,7 @@ class CliEngineApi implements EngineApi {
   }
 
   @override
-  LoginSession login() => _CliLogin(runner);
+  LoginSession login() => _CliLogin(runner, _on(['login', '--no-browser']));
 
   @override
   Future<ActionResult> check() => _do(['check']);
@@ -495,16 +615,16 @@ class CliEngineApi implements EngineApi {
   }
 
   @override
-  Future<ActionResult> serviceStart() => _do(['service', 'start']);
+  Future<ActionResult> serviceStart() => _doAll(['service', 'start']);
 
   @override
-  Future<ActionResult> serviceStop() => _do(['service', 'stop']);
+  Future<ActionResult> serviceStop() => _doAll(['service', 'stop']);
 
   @override
-  Future<ActionResult> serviceEnable() => _do(['service', 'enable']);
+  Future<ActionResult> serviceEnable() => _doAll(['service', 'enable']);
 
   @override
-  Future<ActionResult> serviceDisable() => _do(['service', 'disable']);
+  Future<ActionResult> serviceDisable() => _doAll(['service', 'disable']);
 
   @override
   Future<ActionResult> driveUrl(String path) => _do(['url', path]);
@@ -516,13 +636,14 @@ final RegExp _urlPattern = RegExp(r'https?://\S+');
 String? extractUrl(String line) => _urlPattern.firstMatch(line)?.group(0);
 
 class _CliLogin implements LoginSession {
-  _CliLogin(this._runner) {
+  _CliLogin(this._runner, this._args) {
     // Nobody may ask for the link (a cancelled sign-in); that is not an error.
     _url.future.ignore();
     _start();
   }
 
   final CliRunner _runner;
+  final List<String> _args;
   final _url = Completer<String>();
   final _done = Completer<ActionResult>();
   CliProcess? _proc;
@@ -531,7 +652,7 @@ class _CliLogin implements LoginSession {
   Future<void> _start() async {
     final CliProcess proc;
     try {
-      proc = await _runner.start(['login', '--no-browser']);
+      proc = await _runner.start(_args);
     } on CliUnavailable catch (e) {
       _fail(e.toString());
       return;

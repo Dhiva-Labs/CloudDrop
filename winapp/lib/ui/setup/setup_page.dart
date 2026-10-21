@@ -102,7 +102,7 @@ class _StepHeader extends StatelessWidget {
                   else
                     const SizedBox(width: 32),
                   const SizedBox(width: 8),
-                  Expanded(child: Text('Set up CloudDrop', style: theme.typography.bodyStrong)),
+                  Expanded(child: Text(controller.title, style: theme.typography.bodyStrong)),
                   Text(
                     'Step ${i + 1} of $n · $label',
                     style: theme.typography.caption?.copyWith(color: theme.secondaryText),
@@ -298,6 +298,9 @@ class _ProviderPage extends StatelessWidget {
           subtitle: c.switching
               ? 'Everything in your CloudDrop folder is uploaded again to the place you pick. '
                     'Nothing is deleted from ${c.current.name}.'
+              : c.adding
+              ? 'Pick the cloud the new folder uploads to. It can be another one than your '
+                    'other folders use.'
               : 'Pick the cloud CloudDrop uploads to. You can switch later in Settings.',
         ),
         const SizedBox(height: 20),
@@ -591,10 +594,17 @@ class _FolderPageState extends State<_FolderPage> {
   void initState() {
     super.initState();
     _drive = TextEditingController(text: c.driveFolder);
+    c.addListener(_sync);
+  }
+
+  /// A new folder's cloud folder takes the folder's name until the user types one.
+  void _sync() {
+    if (_drive.text != c.driveFolder) _drive.text = c.driveFolder;
   }
 
   @override
   void dispose() {
+    c.removeListener(_sync);
     _drive.dispose();
     super.dispose();
   }
@@ -607,7 +617,13 @@ class _FolderPageState extends State<_FolderPage> {
       builder: (context, _) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _title(context, 'Choose your folders'),
+          _title(
+            context,
+            'Choose your folders',
+            subtitle: c.adding
+                ? 'Pick a folder no other CloudDrop folder holds or is inside of.'
+                : null,
+          ),
           const SectionTitle('On this computer'),
           Surface(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -619,10 +635,10 @@ class _FolderPageState extends State<_FolderPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('CloudDrop folder'),
+                      Text(c.adding ? 'Folder to upload' : 'CloudDrop folder'),
                       const SizedBox(height: 2),
                       Text(
-                        c.app.paths.pretty(c.folder),
+                        c.folder.isEmpty ? 'No folder chosen yet' : c.app.paths.pretty(c.folder),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: theme.typography.caption?.copyWith(color: theme.secondaryText),
@@ -635,19 +651,27 @@ class _FolderPageState extends State<_FolderPage> {
                   message: c.folderLocked
                       ? "The folder can't be changed after CloudDrop has used it"
                       : 'Choose another folder',
-                  child: Button(
-                    onPressed: c.folderLocked ? null : c.chooseFolder,
-                    child: const Text('Change…'),
-                  ),
+                  child: c.adding && c.folder.isEmpty
+                      ? FilledButton(onPressed: c.chooseFolder, child: const Text('Choose…'))
+                      : Button(
+                          onPressed: c.folderLocked ? null : c.chooseFolder,
+                          child: const Text('Change…'),
+                        ),
                 ),
               ],
             ),
           ),
           const SizedBox(height: 6),
-          Text(
-            'It appears in File Explorer\'s sidebar, so you can open it like any other folder.',
-            style: theme.typography.caption?.copyWith(color: theme.secondaryText),
-          ),
+          if (c.folderProblem != null)
+            InfoBar(title: Text(c.folderProblem!), severity: InfoBarSeverity.warning)
+          else
+            Text(
+              c.adding && c.folder.isNotEmpty
+                  ? 'CloudDrop calls it “${c.newConnectionName}”. It appears in File '
+                        "Explorer's sidebar, so you can open it like any other folder."
+                  : 'It appears in File Explorer\'s sidebar, so you can open it like any other folder.',
+              style: theme.typography.caption?.copyWith(color: theme.secondaryText),
+            ),
           SectionTitle('In ${c.chosen.name}'),
           Text(
             'Your files appear in this folder in ${c.chosen.rootLabel}, with the same subfolders.',
@@ -1095,7 +1119,10 @@ class _DonePage extends StatelessWidget {
         ),
         const SizedBox(height: 20),
         Center(
-          child: Button(onPressed: c.openFolder, child: const Text('Open CloudDrop Folder')),
+          child: Button(
+            onPressed: c.openFolder,
+            child: Text(c.adding ? 'Open Folder' : 'Open CloudDrop Folder'),
+          ),
         ),
         const SizedBox(height: 12),
         Center(

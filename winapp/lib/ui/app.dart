@@ -18,6 +18,10 @@ import 'pages/settings_page.dart';
 import 'scope.dart';
 import 'setup/setup_page.dart';
 import 'theme.dart';
+import 'widgets/connection_switcher.dart';
+
+/// The window's title: "CloudDrop", or with several folders the one shown ("Work - CloudDrop").
+String windowTitle(AppController app) => app.several ? '${app.label} - CloudDrop' : 'CloudDrop';
 
 class CloudDropApp extends StatelessWidget {
   const CloudDropApp({
@@ -29,6 +33,7 @@ class CloudDropApp extends StatelessWidget {
     this.themeMode = ThemeMode.system,
     this.enableDrop = true,
     this.onBrightness,
+    this.onTitle,
   });
 
   final AppController app;
@@ -44,6 +49,9 @@ class CloudDropApp extends StatelessWidget {
 
   /// Called when the effective brightness changes (the window effect follows it).
   final void Function(Brightness brightness)? onBrightness;
+
+  /// Called when the window's title changes ([windowTitle]).
+  final void Function(String title)? onTitle;
 
   @override
   Widget build(BuildContext context) {
@@ -63,17 +71,18 @@ class CloudDropApp extends StatelessWidget {
         fontFamily: fontFamily,
         fontFamilyFallback: fontFamilyFallback,
       ),
-      home: _Root(app: app, enableDrop: enableDrop, onBrightness: onBrightness),
+      home: _Root(app: app, enableDrop: enableDrop, onBrightness: onBrightness, onTitle: onTitle),
     );
   }
 }
 
 class _Root extends StatefulWidget {
-  const _Root({required this.app, required this.enableDrop, this.onBrightness});
+  const _Root({required this.app, required this.enableDrop, this.onBrightness, this.onTitle});
 
   final AppController app;
   final bool enableDrop;
   final void Function(Brightness brightness)? onBrightness;
+  final void Function(String title)? onTitle;
 
   @override
   State<_Root> createState() => _RootState();
@@ -84,15 +93,25 @@ class _RootState extends State<_Root> {
   late final ActivityController _activity = ActivityController(widget.app);
   StreamSubscription<AppMessage>? _messages;
   Brightness? _reported;
+  String _title = 'CloudDrop';
 
   @override
   void initState() {
     super.initState();
     _messages = widget.app.messages.listen(_toast);
+    widget.app.addListener(_retitle);
+  }
+
+  void _retitle() {
+    final t = windowTitle(widget.app);
+    if (t == _title) return;
+    _title = t;
+    widget.onTitle?.call(t);
   }
 
   @override
   void dispose() {
+    widget.app.removeListener(_retitle);
     _messages?.cancel();
     _files.dispose();
     _activity.dispose();
@@ -167,18 +186,22 @@ class _GateState extends State<_Gate> {
     if (_setup != null || _making) return;
     _making = true;
     final app = widget.app;
-    final locked = await app.services.db.meta('sync_root');
+    final adding = app.setupAdding;
+    // A new folder has no database yet; the one shown now keeps its folder.
+    final locked = adding ? null : await app.db.meta('sync_root');
     if (!mounted) return;
     final atSignIn = app.setupAtSignIn;
     final switching = app.setupSwitching;
     app.setupAtSignIn = false;
     app.setupSwitching = false;
+    app.setupAdding = false;
     setState(() {
       _setup = SetupController(
         app,
         lockedRoot: locked,
         startAtSignIn: atSignIn,
         switching: switching,
+        adding: adding,
       );
       _making = false;
     });
@@ -361,7 +384,7 @@ class MainView extends StatelessWidget {
             displayMode: mode,
             size: const NavigationPaneSize(openWidth: 232, openMinWidth: 232),
             header: mode == PaneDisplayMode.top
-                ? null
+                ? (app.several ? ConnectionMenu(app: app) : null)
                 : Padding(
                     padding: const EdgeInsetsDirectional.fromSTEB(14, 6, 12, 10),
                     child: Row(
@@ -381,6 +404,8 @@ class MainView extends StatelessWidget {
             // The status, on every screen (the pane's search slot, when the pane is open).
             autoSuggestBox: mode == PaneDisplayMode.expanded ? _StatusChip(app: app) : null,
             items: [
+              // Several folders: each one with its status, above the screens.
+              if (mode != PaneDisplayMode.top) ...connectionPaneItems(context, app, mode),
               PaneItem(
                 icon: const Icon(FluentIcons.home),
                 title: const Text('Home'),
@@ -433,12 +458,7 @@ class _StatusChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = FluentTheme.of(context);
     final sum = summarize(app.snapshot);
-    final dot = switch (sum.icon) {
-      SummaryIcon.idle => theme.success.fg,
-      SummaryIcon.syncing => theme.accent.fg,
-      SummaryIcon.paused => theme.secondaryText,
-      SummaryIcon.attention => theme.caution.fg,
-    };
+    final dot = statusDotColor(theme, sum.icon);
     return Tooltip(
       message: sum.title,
       child: HoverButton(

@@ -56,6 +56,16 @@ class AppPaths {
   String get statusPath => _p.join(dataDir, 'status.json');
   String get tokenPath => _p.join(dataDir, 'token.json');
 
+  /// What the apps remember (`{"connection": name}`), for the whole installation.
+  String get appJsonPath => _p.join(dataDir, 'app.json');
+
+  /// A connection's `state.db` and `status.json`, in its data directory ([connectionDir]).
+  String dbPathIn(String connectionDir) => _p.join(connectionDir, 'state.db');
+  String statusPathIn(String connectionDir) => _p.join(connectionDir, 'status.json');
+
+  /// The path style of this system (Windows or POSIX).
+  p.Context get context => _p;
+
   /// Resolves everything from the environment. [env], [windows] and [exeDir] exist for tests.
   factory AppPaths.resolve({Map<String, String>? env, bool? windows, String? exeDir}) {
     final e = env ?? Platform.environment;
