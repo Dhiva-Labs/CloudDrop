@@ -494,7 +494,11 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _background(BuildContext context, AppController app) {
     final svc = app.service;
-    final running = app.snapshot.daemon != null;
+    // With several folders the service runs them all: one that isn't uploading (not signed in,
+    // say) doesn't mean the service is down.
+    final running = app.several
+        ? (svc?.running ?? app.snapshot.daemon != null)
+        : app.snapshot.daemon != null;
     return Column(
       children: [
         _SettingCard(

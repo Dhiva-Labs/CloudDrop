@@ -201,6 +201,16 @@ void main() {
     expect(find.text('Everything is uploaded'), findsOneWidget);
   });
 
+  uiTest('a folder that is not uploading does not make the service look stopped', (tester) async {
+    final t = twoFoldersApp(remember: 'Work');
+    t.others['Work']!.status.value = null; // signed out: its engine waits
+    await pumpApp(tester, t, size: const Size(1100, 1400));
+    t.controller.pane.value = AppPane.settings;
+    await tester.settle();
+    expect(find.text('Running'), findsOneWidget);
+    expect(find.text('Start'), findsNothing);
+  });
+
   uiTest('removing the only folder leads to the setup assistant', (tester) async {
     final t = calmApp();
     await pumpApp(tester, t, size: const Size(1100, 1400));
