@@ -2,8 +2,9 @@
 
 Status: **OneDrive, Dropbox, WebDAV, Nextcloud, S3-compatible storage, SFTP and MEGA are built**
 and tested against fake servers (SFTP against a real OpenSSH); none has been tried with a real
-account yet. Proton Drive waits for Proton's SDK, and several clouds at once (phase 5) isn't
-started. See [The providers](#the-providers) and [Phases](#phases).
+account yet. Proton Drive waits for Proton's SDK. Several clouds at once (phase 5) is designed in
+[Several clouds at once](#several-clouds-at-once). See [The providers](#the-providers) and
+[Phases](#phases).
 
 ## What must not change
 
@@ -625,6 +626,133 @@ The engine reads `Capabilities` and does the rest; providers don't touch `engine
 - Provider logos follow each brand's guidelines (Google, Microsoft, Dropbox, MEGA and Proton all
   publish them) and appear only where they name the destination.
 
+## Several clouds at once
+
+Phase 5: several folders uploading to several clouds side by side, e.g. `~/CloudDrop` to Google
+Drive and `~/Work` to a Nextcloud.
+
+### Connections
+
+A **connection** is one sync folder uploading to one provider, with that provider's settings,
+sign-in and state. It is exactly what an installation was until now: one config.toml and one data
+directory. An existing installation *is* the connection `default`, unchanged, with nothing to
+migrate. Every other connection lives beside it:
+
+| | Config | Data (state.db, status.json, token files, credentials.json, `mega-uploads/`, verify temp files) |
+| --- | --- | --- |
+| `default` | `config.toml`, as today (`CLOUDDROP_CONFIG`) | the data directory, as today (`CLOUDDROP_DATA_DIR`) |
+| `<name>` | `connections/<name>/config.toml`, in the directory of `config.toml` | `connections/<name>/` in the data directory |
+
+On Linux that's `~/.config/clouddrop/connections/work/config.toml` and
+`~/.local/share/clouddrop/connections/work/`; on Windows `%APPDATA%\clouddrop\connections\work\`
+and `%LOCALAPPDATA%\clouddrop\connections\work\`. With `CLOUDDROP_CONFIG=/x/config.toml`, the
+connections are in `/x/connections/`, so a sandbox holds all of them.
+
+Why a directory per connection rather than one config file with a section per connection: every
+reader there is (the engine, `Ctx`, the Nautilus extension, the Windows app, an older CLI) reads one
+config.toml and one state.db for one folder, and keeps doing so for each connection without a
+change. The list of connections is the list of directories, so there is no index to fall out of
+step with them; adding one is writing a file, removing one is deleting a directory, and a daemon
+notices both by looking.
+
+What belongs to the whole installation stays at the top of the data directory: `engine.lock` (one
+daemon), `daemon.json` (its heartbeat), `daemon.stop` (a request to stop it), `tray.lock` (one
+top-bar icon, which shows every connection) and the Windows agent's `agent.log`.
+
+- **Names**: 1 to 32 characters: letters, digits, spaces, `-`, `_` and `.`, starting with a letter
+  or digit and not ending in a space or dot. Unique ignoring case (Windows folders ignore case).
+  `default` is the default connection's; Windows device names (`con`, `nul`, `com1`…) are refused.
+- **Labels**: what the apps show. A connection's name, except `default`, which shows its folder's
+  name ("CloudDrop"). The apps name a connection they add after its folder ("Work").
+- **Folders**: two connections may not share or nest sync folders. `connections add` and `setup
+  --folder` refuse one that would; the daemon skips a connection whose folder overlaps one before it
+  (default first, then by name) and logs why.
+- **Order**: default first, then by name, ignoring case.
+
+### The engine
+
+There is still one daemon: the systemd user unit runs `clouddrop run`, the snap's `engine`
+autostart runs it, the Windows agent hosts it. It runs **one engine per connection**, each the
+engine as it was, with its own database, status.json, pause switch and sign-in, and nothing shared
+but the process (`daemon::supervise`):
+
+- Every 2 seconds it lists the connections. A connection that is configured and signed in gets an
+  engine; until then it waits, as the snap and the Windows agent always did for setup.
+- A connection whose config.toml is gone (`connections remove`) has its engine stopped. The others
+  carry on.
+- An engine that ends is started again: after a second when it stopped on request (meta `stop`,
+  which now means "restart this connection": `reset-cloud`, `keep`, `auto-free`, `logout`), after 5
+  seconds doubling to a minute when it failed (a database bound to another provider before
+  `reset-cloud`, a folder that can't be created).
+- `clouddrop service stop` (and Quit in the Windows tray) writes `daemon.stop`, or sends SIGTERM
+  through systemd; every engine stops and the daemon exits.
+- The daemon writes `daemon.json` (`{"pid", "updated_ms", "connections": [names]}`) every 2
+  seconds. `service status` and `control::daemon_running()` read it (or the default connection's
+  status.json, as an older daemon writes only that).
+- **Notifications name the connection**: a named connection's end in " (Work)" ("Uploaded to
+  Nextcloud (Work)"); the default connection's read as they always did.
+
+### The CLI
+
+- **`--connection NAME`** (any command). Without it: the connection whose folder holds the first
+  path argument, else the one whose folder holds the current directory, else `default`. So
+  `clouddrop free ~/Work/a.pdf` frees it in Work, and so does `clouddrop free a.pdf` in `~/Work`.
+  The apps always pass it.
+- **`clouddrop connections [--json]`** lists them:
+  `[{"name", "label", "folder", "provider", "provider_name", "drive_folder", "config", "data_dir",
+  "configured", "error"}]` (`error`: why the config can't be read, else null). A connection exists
+  once its config.toml does; on a new computer the list is empty.
+- **`clouddrop connections add NAME --folder DIR [--provider ID] [--set K=V]… [--secret K=V]…
+  [--drive-folder N] [--client-json F]`**: `setup --connection NAME --no-login` for a name not in
+  use, with a folder no other connection uses. Then `clouddrop login --connection NAME` (or `check`
+  for form providers). A new Google Drive connection takes the build's client, or the one another
+  connection already uses.
+- **`clouddrop connections remove NAME`**: deletes the connection's config.toml (the daemon stops
+  its engine within 2 seconds), waits for its status.json to go (10 seconds at most), then deletes
+  its config directory and data directory. The sync folder and everything in it stay, and nothing in
+  the cloud is touched; what CloudDrop knew (which files are cloud-only) is forgotten. Removing
+  `default` deletes config.toml and the state files of the data directory, not `connections/`.
+- **`status --json`** is today's object for the selected connection, plus `"connection"` and
+  `"label"`; without `--connection` (and outside other connections' folders) that's the default
+  connection, as before. **`status --json --all`** is an array of those objects, one per connection.
+- `setup` with a new `--connection` name creates it, like `connections add`. `logout` stops only
+  that connection's engine. `service` and `providers` are for the whole installation; `run` serves
+  every connection.
+
+### Windows
+
+- Each connection's folder is its own Cloud Files **sync root**, id `CloudDrop!<user SID>!<name>`.
+  The default connection's account name stays `default`, so today's registration is kept.
+- Each is in File Explorer's navigation pane under its name: "CloudDrop" for the default
+  connection (as today) and "CloudDrop - Work" for the others, the way OneDrive shows
+  "OneDrive - Personal".
+- A removed connection's sync root is unregistered by the agent (when it stops that engine, and at
+  start for any CloudDrop sync root without a connection), as on uninstall: files with their data
+  become ordinary files, and placeholders of freed files, which hold no data, are removed from the
+  folder; those files stay in the cloud. `clouddrop-agent --unregister` does every connection.
+- The notification-area menu lists the connections, each with its status and a submenu (Open
+  Folder, Open in …, Pause/Resume); the icon shows the most urgent state among them.
+
+### The apps
+
+The GTK app and the Windows app mirror each other:
+
+- **Connection switcher**: with more than one connection, a list of them with each one's status
+  dot (in the GTK header's start, in the Windows app's navigation pane above Home). Home, Files,
+  Activity and Settings show the selected one; the choice is remembered.
+- **"Add Another Folder…"** (in the switcher and in Settings) runs the setup assistant for a new
+  connection: provider, sign-in, folder (one no other connection uses), cloud folder. The connection
+  is named after its folder. Cancelling removes what it had written.
+- **Settings › "Remove This Folder…"** asks, then runs `connections remove`: the folder and the
+  cloud keep everything. The app switches to another connection, or to the setup assistant when it
+  was the last.
+- **Top-bar icon** (`tray/`): the most urgent state of all connections; the menu lists each
+  connection (its label and status line) with Open Folder, Open in …, and Pause/Resume, then Show
+  CloudDrop and Quit. With one connection the menu is as it was.
+- **Nautilus** (`nautilus/`): reads every connection's config and database, so emblems, the menu and
+  the CloudDrop column work in each sync folder; each item uses its folder's connection, and the
+  commands it runs carry `--connection`.
+
 ## Phases
 
 | Phase | What | Done when | Status |
@@ -634,7 +762,7 @@ The engine reads `Capabilities` and does the rest; providers don't touch `engine
 | 2 | **Self-hosted**: Nextcloud (first-class), generic WebDAV, S3-compatible, SFTP. Verify-by-download and keep-aside copy land here. | e2e against real servers in CI containers: Nextcloud, MinIO, OpenSSH. | built; tested on fakes and a real OpenSSH, not yet in CI containers |
 | 3 | **MEGA** (SDK or native, from the spike). | Resume, 2FA and verify-by-download tested; PPA and Windows builds reproducible. | built (native client); live account still to try |
 | 4 | **Proton Drive**, experimental, when third-party sign-in exists in the official SDK. | Proton's third-party terms met; their review if they require one. | waiting for Proton's SDK |
-| 5 | **Several clouds at once**: one engine per connection (own folder, config section, `state-<id>.db`, `status-<id>.json`); the apps get a connection switcher. | Two providers syncing side by side. | not started |
+| 5 | **Several clouds at once**: one engine per connection (own folder, config file and data directory, see [Several clouds at once](#several-clouds-at-once)); the apps get a connection switcher. | Two providers syncing side by side. | in progress |
 
 ## Testing
 
@@ -654,8 +782,6 @@ The engine reads `Capabilities` and does the rest; providers don't touch `engine
   so test that) or Dropbox first (simplest API)?
 - Is "verify by download" acceptable as the default for MEGA, WebDAV and SFTP, or is a size-only
   "trust upload" preferable for very large files?
-- Phase 5 (several clouds at once): is it wanted at all, or is one provider per installation
-  enough?
 
 ## Sources
 
