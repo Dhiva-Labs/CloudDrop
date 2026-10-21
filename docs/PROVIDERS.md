@@ -2,8 +2,8 @@
 
 Status: **OneDrive, Dropbox, WebDAV, Nextcloud, S3-compatible storage, SFTP and MEGA are built**
 and tested against fake servers (SFTP against a real OpenSSH); none has been tried with a real
-account yet. Proton Drive waits for Proton's SDK, and several clouds at once (phase 5) isn't
-started. See [The providers](#the-providers) and [Phases](#phases).
+account yet. **Proton Drive is built as experimental**, through Proton's own CLI, and only builds
+from source offer it. Several clouds at once (phase 5) isn't started. See [The providers](#the-providers) and [Phases](#phases).
 
 ## What must not change
 
@@ -30,7 +30,7 @@ Least privilege wherever the provider allows it: today CloudDrop only sees the f
 | **S3-compatible** (AWS, Backblaze B2, Wasabi, R2, MinIO, Garage) | endpoint, bucket, access key | a key scoped to one bucket + prefix | multipart, resume via `ListParts` | `x-amz-checksum-sha256` where supported, else single-part ETag (MD5), else verify by download | bucket versioning, else keep-aside copy | none ("CloudDrop holds …") | M |
 | **SFTP** | host-key check (shown, trust on first use), SSH key or agent | one directory | write at offset | none → `sha256sum` over SSH if allowed, else verify by download | keep-aside copy | `statvfs@openssh.com` | M |
 | **MEGA** (built, see [MEGA](#mega)) | email + password (+2FA) → session | whole account (no app folder), one folder used | upload URL + local record of confirmed chunks | none server-side (end-to-end encrypted) → verify by download (plus MEGA's MAC) | keep-aside copy (server-side); MEGA versioning too | account quota | L |
-| **Proton Drive** | Proton login (SRP, 2FA, maybe a second password) → session | whole account, one folder used | via SDK (encrypted blocks) | via SDK (signed manifests; plaintext digest in encrypted attributes) or verify by download | revisions; keep-aside copy | account quota | XL, blocked (below) |
+| **Proton Drive** | Proton login (SRP, 2FA, maybe a second password) → session | whole account, one folder used | via SDK (encrypted blocks) | via SDK (signed manifests; plaintext digest in encrypted attributes) or verify by download | revisions; keep-aside copy | account quota | built, experimental (below) |
 
 S/M/L/XL are relative sizes once the provider seam (phase 0) exists.
 
@@ -67,10 +67,9 @@ change it to "trust a completed upload" (size check only), with a clear warning.
   yet supported for third-party integrations**. Authentication isn't in it yet, and general
   availability with a new cryptographic model is targeted for end 2026 / early 2027. Proton has
   said third-party clients will eventually have to use the SDK or match its safety features.
-  Community Rust ports exist but are unofficial and early. **Plan: build everything else first,
-  and ship Proton as "experimental" once the official SDK supports third-party sign-in**,
-  through a small sidecar process if no C ABI is offered. Follow Proton's naming and branding
-  rules for third-party apps. Never store the Proton password, only the session.
+  Community Rust ports exist but are unofficial and early. **Done instead: an experimental
+  provider that runs Proton's official CLI** (built on the SDK), offered only by builds from
+  source, never by store, snap or PPA builds. See [Proton Drive](#proton-drive) below.
 
 ## The providers
 
@@ -434,10 +433,151 @@ the PPA's `crates-*.tar.xz` needs regenerating (`packaging/vendor/make-crates.sh
 
 ### Proton Drive
 
-Not built. Proton's SDK doesn't support third-party apps or their sign-in yet (general
-availability is targeted for the end of 2026 or early 2027), and an unofficial client could
-break with Proton's coming change of cryptography or put people's accounts at risk. It gets its
-`Provider` variant when the official SDK lets third-party apps sign in.
+Status: **built as experimental** (`src/proton.rs`), tested against a fake of Proton's CLI,
+**not yet tried against a real account** (none was signed in for this). Offered only by builds
+made with `CLOUDDROP_EXPERIMENTAL_PROVIDERS=1`.
+
+#### Proton's rules
+
+Proton's SDK README has usage guidelines for personal projects. The SDK "is not yet ready for
+third-party production use", and a third-party app must:
+
+- use the SDK, or match its guarantees;
+- call only Proton's official endpoints;
+- identify itself: `x-pm-appversion: external-drive-{name}@{semver}-{channel}`;
+- sync from events, with no polling or recursive walks of the drive;
+- leave out Proton's branding;
+- tell people: "This is a third-party application not officially supported by Proton."
+
+A new cryptographic model is planned for the end of 2026 or early 2027.
+
+#### Decision: run Proton's CLI
+
+A Rust copy of Proton's cryptography wouldn't match the SDK's guarantees and would break with
+the new model. Embedding the TypeScript SDK would mean shipping a JavaScript runtime. So the
+client runs Proton's own CLI, `proton-drive` (MIT, built with Bun on the SDK, from
+<https://proton.me/download/drive/cli>), one command per call:
+
+- The CLI signs in **in the browser and keeps the session in the system keyring**. CloudDrop
+  never sees the password or the session.
+- The CLI does the cryptography and talks to Proton exactly as Proton does, from Proton's own
+  binary, so the first three rules hold. Official CLI builds identify as Proton's CLI, not as
+  CloudDrop: requests come from Proton's client, which CloudDrop starts.
+- CloudDrop is upload-only. It never lists the drive on a timer or walks it. It lists one
+  folder to find a name before creating something there, and reads one node to check it.
+- The name is used only to say which service it is ("Proton Drive"), with a generic icon and no
+  logo. The disclosure appears in the provider's description in both apps, under the setup
+  field, and in `clouddrop login` and `clouddrop check`.
+
+#### Gating
+
+`ProviderInfo::experimental` marks the provider. `Provider::available()` lists experimental ones
+only when the build sets `CLOUDDROP_EXPERIMENTAL_PROVIDERS=1` (read at compile time). This
+covers `clouddrop providers`, `providers --json`, the setup assistants and `setup --provider`.
+A config naming an experimental provider is refused when it loads, with a message saying how to
+build it in.
+
+- **Sets it:** `./install.sh`, for building from source.
+- **Doesn't set it:** `debian/rules` (the PPA), `snap/snapcraft.yaml`, and the Windows
+  packaging scripts (MSIX/Store). A plain `cargo build` doesn't either; add the variable to
+  try it.
+- CI builds without it. The tests check that Proton isn't offered then, and the client tests
+  run either way, because the client code is always compiled.
+
+#### How it fits the contract
+
+- **Sign-in** is a form with one optional field, `cli` (the CLI's path; empty means
+  `proton-drive` on PATH). `clouddrop login` (and `setup` in a terminal) runs
+  `proton-drive auth login`. The apps use the form and `clouddrop check`. Before sign-in, check
+  answers `needs_sign_in` with "Proton Drive sign-in needed: run `proton-drive auth login`".
+  `clouddrop logout` doesn't sign the CLI out, because the CLI may be used for other things;
+  `proton-drive auth logout` does.
+- **Ids are node uids** (`<volume>~<link>`). The CLI resolves a path segment that is a uid to
+  that node, so `/my-files/<uid>` names any node, and uids survive renames and moves.
+  `stable_ids: true`. New content becomes a new revision of the same node, with the same uid.
+- **Capabilities:** `hash: None`, `pin_versions: false`, `stable_ids: true`, `resumable: true`,
+  case-sensitive, no forbidden characters, `chunk_unit` 256 KiB.
+  - There's no hash because Proton's SHA-1 is what the uploader claims, inside encrypted
+    metadata, so it proves nothing about what the server holds. Freeing space downloads the
+    file instead, and the CLI decrypts and verifies it.
+- **Commands:** `info`, `list`, `create-folder`, `rename`, `move`, `copy`, `upload` and
+  `download`, each called as `filesystem <cmd> --json [--opt=value] -- <args>`. The `--` keeps
+  names that start with `-` from being read as options.
+  - Output is the SDK's `NodeEntity` as JSON. Fields used: `uid`, `parentUid`,
+    `name {ok, value}`, `type`, `trashTime`, `activeRevision.claimedSize` and
+    `activeRevision.claimedDigests.sha1`.
+  - `move` and `copy` print `{uid, ok, error}` per item and exit 0 even when an item failed, so
+    the client checks `ok`.
+- **One command at a time:** every CLI process uses the same session, and two at once could
+  both refresh it. The client holds a lock around each run.
+- **Uploads** go through local staging, because the CLI uploads local files under their local
+  name:
+  1. Chunks are written to `proton-staging/<session>/<name>` in the data directory. The session
+     string is JSON naming that folder, the parent and the name. `query_upload` answers from
+     the staged length, so a crash resumes there.
+  2. The last chunk runs `upload --file-conflict-strategy=create-new-revision`, then reads the
+     result with `info <parent>/<name>`.
+  3. The staged file's SHA-1 must match the one the CLI recorded. Otherwise the error is
+     Transient and the staging is kept for a retry.
+  4. For new content of an existing file, the upload goes to that file's parent under its
+     current name, so it becomes a new revision.
+  5. Staging needs as much free space as the file. It is removed once the upload is done.
+- **keep_version** runs `copy --name=<stem> (replaced YYYY-MM-DD).<ext>` next to the file, adding
+  " (2)" and up when the name is taken.
+- **Downloads:** `download` writes into a fresh folder in `proton-downloads/`, streams the
+  file into the target while hashing it (SHA-256), then deletes it. `download_range` downloads
+  once and keeps that copy for the next ranges of the same file. It is replaced by the next
+  file, dropped when the file gets new content, and deleted when the client goes.
+- **Quota:** the CLI doesn't report storage, so `(None, 0, 0)`.
+- **web_url:** none (the web app has no stable address for a uid).
+- **Errors** come from the CLI's stderr, plus stdout for upload summaries:
+  - "You need to login first" → Auth.
+  - "not found" → NotFound.
+  - quota or insufficient storage → Quota.
+  - 429 or "too many requests" → RateLimited.
+  - network errors and timeouts → Transient. Metadata commands get 5 minutes; uploads and
+    downloads get no limit.
+  - an unknown command or option → Permanent ("this version of Proton's CLI doesn't work with
+    CloudDrop").
+  - a missing CLI → Permanent, with the download address and the `--set cli=…` hint.
+
+#### Not done yet
+
+- **A real account and the real CLI.** All of the above was read from the CLI's and SDK's
+  sources (October 2026) and run against a fake. The likeliest to need a fix:
+  - the exact wording of quota and rate-limit errors;
+  - the upload summary on stdout;
+  - whether `auth login` needs a terminal.
+- **Proton's review.** The CLI is Proton's, but this is still a third-party app on top of it.
+  Before offering it more widely, ask Proton, and move to the SDK proper when it opens to
+  third-party apps (with CloudDrop's own `external-drive-clouddrop@…` app version).
+- No storage figure in `check` or the apps.
+- Each call starts the CLI, which costs some time. Fine for an upload-only folder, but slow for
+  thousands of tiny files.
+- Names that are themselves a valid node uid would be read as a uid by the CLI. Such names are
+  88–108 characters of base64 with a `~` in the middle, and CloudDrop doesn't guard against
+  them.
+
+#### How it was tested
+
+- **A fake CLI** (`examples/fake_proton_drive.rs`) answers the same commands, options, paths
+  (uid segments, `\/` escapes) and JSON shapes over a folder. It refuses unknown options and
+  arguments not after `--`, and logs every call and any overlapping ones. Flag files make it
+  ask for sign-in or run out of storage.
+- `tests/proton.rs` covers:
+  - stable ids across renames and moves;
+  - names that look like options;
+  - an upload resumed by a new process from its staging, with chunks resent or sent ahead;
+  - empty files;
+  - new revisions, and keep_version twice;
+  - ranges served from one download, and the copy dropped after new content;
+  - errors: missing node, name taken, failed move, full storage then a retry, signed out,
+    missing CLI;
+  - one command at a time.
+- `tests/providers.rs` runs the whole engine against it: upload a folder, rename it, edit, free
+  space (verify by download) and restore.
+- Unit tests in `src/proton.rs` check node parsing (plain and `{ok, value}`-wrapped), error
+  mapping, paths and names. `src/remote.rs` and `src/control.rs` check the gating.
 
 ## Engine changes (phase 0, no visible change)
 
@@ -622,8 +762,9 @@ The engine reads `Capabilities` and does the rest; providers don't touch `engine
   is deleted from the old one.
 - **Home**: quota when the provider has one, otherwise "CloudDrop holds 25.3 GB". "Verifying…"
   joins "Uploading" for providers that verify by download.
-- Provider logos follow each brand's guidelines (Google, Microsoft, Dropbox, MEGA and Proton all
-  publish them) and appear only where they name the destination.
+- Provider logos follow each brand's guidelines (Google, Microsoft, Dropbox and MEGA publish
+  them) and appear only where they name the destination. Proton Drive gets no logo: Proton's
+  rules for third-party apps leave out its branding.
 
 ## Phases
 
@@ -633,7 +774,7 @@ The engine reads `Capabilities` and does the rest; providers don't touch `engine
 | 1 | **OneDrive** and **Dropbox**. Mock servers for both in `tests/common`, like the Drive one. Setup provider picker. | e2e suite green against all three mocks; live smoke test with real accounts. | built; live accounts still to try |
 | 2 | **Self-hosted**: Nextcloud (first-class), generic WebDAV, S3-compatible, SFTP. Verify-by-download and keep-aside copy land here. | e2e against real servers in CI containers: Nextcloud, MinIO, OpenSSH. | built; tested on fakes and a real OpenSSH, not yet in CI containers |
 | 3 | **MEGA** (SDK or native, from the spike). | Resume, 2FA and verify-by-download tested; PPA and Windows builds reproducible. | built (native client); live account still to try |
-| 4 | **Proton Drive**, experimental, when third-party sign-in exists in the official SDK. | Proton's third-party terms met; their review if they require one. | waiting for Proton's SDK |
+| 4 | **Proton Drive**, experimental, through Proton's official CLI; builds from source only. | Proton's third-party terms met; their review if they require one. | built (experimental, off in store builds); real account still to try |
 | 5 | **Several clouds at once**: one engine per connection (own folder, config section, `state-<id>.db`, `status-<id>.json`); the apps get a connection switcher. | Two providers syncing side by side. | not started |
 
 ## Testing

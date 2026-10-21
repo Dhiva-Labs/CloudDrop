@@ -124,6 +124,12 @@ const Map<String, ({String text, bool ownFolder})> _known = {
   ),
   'sftp': (text: 'Any computer or server you can reach over SSH.', ownFolder: false),
   'mega': (text: "MEGA's end-to-end encrypted cloud storage.", ownFolder: false),
+  // Offered only by builds made with CLOUDDROP_EXPERIMENTAL_PROVIDERS=1 (never the store's).
+  'proton': (
+    text: "Experimental: Proton Drive through Proton's own command-line app, which signs in. "
+        'This is a third-party application not officially supported by Proton.',
+    ownFolder: false,
+  ),
 };
 
 @immutable

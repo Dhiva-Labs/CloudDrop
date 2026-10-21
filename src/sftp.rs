@@ -49,6 +49,7 @@ const PART_PREFIX: &str = ".clouddrop-";
 const PART_SUFFIX: &str = ".part";
 
 pub static INFO: ProviderInfo = ProviderInfo {
+    experimental: false,
     id: "sftp",
     name: "SFTP server",
     caps: Capabilities {

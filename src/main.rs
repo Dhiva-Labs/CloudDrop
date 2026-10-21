@@ -241,6 +241,11 @@ async fn login(cfg: &Config, browser: bool) -> Result<Option<String>> {
             clouddrop::credentials::save(id, login.secrets())?;
             println!("Signed in to {} as {}.", login.server, login.login_name);
         }
+        // Proton's CLI keeps the sign-in: it signs in in this terminal and the browser.
+        SignIn::Form(_) if p == Provider::Proton => {
+            println!("{}\nSigning Proton's CLI in (`proton-drive auth login`)…", clouddrop::proton::DISCLOSURE);
+            clouddrop::proton::login(&cfg.proton)?;
+        }
         SignIn::Form(_) => {
             return Ok(Some(format!(
                 "{name} has no browser sign-in, so there is nothing to do here: `clouddrop setup --provider {id}` \
@@ -294,8 +299,14 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
         } => {
             let existing = Config::load().ok();
             let provider = match provider {
-                Some(id) => Provider::parse(&id)
-                    .ok_or_else(|| anyhow!("unknown provider {id:?}; `clouddrop providers` lists them"))?,
+                Some(id) => {
+                    let p = Provider::parse(&id)
+                        .ok_or_else(|| anyhow!("unknown provider {id:?}; `clouddrop providers` lists them"))?;
+                    if let Some(why) = p.unavailable_reason() {
+                        bail!("{why}");
+                    }
+                    p
+                }
                 None => existing.as_ref().map(|c| c.provider).unwrap_or_default(),
             };
             let sync_dir = match folder {
@@ -374,16 +385,17 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
             if json {
                 return Ok(serde_json::to_string_pretty(&all)?);
             }
-            Ok(Provider::ALL
-                .iter()
+            Ok(Provider::available()
                 .map(|p| {
                     let how = match p.info().sign_in {
                         SignIn::Google | SignIn::OAuth(_) => "browser sign-in",
                         SignIn::NextcloudLoginFlow => "app password from the server",
                         SignIn::Form(_) => "settings and password",
                     };
+                    let how = if p == Provider::Proton { "Proton's CLI signs in" } else { how };
                     let verify = if p.caps().hash.is_none() { ", verifies by download" } else { "" };
-                    format!("{:<10} {} ({how}{verify})", p.as_str(), p.display_name())
+                    let experimental = if p.info().experimental { ", experimental" } else { "" };
+                    format!("{:<10} {} ({how}{verify}{experimental})", p.as_str(), p.display_name())
                 })
                 .collect::<Vec<_>>()
                 .join("\n"))
@@ -411,6 +423,12 @@ async fn dispatch(cmd: Cmd) -> Result<String> {
                     format!("Connected to {name}. {folder}{storage}")
                 }
                 Err(e) => engine::describe(e, provider),
+            };
+            let message = if provider == Provider::Proton {
+                let stop = if message.ends_with('.') { "" } else { "." };
+                format!("{message}{stop} {}", clouddrop::proton::DISCLOSURE)
+            } else {
+                message
             };
             if json {
                 let v = match &result {

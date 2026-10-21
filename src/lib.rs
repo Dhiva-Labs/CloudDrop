@@ -13,6 +13,7 @@ pub mod mega;
 pub mod notifier;
 pub mod oauth;
 pub mod onedrive;
+pub mod proton;
 pub mod remote;
 pub mod s3;
 pub mod sftp;
@@ -64,6 +65,11 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
         remote::Provider::Mega => {
             let data_dir = token_file.parent().map(PathBuf::from).unwrap_or_default();
             Arc::new(remote::Remote::Mega(mega::Mega::new(drive::http_client(), &cfg.mega, &data_dir)))
+        }
+        // Proton's CLI keeps the sign-in; uploads are staged in the data directory.
+        remote::Provider::Proton => {
+            let data_dir = token_file.parent().map(PathBuf::from).unwrap_or_default();
+            Arc::new(remote::Remote::Proton(proton::Proton::new(&cfg.proton, &data_dir)))
         }
     }
 }

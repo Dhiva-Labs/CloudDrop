@@ -44,6 +44,8 @@ if (Test-Path $envFile) {
     Write-Host 'No packaging\oauth-client.env: building without a built-in Google client.'
 }
 
+# Packaged builds never offer experimental providers (Proton Drive): docs/PROVIDERS.md.
+Remove-Item Env:CLOUDDROP_EXPERIMENTAL_PROVIDERS -ErrorAction SilentlyContinue
 Run 'cargo build' { cargo build --release -p clouddrop -p clouddrop-agent }
 Push-Location winapp
 try { Run 'flutter build' { flutter build windows --release } } finally { Pop-Location }
