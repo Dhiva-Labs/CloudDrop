@@ -21,7 +21,8 @@ import 'theme.dart';
 import 'widgets/connection_switcher.dart';
 
 /// The window's title: "CloudDrop", or with several folders the one shown ("Work - CloudDrop").
-String windowTitle(AppController app) => app.several ? '${app.label} - CloudDrop' : 'CloudDrop';
+String windowTitle(AppController app) =>
+    app.several && app.label != 'CloudDrop' ? '${app.label} - CloudDrop' : 'CloudDrop';
 
 class CloudDropApp extends StatelessWidget {
   const CloudDropApp({
