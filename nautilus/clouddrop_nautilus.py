@@ -642,13 +642,23 @@ class CloudDropExtension(GObject.GObject, Nautilus.InfoProvider,
         self._seen = collections.OrderedDict()   # path -> Tracked, LRU order
         self._outside = collections.OrderedDict()  # path -> file in no folder
         self._queue = []                          # paths awaiting a re-check
+        self._roots = ()                          # (name, folder) last seen
+        self._start()
+        GLib.timeout_add_seconds(POLL_INTERVAL_S, self._on_tick)
+
+    # -- connections -------------------------------------------------------
+
+    @_guarded(lambda: None)
+    def _start(self):
+        """The connections and their folders, so the first files find theirs.
+
+        The databases' tokens are left for the first poll, which re-checks
+        whatever was annotated before it.
+        """
         self._scan_connections()
         for conn in self._connections:
             conn.learn_root(conn.live_root())
         self._roots = self._root_key()
-        GLib.timeout_add_seconds(POLL_INTERVAL_S, self._on_tick)
-
-    # -- connections -------------------------------------------------------
 
     def _scan_connections(self):
         """Follow connections being added and removed.
