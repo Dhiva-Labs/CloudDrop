@@ -220,6 +220,7 @@ async fn two_clouds_side_by_side() {
     assert_eq!(list[0]["label"], "CloudDrop", "the default connection is shown as its folder");
     assert_eq!((list[1]["label"].as_str(), list[1]["provider"].as_str()), (Some("work"), Some("webdav")));
     assert_eq!(list[1]["configured"], true);
+    assert_eq!((list[0]["signed_in"].as_bool(), list[1]["signed_in"].as_bool()), (Some(true), Some(true)));
     assert_eq!(Path::new(list[1]["data_dir"].as_str().unwrap()), sb.connection_data("work"));
     assert!(sb.connection_config("work").is_file());
 

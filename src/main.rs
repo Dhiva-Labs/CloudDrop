@@ -601,7 +601,15 @@ async fn dispatch(connection: Option<String>, cmd: Cmd) -> Result<String> {
         Cmd::Status { json, all: true } => {
             let all = connections::all();
             if json {
-                let list = all.iter().map(status_json).collect::<Result<Vec<_>>>()?;
+                // One connection that can't be read doesn't hide the others.
+                let list: Vec<serde_json::Value> = all
+                    .iter()
+                    .map(|c| {
+                        status_json(c).unwrap_or_else(|e| {
+                            serde_json::json!({"connection": c.name, "label": c.label(None), "error": format!("{e:#}")})
+                        })
+                    })
+                    .collect();
                 return Ok(serde_json::to_string_pretty(&list)?);
             }
             if all.is_empty() {
@@ -971,6 +979,7 @@ fn list_connections(json: bool) -> Result<String> {
                     "config": c.config,
                     "data_dir": c.data,
                     "configured": ok.is_some_and(control::configured),
+                    "signed_in": ok.is_some_and(|cfg| control::signed_in(cfg.provider, &c.data)),
                     "error": cfg.as_ref().err().map(|e| format!("{e:#}")),
                 })
             })

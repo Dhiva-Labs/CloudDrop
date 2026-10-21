@@ -701,7 +701,7 @@ but the process (`daemon::supervise`):
   The apps always pass it.
 - **`clouddrop connections [--json]`** lists them:
   `[{"name", "label", "folder", "provider", "provider_name", "drive_folder", "config", "data_dir",
-  "configured", "error"}]` (`error`: why the config can't be read, else null). A connection exists
+  "configured", "signed_in", "error"}]` (`error`: why the config can't be read, else null). A connection exists
   once its config.toml does; on a new computer the list is empty.
 - **`clouddrop connections add NAME --folder DIR [--provider ID] [--set K=V]… [--secret K=V]…
   [--drive-folder N] [--client-json F]`**: `setup --connection NAME --no-login` for a name not in
@@ -717,7 +717,8 @@ but the process (`daemon::supervise`):
   `default` deletes config.toml and the state files of the data directory, not `connections/`.
 - **`status --json`** is today's object for the selected connection, plus `"connection"` and
   `"label"`; without `--connection` (and outside other connections' folders) that's the default
-  connection, as before. **`status --json --all`** is an array of those objects, one per connection.
+  connection, as before. **`status --json --all`** is an array of those objects, one per connection
+  (`{"connection", "label", "error"}` for one that can't be read).
 - `setup` with a new `--connection` name creates it, like `connections add`. `logout` stops only
   that connection's engine. `service` and `providers` are for the whole installation; `run` serves
   every connection.

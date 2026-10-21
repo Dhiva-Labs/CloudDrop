@@ -244,7 +244,7 @@ directory, else `default`. `run`, `service` and `providers` are for the whole in
 | `clouddrop check [--json]` | connect with the saved settings; `--json`: `{"ok", "provider", "provider_name", "message", "folder_exists", "quota"}` or `{"ok": false, …, "error_kind"}` |
 | `clouddrop run` | the daemon (systemd user service): an engine per connection |
 | `clouddrop status [--json] [--all]` | counts per state, errors; JSON has `provider`, `provider_name`, `connection` and `label`; `--all`: every connection (JSON: an array) |
-| `clouddrop connections [--json]` | the connections: `[{"name", "label", "folder", "provider", "provider_name", "drive_folder", "config", "data_dir", "configured", "error"}]` |
+| `clouddrop connections [--json]` | the connections: `[{"name", "label", "folder", "provider", "provider_name", "drive_folder", "config", "data_dir", "configured", "signed_in", "error"}]` |
 | `clouddrop connections add NAME --folder DIR [setup's options]` | another folder uploading to a cloud: `setup --no-login` for a new connection |
 | `clouddrop connections remove NAME` | stop uploading it and forget its settings and state; nothing is deleted in the folder or the cloud |
 | `clouddrop free PATH...` | free up space: delete verified local copies (dirs: all synced files inside, folders are kept) |

@@ -173,8 +173,19 @@ pub fn check_name(name: &str) -> Result<()> {
 }
 
 /// A name for a new connection uploading `folder`: its folder's name made valid (characters a
-/// name can't have become '-'), numbered "Work 2", "Work 3"… when taken.
+/// name can't have become '-'), numbered "Work 2", "Work 3"… when taken, by a name or by the
+/// default connection's label (its folder's name), so the apps never show two alike.
 pub fn suggest_name(folder: &Path) -> String {
+    let mut taken = existing_names();
+    let default = Connection::default_one();
+    if default.exists() {
+        taken.push(default.label(default.load().ok().as_ref()));
+    }
+    suggest_name_among(folder, &taken)
+}
+
+/// [`suggest_name`] with the names (and labels) `taken`, ignoring case.
+fn suggest_name_among(folder: &Path, taken: &[String]) -> String {
     let base: String = folder
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -193,7 +204,7 @@ pub fn suggest_name(folder: &Path) -> String {
             base = "Folder".into();
         }
     }
-    let taken: Vec<String> = existing_names().iter().map(|n| n.to_lowercase()).collect();
+    let taken: Vec<String> = taken.iter().map(|n| n.to_lowercase()).collect();
     std::iter::once(base.clone())
         .chain((2..).map(|n| format!("{base} {n}")))
         .find(|n| !taken.contains(&n.to_lowercase()))
@@ -432,11 +443,14 @@ mod tests {
             ("/", "Folder"),
             ("/home/me/trailing. ", "trailing"),
         ] {
-            let got = suggest_name(Path::new(folder));
+            let got = suggest_name_among(Path::new(folder), &[]);
             assert_eq!(got, want, "{folder}");
             check_name(&got).unwrap();
         }
-        assert!(suggest_name(Path::new(&format!("/x/{}", "y".repeat(60)))).chars().count() <= MAX_NAME);
+        assert!(suggest_name_among(Path::new(&format!("/x/{}", "y".repeat(60))), &[]).chars().count() <= MAX_NAME);
+        let taken = ["CloudDrop".to_string(), "work".into(), "Work 2".into()];
+        assert_eq!(suggest_name_among(Path::new("/home/me/CloudDrop"), &taken), "CloudDrop 2", "not the default's label");
+        assert_eq!(suggest_name_among(Path::new("/home/me/Work"), &taken), "Work 3");
     }
 
     #[test]
