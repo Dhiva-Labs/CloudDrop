@@ -18,7 +18,9 @@ can be developed and tested on Linux against the Linux daemon.
 
 `%USERPROFILE%\CloudDrop` is registered as a cloud sync root, so it appears in
 Explorer's navigation pane with CloudDrop's icon, and every item shows the standard
-cloud states:
+cloud states. Every other connection's folder is a sync root of its own
+(`CloudDrop!<SID>!<name>`), shown as "CloudDrop - <name>"; removing the connection
+unregisters it, as uninstalling does ([PROVIDERS.md](PROVIDERS.md#several-clouds-at-once)):
 
 | CloudDrop state | Explorer |
 | --- | --- |
@@ -40,6 +42,7 @@ app's Files tab, where they can be downloaded back.
 | config | `%APPDATA%\clouddrop\config.toml` | `~/.config/clouddrop/config.toml` | `CLOUDDROP_CONFIG` |
 | state db, status, token | `%LOCALAPPDATA%\clouddrop\` | `~/.local/share/clouddrop/` | `CLOUDDROP_DATA_DIR` |
 | synced folder | `%USERPROFILE%\CloudDrop` | `~/CloudDrop` | config `sync_dir` |
+| another connection NAME | `connections\NAME\` beside config.toml and in the data folder | the same, `/` | |
 
 ## App ↔ engine contract
 
@@ -64,6 +67,12 @@ CLI:
 | Drive link | `clouddrop url PATH` |
 
 Commands print a human sentence on success (exit 0) or an error on stderr (exit 1).
+
+With several connections, `clouddrop connections --json` lists them (each with its
+`data_dir`, where its `state.db` and `status.json` are), and every command above takes
+`--connection NAME`; the app always passes it. `connections add NAME --folder …` and
+`connections remove NAME` add and remove one; `logout` stops only that connection's
+engine, and `service …` is the one background agent that runs them all.
 
 ## Distribution
 
