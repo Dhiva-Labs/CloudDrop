@@ -1,7 +1,8 @@
 //! One read of everything the window and the top-bar icon show, and the upload speed
 //! measured across reads.
 
-use clouddrop::config::{self, Config};
+use clouddrop::config::Config;
+use clouddrop::connections::{self, Connection};
 use clouddrop::control::{self, DaemonStatus, Phase, Quota};
 use clouddrop::db::{Db, FolderStats, Kind};
 use crate::fmt::{self, files};
@@ -20,6 +21,12 @@ pub struct Counts {
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    /// The connection this is about (`--connection`), and what the window calls it.
+    pub connection: String,
+    pub label: String,
+    /// The background service runs, but this connection's engine doesn't yet (it starts once
+    /// the connection is set up and signed in, or again after a restart).
+    pub engine_waiting: bool,
     pub cfg: Option<Config>,
     /// The configured provider (Google Drive when there is no config), for names and links.
     pub provider: Choice,
@@ -38,13 +45,38 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// The connection the window shows ([`connections::current`]).
     pub fn load(db: Option<&Db>) -> Self {
-        let cfg = Config::load().ok().filter(providers::usable);
+        Self::load_for(&connections::current(), db)
+    }
+
+    /// Everything about `conn`, for the window.
+    pub fn load_for(conn: &Connection, db: Option<&Db>) -> Self {
+        let mut s = Self::status_of(conn, db);
+        let Some(db) = db.filter(|_| s.cfg.is_some()) else {
+            return s;
+        };
+        if let Ok((all, cloud_only)) = db.cloud_bytes() {
+            s.cloud_bytes = all.max(0) as u64;
+            s.cloud_only_bytes = cloud_only.max(0) as u64;
+        }
+        s.root = db.folder_stats("").unwrap_or_default();
+        s
+    }
+
+    /// What the switcher and the top-bar icon show of `conn`: its status, pause switch, cloud
+    /// folder and file counts (not the totals over its folder).
+    pub fn status_of(conn: &Connection, db: Option<&Db>) -> Self {
+        let cfg = conn.load().ok().filter(providers::usable);
         let provider = Choice::current(cfg.as_ref());
+        let daemon = conn.live_status();
         let mut s = Snapshot {
-            signed_in: provider.signed_in(),
+            connection: conn.name.clone(),
+            label: conn.label(cfg.as_ref()),
+            engine_waiting: daemon.is_none() && control::daemon_running(),
+            signed_in: provider.signed_in_at(&conn.data),
             provider,
-            daemon: control::read_status(&config::data_dir()).filter(|d| d.is_live()),
+            daemon,
             cfg,
             paused: false,
             counts: Counts::default(),
@@ -76,11 +108,6 @@ impl Snapshot {
                 _ => {}
             }
         }
-        if let Ok((all, cloud_only)) = db.cloud_bytes() {
-            s.cloud_bytes = all.max(0) as u64;
-            s.cloud_only_bytes = cloud_only.max(0) as u64;
-        }
-        s.root = db.folder_stats("").unwrap_or_default();
         s
     }
 
@@ -236,6 +263,16 @@ pub fn summarize(s: &Snapshot) -> Summary {
         );
     }
     let Some(d) = &s.daemon else {
+        if s.engine_waiting {
+            return mk(
+                "clouddrop-syncing-symbolic",
+                "Starting…".into(),
+                format!("CloudDrop starts uploading {} in a moment.", s.label),
+                TrayIcon::Syncing,
+                "Starting".into(),
+                None,
+            );
+        }
         return mk(
             "clouddrop-attention-symbolic",
             "CloudDrop isn't running".into(),
@@ -444,6 +481,9 @@ mod tests {
 
     fn snap(phase: Phase) -> Snapshot {
         Snapshot {
+            connection: "default".into(),
+            label: "CloudDrop".into(),
+            engine_waiting: false,
             cfg: Some(Config {
                 client_id: "x.apps.googleusercontent.com".into(),
                 client_secret: "s".into(),

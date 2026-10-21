@@ -236,6 +236,14 @@ impl ActivityPage {
         me
     }
 
+    /// The window shows another connection: its history is read afresh.
+    pub fn reset(self: &Rc<Self>) {
+        self.last_id.set(None);
+        self.items.borrow_mut().clear();
+        self.shown.set(PAGE);
+        self.rebuild();
+    }
+
     /// Called every second; only reads the database when something new was logged.
     pub fn refresh(self: &Rc<Self>, visible: bool) {
         if !visible {

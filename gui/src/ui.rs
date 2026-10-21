@@ -170,6 +170,7 @@ const CSS: &str = "
 .drop-zone { border: 2px dashed alpha(@window_fg_color, 0.18); border-radius: 18px; margin: 24px; }
 columnview.files row { min-height: 40px; }
 .provider-row { padding: 10px 12px; }
+.connection-row { padding: 6px 8px; }
 .own-folder { color: @success_color; }
 ";
 

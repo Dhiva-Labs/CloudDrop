@@ -1,10 +1,12 @@
 //! First-run assistant: welcome → where to upload → Google key (Google Drive without a
-//! built-in client) → folders → sign in (or a form's Connect) → done.
+//! built-in client) → folders → sign in (or a form's Connect) → done. The same steps, from
+//! "where to upload", set up another folder as a new connection (Add Another Folder…).
 
 use crate::providers::{self, Choice, FormField, SignInKind};
 use crate::{cli, rt, signin, ui};
 use adw::prelude::*;
 use clouddrop::config::{self, Config};
+use clouddrop::connections::{self, Connection};
 use clouddrop::control::{self, SetupParams};
 use clouddrop::db::Db;
 use clouddrop::remote::{FieldKind, Provider};
@@ -55,6 +57,9 @@ pub enum Start {
     SignIn,
     /// Settings › Switch Provider…: choose another cloud; everything uploads again.
     Switch,
+    /// Add Another Folder…: a new connection, another folder uploading to a cloud of its own.
+    /// It is named after its folder; leaving before the end removes what was written.
+    AddFolder,
 }
 
 struct Wiz {
@@ -73,10 +78,66 @@ struct Wiz {
     switching: bool,
     /// Switching wrote the new provider's settings (the old engine was stopped first).
     switch_started: bool,
+    /// Setting up a new connection; `previous` is the one the window showed.
+    adding: bool,
+    previous: Connection,
+    /// Reached the end: closing the assistant keeps what it set up.
+    finished: bool,
+}
+
+/// A folder for another connection: `~/CloudDrop 2`, `~/CloudDrop 3`… the first no
+/// connection uses.
+fn new_folder() -> PathBuf {
+    let home = gtk::glib::home_dir();
+    (2..)
+        .map(|n| home.join(format!("CloudDrop {n}")))
+        .find(|p| connections::folder_in_use(p, "").is_none())
+        .expect("unbounded")
+}
+
+/// The Google client another connection uses, for a new Google Drive connection.
+fn any_google_client() -> Option<(String, String)> {
+    connections::all()
+        .iter()
+        .filter_map(|c| c.load().ok())
+        .find(|c| c.provider == Provider::GoogleDrive && !c.client_id.is_empty())
+        .map(|c| (c.client_id, c.client_secret))
+}
+
+/// The cloud folder name for a new connection's folder: the folder's own name.
+fn cloud_folder_for(folder: &std::path::Path) -> String {
+    folder
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "CloudDrop".into())
 }
 
 impl Wiz {
-    fn new(switching: bool) -> Self {
+    fn new(start: Start) -> Self {
+        let (switching, adding) = (start == Start::Switch, start == Start::AddFolder);
+        let previous = connections::current();
+        if adding {
+            let choices = providers::all();
+            let folder = new_folder();
+            return Wiz {
+                client: any_google_client(),
+                drive_folder: cloud_folder_for(&folder),
+                folder,
+                folder_locked: false,
+                sidebar: true,
+                login: None,
+                url: Rc::default(),
+                chosen: choices[0].clone(),
+                current: choices[0].clone(),
+                choices,
+                switching: false,
+                switch_started: false,
+                adding,
+                previous,
+                finished: false,
+            };
+        }
         let cfg = Config::load().ok();
         let locked_root = Db::open_default()
             .ok()
@@ -105,6 +166,9 @@ impl Wiz {
             current,
             switching,
             switch_started: false,
+            adding,
+            previous,
+            finished: false,
         }
     }
 
@@ -118,7 +182,48 @@ impl Wiz {
 
     /// "Keep Current Sign-in": the chosen provider is the one signed in now.
     fn can_keep_sign_in(&self) -> bool {
-        !self.switching && self.chosen.id == self.current.id && self.chosen.signed_in()
+        !self.switching && !self.adding && self.chosen.id == self.current.id && self.chosen.signed_in()
+    }
+
+    /// Adding a folder: the new connection everything is written to from now on, named after
+    /// the folder chosen. Until its config is written it follows the folder; then it stays.
+    fn name_new_connection(&self) {
+        if !self.adding {
+            return;
+        }
+        let cur = connections::current();
+        if cur != self.previous && cur.exists() {
+            return;
+        }
+        let Ok(conn) = Connection::named(&connections::suggest_name(&self.folder)) else {
+            return;
+        };
+        if cur != self.previous && cur != conn {
+            connections::discard_unfinished(&cur);
+        }
+        connections::select(&conn);
+    }
+
+    /// Leaving before the end: what was written for the new connection goes, and the window
+    /// shows the connection it showed before.
+    fn abandon(&self) {
+        if !self.adding || self.finished {
+            return;
+        }
+        let cur = connections::current();
+        connections::select(&self.previous);
+        if cur == self.previous {
+            return;
+        }
+        if cur.exists() {
+            rt::blocking(move || connections::remove(&cur, std::time::Duration::from_secs(10)), |res| {
+                if let Err(e) = res {
+                    eprintln!("cannot remove the unfinished folder: {e:#}");
+                }
+            });
+        } else {
+            connections::discard_unfinished(&cur);
+        }
     }
 }
 
@@ -135,6 +240,7 @@ impl Cx {
     /// the old provider's engine is stopped first, so it uploads nothing more into a database
     /// that is about to move on.
     fn before_writing(self: &Rc<Self>, then: impl FnOnce() + 'static) {
+        self.st.borrow().name_new_connection();
         let mut w = self.st.borrow_mut();
         if !w.switching || w.switch_started {
             drop(w);
@@ -175,7 +281,7 @@ fn show_error(label: &gtk::Label, text: &str) {
 pub fn build(app: &adw::Application, start: Start, on_finish: impl Fn(bool) + 'static) -> adw::ApplicationWindow {
     let win = adw::ApplicationWindow::builder()
         .application(app)
-        .title("Set Up CloudDrop")
+        .title(if start == Start::AddFolder { "Add Another Folder" } else { "Set Up CloudDrop" })
         .default_width(620)
         .default_height(760)
         .build();
@@ -184,7 +290,7 @@ pub fn build(app: &adw::Application, start: Start, on_finish: impl Fn(bool) + 's
     toasts.set_child(Some(&nav));
     win.set_content(Some(&toasts));
 
-    let st = Rc::new(RefCell::new(Wiz::new(start == Start::Switch)));
+    let st = Rc::new(RefCell::new(Wiz::new(start)));
     let done = done_page(&win, &st, Rc::new(on_finish));
     let cx = Rc::new(Cx { win: win.clone(), nav: nav.clone(), st: st.clone(), done });
     let folder = folder_page(&cx);
@@ -193,7 +299,7 @@ pub fn build(app: &adw::Application, start: Start, on_finish: impl Fn(bool) + 's
     let welcome = welcome_page(&nav, &provider);
     match start {
         Start::Welcome => nav.add(&welcome),
-        Start::Switch => nav.add(&provider),
+        Start::Switch | Start::AddFolder => nav.add(&provider),
         Start::SignIn => {
             // Signed out: straight to the sign-in, with the way back to every page before it.
             let mut stack = vec![welcome, provider];
@@ -214,6 +320,7 @@ pub fn build(app: &adw::Application, start: Start, on_finish: impl Fn(bool) + 's
         if let Some(h) = st2.borrow_mut().login.take() {
             h.abort();
         }
+        st2.borrow().abandon();
         gtk::glib::Propagation::Proceed
     });
     win
@@ -252,7 +359,10 @@ fn welcome_page(nav: &adw::NavigationView, next: &adw::NavigationPage) -> adw::N
 }
 
 /// The provider page's sentence under its title.
-fn provider_intro(switching: bool, current: &str) -> String {
+fn provider_intro(switching: bool, adding: bool, current: &str) -> String {
+    if adding {
+        return "Pick the cloud another folder uploads to. Your other folders carry on as they are.".into();
+    }
     if switching {
         format!(
             "Everything in your CloudDrop folder is uploaded again to the place you pick. \
@@ -266,11 +376,11 @@ fn provider_intro(switching: bool, current: &str) -> String {
 fn provider_page(cx: &Rc<Cx>, key: Option<adw::NavigationPage>, folder: adw::NavigationPage) -> adw::NavigationPage {
     let content = ui::vbox(18);
     content.append(&ui::label("Choose where to upload", &["title-2"]));
-    let (switching, current, choices, chosen) = {
+    let (switching, adding, current, choices, chosen) = {
         let w = cx.st.borrow();
-        (w.switching, w.current.name.clone(), w.choices.clone(), w.chosen.id.clone())
+        (w.switching, w.adding, w.current.name.clone(), w.choices.clone(), w.chosen.id.clone())
     };
-    content.append(&ui::label(&provider_intro(switching, &current), &["dim-label"]));
+    content.append(&ui::label(&provider_intro(switching, adding, &current), &["dim-label"]));
 
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
@@ -333,7 +443,12 @@ fn provider_page(cx: &Rc<Cx>, key: Option<adw::NavigationPage>, folder: adw::Nav
         });
     }
     let (page, header) = ui::nav_page_with_header("Upload To", &content, Some(&cont));
-    if switching {
+    if adding {
+        let cancel = gtk::Button::with_label("Cancel");
+        let win = cx.win.clone();
+        cancel.connect_clicked(move |_| win.close());
+        header.pack_start(&cancel);
+    } else if switching {
         // Nothing is written until the sign-in step: leaving before it changes nothing.
         let cancel = gtk::Button::with_label("Cancel");
         let win = cx.win.clone();
@@ -498,8 +613,9 @@ fn folder_page(cx: &Rc<Cx>) -> adw::NavigationPage {
     content.append(&ui::label("Choose your folders", &["title-2"]));
 
     let local = adw::PreferencesGroup::builder().title("On this computer").build();
+    let adding = st.borrow().adding;
     let folder_row = adw::ActionRow::builder()
-        .title("CloudDrop folder")
+        .title(if adding { "Folder to upload" } else { "CloudDrop folder" })
         .subtitle(ui::pretty_path(&st.borrow().folder))
         .build();
     folder_row.add_prefix(&gtk::Image::from_icon_name("folder-symbolic"));
@@ -527,19 +643,23 @@ fn folder_page(cx: &Rc<Cx>) -> adw::NavigationPage {
     content.append(&remote);
 
     {
-        let (win, st, folder_row) = (cx.win.clone(), st.clone(), folder_row.clone());
+        let (win, st, folder_row, drive_row) = (cx.win.clone(), st.clone(), folder_row.clone(), drive_row.clone());
         change.connect_clicked(move |_| {
             let dialog = gtk::FileDialog::builder()
-                .title("Choose the CloudDrop Folder")
+                .title(if adding { "Choose the Folder to Upload" } else { "Choose the CloudDrop Folder" })
                 .modal(true)
                 .initial_folder(&gtk::gio::File::for_path(gtk::glib::home_dir()))
                 .build();
-            let (st, folder_row) = (st.clone(), folder_row.clone());
+            let (st, folder_row, drive_row) = (st.clone(), folder_row.clone(), drive_row.clone());
             dialog.select_folder(Some(&win), gtk::gio::Cancellable::NONE, move |res| {
                 if let Ok(f) = res
                     && let Some(p) = f.path()
                 {
                     folder_row.set_subtitle(&ui::pretty_path(&p));
+                    // A new connection's cloud folder follows its folder's name until edited.
+                    if adding && drive_row.text().trim() == cloud_folder_for(&st.borrow().folder) {
+                        drive_row.set_text(&cloud_folder_for(&p));
+                    }
                     st.borrow_mut().folder = p;
                 }
             });
@@ -1079,12 +1199,14 @@ fn done_page(
 
     let start_service = {
         let (row, icon, retry) = (service_row.clone(), service_icon.clone(), retry.clone());
-        move || {
+        move |adding: bool| {
             row.set_title("Starting CloudDrop…");
             icon.set_visible(true);
             retry.set_visible(false);
             let (row, icon, retry) = (row.clone(), icon.clone(), retry.clone());
-            rt::blocking(control::enable_service, move |res| {
+            // The service runs every folder: one more is picked up without a restart.
+            let start = move || if adding && control::daemon_running() { Ok(()) } else { control::enable_service() };
+            rt::blocking(start, move |res| {
                 icon.set_visible(false);
                 match res {
                     Ok(()) => {
@@ -1108,8 +1230,8 @@ fn done_page(
         }
     };
     {
-        let start_service = start_service.clone();
-        retry.connect_clicked(move |_| start_service());
+        let (start_service, st) = (start_service.clone(), st.clone());
+        retry.connect_clicked(move |_| start_service(st.borrow().adding));
     }
 
     let page = ui::nav_page("Done", &content, Some(&finish));
@@ -1118,6 +1240,7 @@ fn done_page(
         let st = st.clone();
         let hint = hint.clone();
         page.connect_shown(move |_| {
+            st.borrow_mut().finished = true;
             let w = st.borrow();
             hint.set_label(&format!(
                 "Drop files into {} and they'll show up in {} → {}.",
@@ -1128,7 +1251,7 @@ fn done_page(
             if w.sidebar {
                 let _ = clouddrop::actions::add_bookmark(&w.folder);
             }
-            start_service();
+            start_service(w.adding);
         });
     }
     {
@@ -1196,11 +1319,21 @@ mod tests {
 
     #[test]
     fn the_provider_page_explains_switching() {
-        assert_eq!(provider_intro(false, "Google Drive"), "Pick the cloud CloudDrop uploads to. You can switch later in Settings.");
+        assert_eq!(provider_intro(false, false, "Google Drive"), "Pick the cloud CloudDrop uploads to. You can switch later in Settings.");
         assert_eq!(
-            provider_intro(true, "Google Drive"),
+            provider_intro(true, false, "Google Drive"),
             "Everything in your CloudDrop folder is uploaded again to the place you pick. Nothing is deleted from Google Drive."
         );
+        assert_eq!(
+            provider_intro(false, true, "Google Drive"),
+            "Pick the cloud another folder uploads to. Your other folders carry on as they are."
+        );
+    }
+
+    #[test]
+    fn a_new_folder_names_its_cloud_folder() {
+        assert_eq!(cloud_folder_for(std::path::Path::new("/home/me/Work")), "Work");
+        assert_eq!(cloud_folder_for(std::path::Path::new("/")), "CloudDrop");
     }
 
     #[test]

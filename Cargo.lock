@@ -760,6 +760,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml 1.1.8+spec-1.1.0",

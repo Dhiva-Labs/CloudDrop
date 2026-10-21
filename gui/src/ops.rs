@@ -314,8 +314,8 @@ impl Ops {
 
     // ---------- configuration ----------
 
-    /// Edits the config file now and restarts the upload service shortly after
-    /// (several quick edits share one restart). `message` is shown once the service is back.
+    /// Edits the config file now and restarts this connection's engine shortly after (several
+    /// quick edits share one restart; the others carry on). `message` is shown once it's back.
     pub fn edit_config(self: &Rc<Self>, message: &str, edit: impl FnOnce(&mut Config)) -> bool {
         let path = config::config_path();
         let result = Config::load_from(&path).and_then(|mut c| {
@@ -335,7 +335,7 @@ impl Ops {
         let id = glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
             if let Some(me) = me.upgrade() {
                 me.restart.borrow_mut().take();
-                me.restart_service();
+                me.restart_engine();
             }
         });
         *self.restart.borrow_mut() = Some(id);
@@ -348,6 +348,19 @@ impl Ops {
     pub fn restart_now(self: &Rc<Self>, message: &str) {
         *self.restart_msg.borrow_mut() = message.to_string();
         self.restart_service();
+    }
+
+    /// Restarts the shown connection's engine (the background service starts it again at once).
+    fn restart_engine(self: &Rc<Self>) {
+        let Some(db) = self.db() else {
+            return;
+        };
+        let msg = std::mem::take(&mut *self.restart_msg.borrow_mut());
+        self.toast(&match control::restart_engine(&db, &config::data_dir()) {
+            Ok(()) if msg.is_empty() => "Settings saved".to_string(),
+            Ok(()) => msg,
+            Err(e) => format!("{e:#}"),
+        });
     }
 
     fn restart_service(self: &Rc<Self>) {

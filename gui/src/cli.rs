@@ -56,9 +56,20 @@ fn run_with(bin: &Path, args: &[String]) -> Result<String> {
     outcome(out.status.code(), &out.stdout, &out.stderr)
 }
 
+/// `args` for the connection the app works on now: every command names it, so the CLI never
+/// goes by the directory it runs in.
+pub fn for_connection(name: &str, args: Vec<String>) -> Vec<String> {
+    let mut a = vec!["--connection".to_string(), name.to_string()];
+    a.extend(args);
+    a
+}
+
 /// Runs the commands one after another off the main thread, stopping at the first that fails;
-/// `done` gets the last one's output (a sentence such as `check`'s) or that error.
+/// `done` gets the last one's output (a sentence such as `check`'s) or that error. They work
+/// on the connection selected now ([`clouddrop::connections::current`]).
 pub fn run_all(cmds: Vec<Vec<String>>, done: impl FnOnce(Result<String>) + 'static) {
+    let conn = clouddrop::connections::current().name;
+    let cmds: Vec<Vec<String>> = cmds.into_iter().map(|a| for_connection(&conn, a)).collect();
     let bin = bin();
     rt::blocking(
         move || {
@@ -117,7 +128,8 @@ pub fn login(url_ready: impl Fn(String) + 'static, done: impl FnOnce(Result<()>)
             url_ready(url);
         }
     });
-    let (bin, a) = (bin(), args(&["login", "--no-browser"]));
+    let conn = clouddrop::connections::current().name;
+    let (bin, a) = (bin(), for_connection(&conn, args(&["login", "--no-browser"])));
     rt::run(async move { login_with(&bin, &a, tx).await }, done)
 }
 
@@ -246,6 +258,14 @@ mod tests {
         assert_eq!(
             setup_args("onedrive", Path::new("/c d"), "CloudDrop", &[], &[]),
             ["setup", "--no-login", "--no-bookmark", "--provider=onedrive", "--folder=/c d", "--drive-folder=CloudDrop"]
+        );
+    }
+
+    #[test]
+    fn commands_name_their_connection() {
+        assert_eq!(
+            for_connection("Work 2", args(&["check"])),
+            ["--connection", "Work 2", "check"]
         );
     }
 

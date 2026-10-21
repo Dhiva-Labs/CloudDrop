@@ -601,6 +601,14 @@ impl FilesPage {
         self.show(dir, Filter::All, None);
     }
 
+    /// The window shows another connection: back to its top folder, from its own database.
+    pub fn reset(self: &Rc<Self>) {
+        self.browse_db.borrow_mut().take();
+        self.raw.borrow_mut().clear();
+        self.set_items(Vec::new());
+        self.show("", Filter::All, None);
+    }
+
     fn go_back(self: &Rc<Self>) {
         let (dir, search, filter) = {
             let st = self.state.borrow();
