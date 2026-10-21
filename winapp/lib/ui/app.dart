@@ -24,14 +24,14 @@ import 'widgets/connection_switcher.dart';
 String windowTitle(AppController app) =>
     app.several && app.label != 'CloudDrop' ? '${app.label} - CloudDrop' : 'CloudDrop';
 
-class CloudDropApp extends StatelessWidget {
+class CloudDropApp extends StatefulWidget {
   const CloudDropApp({
     super.key,
     required this.app,
     this.mica = false,
     this.fontFamily,
     this.fontFamilyFallback,
-    this.themeMode = ThemeMode.system,
+    this.themeMode,
     this.enableDrop = true,
     this.onBrightness,
     this.onTitle,
@@ -43,7 +43,9 @@ class CloudDropApp extends StatelessWidget {
   final bool mica;
   final String? fontFamily;
   final List<String>? fontFamilyFallback;
-  final ThemeMode themeMode;
+
+  /// Light or dark; null follows the `theme` setting (tests pin one).
+  final ThemeMode? themeMode;
 
   /// Off in tests: the native drop plugin isn't there.
   final bool enableDrop;
@@ -55,24 +57,78 @@ class CloudDropApp extends StatelessWidget {
   final void Function(String title)? onTitle;
 
   @override
+  State<CloudDropApp> createState() => _CloudDropAppState();
+}
+
+/// Rebuilds the themes only when the `theme` or `accent` setting changes.
+class _CloudDropAppState extends State<CloudDropApp> {
+  late (String, String) _look = _current();
+
+  (String, String) _current() =>
+      (widget.app.config?.theme ?? 'system', widget.app.config?.accent ?? 'default');
+
+  void _changed() {
+    final look = _current();
+    if (look != _look) setState(() => _look = look);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.app.addListener(_changed);
+  }
+
+  @override
+  void didUpdateWidget(CloudDropApp old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.app, widget.app)) {
+      old.app.removeListener(_changed);
+      widget.app.addListener(_changed);
+      _look = _current();
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.app.removeListener(_changed);
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final w = widget;
+    final (theme, accentName) = _look;
+    final accent = accentFor(accentName);
     return FluentApp(
       title: 'CloudDrop',
       debugShowCheckedModeBanner: false,
-      themeMode: themeMode,
+      themeMode:
+          w.themeMode ??
+          switch (theme) {
+            'light' => ThemeMode.light,
+            'dark' => ThemeMode.dark,
+            _ => ThemeMode.system,
+          },
       theme: buildTheme(
         Brightness.light,
-        mica: mica,
-        fontFamily: fontFamily,
-        fontFamilyFallback: fontFamilyFallback,
+        mica: w.mica,
+        fontFamily: w.fontFamily,
+        fontFamilyFallback: w.fontFamilyFallback,
+        accent: accent,
       ),
       darkTheme: buildTheme(
         Brightness.dark,
-        mica: mica,
-        fontFamily: fontFamily,
-        fontFamilyFallback: fontFamilyFallback,
+        mica: w.mica,
+        fontFamily: w.fontFamily,
+        fontFamilyFallback: w.fontFamilyFallback,
+        accent: accent,
       ),
-      home: _Root(app: app, enableDrop: enableDrop, onBrightness: onBrightness, onTitle: onTitle),
+      home: _Root(
+        app: w.app,
+        enableDrop: w.enableDrop,
+        onBrightness: w.onBrightness,
+        onTitle: w.onTitle,
+      ),
     );
   }
 }

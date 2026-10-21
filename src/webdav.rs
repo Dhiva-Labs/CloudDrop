@@ -43,6 +43,7 @@ const CAPS: Capabilities = Capabilities {
 
 /// Any WebDAV server, signed in with a form.
 pub static INFO: ProviderInfo = ProviderInfo {
+    experimental: false,
     id: "webdav",
     name: "WebDAV",
     caps: CAPS,
@@ -76,6 +77,7 @@ pub static INFO: ProviderInfo = ProviderInfo {
 /// Nextcloud, signed in with Login Flow v2 ([`nextcloud_login_start`]). Its chunked uploads are
 /// kept on the server, so an interrupted upload continues where it stopped.
 pub static NEXTCLOUD_INFO: ProviderInfo = ProviderInfo {
+    experimental: false,
     id: "nextcloud",
     name: "Nextcloud",
     caps: Capabilities { resumable: true, ..CAPS },

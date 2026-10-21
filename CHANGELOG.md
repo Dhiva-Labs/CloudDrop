@@ -12,6 +12,12 @@ A new look, ARM64, and more clouds.
   fake servers (SFTP against a real OpenSSH) but not yet with real accounts, and OneDrive and
   Dropbox need app registrations before release builds can sign in
   ([docs/PROVIDERS.md](docs/PROVIDERS.md)).
+- **Proton Drive (experimental)**, through Proton's own command-line app (`proton-drive`),
+  which signs in and does the encryption. Only builds from source offer it (`./install.sh`
+  turns it on with `CLOUDDROP_EXPERIMENTAL_PROVIDERS=1`); the PPA, snap and Store builds
+  don't, until Proton opens its SDK to third-party apps. This is a third-party application not
+  officially supported by Proton. Tested against a fake of Proton's CLI, not a real account
+  yet ([docs/PROVIDERS.md](docs/PROVIDERS.md#proton-drive)).
 - Command line: `clouddrop providers`, `setup --provider <id> --set … --secret …`, `check`;
   `login` signs in to whichever provider is set up.
 - **Several folders, several clouds**: upload another folder to a cloud of its own, e.g.

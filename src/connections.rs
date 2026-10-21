@@ -211,6 +211,28 @@ fn suggest_name_among(folder: &Path, taken: &[String]) -> String {
         .expect("unbounded")
 }
 
+/// The apps' look (`theme`, `accent`) belongs to the installation, not to one folder: it is
+/// kept the same in every connection's config, so switching folders never changes it.
+pub const APPEARANCE: [&str; 2] = ["theme", "accent"];
+
+/// Sets an [`APPEARANCE`] key in every connection's config.
+pub fn set_appearance(key: &str, value: &str) -> Result<()> {
+    for conn in all() {
+        let mut cfg = conn.load()?;
+        cfg.set_key(key, value)?;
+        cfg.save_to(&conn.config)?;
+    }
+    Ok(())
+}
+
+/// A new connection looks like the others: the theme and accent of the first one there is.
+pub fn inherit_appearance(cfg: &mut Config) {
+    if let Some(first) = all().into_iter().filter_map(|c| c.load().ok()).next() {
+        cfg.theme = first.theme;
+        cfg.accent = first.accent;
+    }
+}
+
 /// Leaves nothing behind of a connection whose setup didn't finish: no config file means its
 /// directories hold nothing anyone needs. The default connection is never touched.
 pub fn discard_unfinished(conn: &Connection) {

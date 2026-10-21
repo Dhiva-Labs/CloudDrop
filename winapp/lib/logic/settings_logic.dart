@@ -43,3 +43,10 @@ List<String> parseCommaList(String text) => [
   for (final part in text.split(','))
     if (part.trim().isNotEmpty) part.trim(),
 ];
+
+/// The name of an accent colour setting: "teal" → "Teal"; "default" → "CloudDrop blue".
+String accentLabel(String name) => name == 'default'
+    ? 'CloudDrop blue'
+    : name.isEmpty
+    ? name
+    : name[0].toUpperCase() + name.substring(1);

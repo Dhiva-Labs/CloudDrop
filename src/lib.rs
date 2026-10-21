@@ -15,6 +15,7 @@ pub mod mega;
 pub mod notifier;
 pub mod oauth;
 pub mod onedrive;
+pub mod proton;
 pub mod remote;
 pub mod s3;
 pub mod sftp;
@@ -78,6 +79,8 @@ pub fn remote_in(cfg: &config::Config, data_dir: &Path, config_file: &Path) -> A
         remote::Provider::Mega => {
             Arc::new(remote::Remote::Mega(mega::Mega::new(drive::http_client(), &cfg.mega, data_dir)))
         }
+        // Proton's CLI keeps the sign-in; uploads are staged in the data directory.
+        remote::Provider::Proton => Arc::new(remote::Remote::Proton(proton::Proton::new(&cfg.proton, data_dir))),
     }
 }
 

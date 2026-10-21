@@ -66,7 +66,7 @@ void main() {
     'settings_remove_dialog',
     () => twoFoldersApp(remember: 'Work'),
     pane: AppPane.settings,
-    tall: 1400,
+    tall: 1500,
     act: (tester, t) async {
       // (No scrolling: the whole page is on screen.)
       await tester.tap(find.text('Remove This Folder…'));

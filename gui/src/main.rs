@@ -188,6 +188,9 @@ impl App {
         }
         // Before any window: the setup assistant uses it too.
         ui::install_css();
+        // The accent's text shade follows the light or dark style, which the system can switch.
+        let me = self.clone();
+        adw::StyleManager::default().connect_dark_notify(move |_| me.apply_appearance());
         let about = gio::SimpleAction::new("about", None);
         let me = self.clone();
         about.connect_activate(move |_, _| me.show_about());
@@ -272,6 +275,16 @@ impl App {
         self.other_dbs.borrow().get(name).cloned()
     }
 
+    /// The theme and accent from the settings (the system's style before setup).
+    fn apply_appearance(&self) {
+        let snap = self.snap.borrow();
+        let cfg = snap.as_ref().and_then(|s| s.cfg.as_ref());
+        ui::apply_appearance(
+            cfg.map_or("system", |c| c.theme_name()),
+            cfg.map_or("default", |c| c.accent_name()),
+        );
+    }
+
     fn refresh(self: &Rc<Self>) {
         let list = connections::all();
         let current = connections::current();
@@ -315,6 +328,7 @@ impl App {
         }
         *self.snap.borrow_mut() = Some(s);
         *self.all.borrow_mut() = all;
+        self.apply_appearance();
     }
 
     /// Opens the window, or the setup assistant if CloudDrop isn't ready yet.

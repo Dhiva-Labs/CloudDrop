@@ -42,4 +42,9 @@ void main() {
     expect(commaList(['*.tmp', '*.bak']), '*.tmp, *.bak');
     expect(parseCommaList(''), isEmpty);
   });
+
+  test('accent labels', () {
+    expect(accentLabel('default'), 'CloudDrop blue');
+    expect(accentLabel('teal'), 'Teal');
+  });
 }

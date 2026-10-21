@@ -150,6 +150,8 @@ class AppConfig {
     this.autoFreeDays,
     this.keepLocal = const [],
     this.sections = const {},
+    this.theme = 'system',
+    this.accent = 'default',
   });
 
   final String syncDir;
@@ -169,6 +171,12 @@ class AppConfig {
   /// assistant; secrets are never among them.
   final Map<String, Map<String, String>> sections;
 
+  /// The app's look: `system`, `light` or `dark`.
+  final String theme;
+
+  /// The accent colour's name (`default` = CloudDrop blue).
+  final String accent;
+
   /// A client is configured (a built-in one is written to the config by setup).
   bool get hasClient => clientId.isNotEmpty && hasClientSecret;
 
@@ -183,6 +191,8 @@ class AppConfig {
     ignore: [for (final x in (j['ignore'] as List? ?? const [])) '$x'],
     autoFreeDays: (j['auto_free_days'] as num?)?.toInt(),
     keepLocal: [for (final x in (j['keep_local'] as List? ?? const [])) '$x'],
+    theme: j['theme'] as String? ?? 'system',
+    accent: j['accent'] as String? ?? 'default',
     sections: {
       for (final e in j.entries)
         if (e.value is Map && e.key != 'endpoints')
@@ -200,6 +210,8 @@ class AppConfig {
     List<String>? ignore,
     Object? autoFreeDays = _keep,
     List<String>? keepLocal,
+    String? theme,
+    String? accent,
   }) => AppConfig(
     syncDir: syncDir,
     driveFolder: driveFolder,
@@ -212,6 +224,8 @@ class AppConfig {
     autoFreeDays: identical(autoFreeDays, _keep) ? this.autoFreeDays : autoFreeDays as int?,
     keepLocal: keepLocal ?? this.keepLocal,
     sections: sections,
+    theme: theme ?? this.theme,
+    accent: accent ?? this.accent,
   );
 
   @override
@@ -226,7 +240,9 @@ class AppConfig {
       other.notifications == notifications &&
       _listEq(other.ignore, ignore) &&
       other.autoFreeDays == autoFreeDays &&
-      _listEq(other.keepLocal, keepLocal);
+      _listEq(other.keepLocal, keepLocal) &&
+      other.theme == theme &&
+      other.accent == accent;
 
   @override
   int get hashCode => Object.hash(
@@ -239,6 +255,8 @@ class AppConfig {
     Object.hashAll(ignore),
     autoFreeDays,
     Object.hashAll(keepLocal),
+    theme,
+    accent,
   );
 }
 

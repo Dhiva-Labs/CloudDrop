@@ -228,11 +228,8 @@ class FakeEngine implements EngineApi {
         driveFolder: driveFolder,
         provider: provider,
       );
-      v.config ??= AppConfig(
-        syncDir: folder,
-        driveFolder: driveFolder,
-        clientId: '',
-        hasClientSecret: false,
+      v.config ??= _withLook(
+        AppConfig(syncDir: folder, driveFolder: driveFolder, clientId: '', hasClientSecret: false),
       );
     }
     return res;
@@ -266,7 +263,26 @@ class FakeEngine implements EngineApi {
   Future<AppConfig?> configGet() async => config;
 
   @override
-  Future<ActionResult> configSet(String key, String value) async => _do('config set $key $value');
+  Future<ActionResult> configSet(String key, String value) async {
+    final r = _do('config set $key $value');
+    // The look is read back from the config (the other settings stay as the test set them).
+    // It is the installation's: like the CLI, every connection gets it.
+    if (r.ok && (key == 'theme' || key == 'accent')) {
+      for (final e in [root, ...root.views.values]) {
+        final c = e.config;
+        if (c != null) {
+          e.config = key == 'theme' ? c.copyWith(theme: value) : c.copyWith(accent: value);
+        }
+      }
+    }
+    return r;
+  }
+
+  /// [c] with the installation's look (as the CLI gives a new connection).
+  AppConfig _withLook(AppConfig c) {
+    final look = root.config;
+    return look == null ? c : c.copyWith(theme: look.theme, accent: look.accent);
+  }
 
   @override
   Future<List<CloudProvider>> providers() async => providerList;
@@ -545,11 +561,9 @@ class TestApp {
         provider: provider.id,
         providerName: provider.name,
       )
-      ..config = AppConfig(
-        syncDir: dir,
-        driveFolder: driveFolder,
-        clientId: '',
-        hasClientSecret: false,
+      // The installation's look, as every connection has it.
+      ..config = engine._withLook(
+        AppConfig(syncDir: dir, driveFolder: driveFolder, clientId: '', hasClientSecret: false),
       );
     if (!engine.providerList.contains(provider)) {
       engine.providerList = [...engine.providerList, provider];

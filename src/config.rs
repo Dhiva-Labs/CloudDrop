@@ -5,6 +5,13 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// The apps' themes (`theme` in config.toml).
+pub const THEMES: [&str; 3] = ["system", "light", "dark"];
+
+/// The apps' accent colours (`accent`). "default" is the app's own: the system accent on Linux,
+/// CloudDrop blue on Windows.
+pub const ACCENTS: [&str; 7] = ["default", "blue", "teal", "green", "purple", "pink", "orange"];
+
 /// Default upload chunk: 8 MiB (Drive requires multiples of 256 KiB).
 pub const DEFAULT_CHUNK: usize = 8 * 1024 * 1024;
 const CHUNK_UNIT: usize = 256 * 1024;
@@ -34,6 +41,12 @@ pub struct Config {
     /// Folders (relative to sync_dir) that automatic space saving never touches.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub keep_local: Vec<String>,
+    /// The apps' look: "system" (empty), "light" or "dark". The engine ignores it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub theme: String,
+    /// The apps' accent colour, one of [`ACCENTS`]; empty = "default".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub accent: String,
     #[serde(skip_serializing_if = "is_default_chunk")]
     pub chunk_size: usize,
     #[serde(skip_serializing_if = "Endpoints::is_default")]
@@ -55,6 +68,9 @@ pub struct Config {
     pub sftp: crate::sftp::SftpConfig,
     #[serde(default, skip_serializing_if = "crate::mega::MegaConfig::is_default")]
     pub mega: crate::mega::MegaConfig,
+    /// `[proton]`: Proton Drive through Proton's CLI (experimental, see `Provider::available`).
+    #[serde(default, skip_serializing_if = "crate::proton::ProtonConfig::is_default")]
+    pub proton: crate::proton::ProtonConfig,
 }
 
 /// Google endpoints; overridable so tests can point at a local fake.
@@ -126,6 +142,8 @@ impl Default for Config {
             ignore: default_ignore(),
             auto_free_days: None,
             keep_local: Vec::new(),
+            theme: String::new(),
+            accent: String::new(),
             chunk_size: DEFAULT_CHUNK,
             endpoints: Endpoints::default(),
             onedrive: OneDriveConfig::default(),
@@ -135,6 +153,7 @@ impl Default for Config {
             s3: Default::default(),
             sftp: Default::default(),
             mega: Default::default(),
+            proton: Default::default(),
         }
     }
 }
@@ -223,6 +242,9 @@ impl Config {
         if self.parallel_uploads == 0 {
             bail!("parallel_uploads must be at least 1");
         }
+        if let Some(why) = self.provider.unavailable_reason() {
+            bail!("{why}");
+        }
         Ok(())
     }
 
@@ -271,12 +293,34 @@ impl Config {
                     .filter(|p| !p.is_empty())
                     .collect()
             }
+            "theme" => {
+                if !THEMES.contains(&v) {
+                    bail!("theme must be one of {}", THEMES.join(", "));
+                }
+                self.theme = if v == "system" { String::new() } else { v.to_string() };
+            }
+            "accent" => {
+                if !ACCENTS.contains(&v) {
+                    bail!("accent must be one of {}", ACCENTS.join(", "));
+                }
+                self.accent = if v == "default" { String::new() } else { v.to_string() };
+            }
             other => bail!(
                 "unknown or read-only setting {other:?}; editable: parallel_uploads, settle_secs, \
-                 rescan_secs, notifications, ignore, auto_free_days, keep_local"
+                 rescan_secs, notifications, ignore, auto_free_days, keep_local, theme, accent"
             ),
         }
         self.validate()
+    }
+
+    /// `theme`, with "system" for the default.
+    pub fn theme_name(&self) -> &str {
+        if self.theme.is_empty() { "system" } else { &self.theme }
+    }
+
+    /// `accent`, with "default" for the default.
+    pub fn accent_name(&self) -> &str {
+        if self.accent.is_empty() { "default" } else { &self.accent }
     }
 
     /// The config as JSON for desktop apps, with the client secret withheld.
@@ -289,6 +333,8 @@ impl Config {
             );
             obj.insert("auto_free_days".into(), serde_json::json!(self.auto_free_days));
             obj.insert("keep_local".into(), serde_json::json!(self.keep_local));
+            obj.insert("theme".into(), serde_json::json!(self.theme_name()));
+            obj.insert("accent".into(), serde_json::json!(self.accent_name()));
             obj.insert("config_path".into(), serde_json::json!(config_path()));
             obj.insert("data_dir".into(), serde_json::json!(data_dir()));
         }
@@ -434,6 +480,15 @@ mod tests {
         assert_eq!(c.auto_free_days, None);
         assert!(c.set_key("parallel_uploads", "0").is_err());
         assert!(c.set_key("sync_dir", "/x").is_err());
+        c.set_key("theme", "dark").unwrap();
+        c.set_key("accent", "teal").unwrap();
+        assert_eq!((c.theme_name(), c.accent_name()), ("dark", "teal"));
+        assert_eq!((c.public_json()["theme"].as_str(), c.public_json()["accent"].as_str()), (Some("dark"), Some("teal")));
+        c.set_key("theme", "system").unwrap();
+        c.set_key("accent", "default").unwrap();
+        assert!(c.theme.is_empty() && c.accent.is_empty(), "defaults stay out of config.toml");
+        assert!(c.set_key("theme", "sepia").is_err());
+        assert!(c.set_key("accent", "beige").is_err());
         assert_eq!(c.public_json()["client_secret"], serde_json::json!(false));
     }
 

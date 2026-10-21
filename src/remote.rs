@@ -35,11 +35,25 @@ pub enum Provider {
     Sftp,
     #[serde(rename = "mega")]
     Mega,
+    #[serde(rename = "proton")]
+    Proton,
 }
 
 impl Provider {
-    /// Every provider, for listings (setup, `clouddrop setup --provider`).
-    pub const ALL: &'static [Provider] = &[Provider::GoogleDrive, Provider::OneDrive, Provider::Dropbox, Provider::WebDav, Provider::Nextcloud, Provider::S3, Provider::Sftp, Provider::Mega];
+    /// Every provider this version knows, offered or not (see [`Provider::available`]).
+    pub const ALL: &'static [Provider] = &[Provider::GoogleDrive, Provider::OneDrive, Provider::Dropbox, Provider::WebDav, Provider::Nextcloud, Provider::S3, Provider::Sftp, Provider::Mega, Provider::Proton];
+
+    /// The providers this build offers, for listings (setup, `clouddrop providers`): all of
+    /// them but the experimental ones, unless the build turned those on
+    /// ([`EXPERIMENTAL_PROVIDERS`]).
+    pub fn available() -> impl Iterator<Item = Provider> {
+        Self::ALL.iter().copied().filter(|p| p.is_available())
+    }
+
+    /// This build offers it: it isn't experimental, or the build turned experimental providers on.
+    pub fn is_available(self) -> bool {
+        !self.info().experimental || EXPERIMENTAL_PROVIDERS
+    }
 
     pub fn info(self) -> &'static ProviderInfo {
         match self {
@@ -51,6 +65,7 @@ impl Provider {
             Provider::S3 => &crate::s3::INFO,
             Provider::Sftp => &crate::sftp::INFO,
             Provider::Mega => &crate::mega::INFO,
+            Provider::Proton => &crate::proton::INFO,
         }
     }
 
@@ -80,7 +95,27 @@ impl Provider {
     pub fn is_default(&self) -> bool {
         *self == Provider::default()
     }
+
+    /// Why this build can't use the provider; None when it can.
+    pub fn unavailable_reason(self) -> Option<String> {
+        (!self.is_available()).then(|| {
+            format!(
+                "{} is experimental and this build of CloudDrop doesn't include it; build CloudDrop from \
+                 source with CLOUDDROP_EXPERIMENTAL_PROVIDERS=1 (./install.sh does) to use it",
+                self.display_name()
+            )
+        })
+    }
 }
+
+/// Whether this build offers experimental providers (Proton Drive): built with
+/// `CLOUDDROP_EXPERIMENTAL_PROVIDERS=1` in the environment, as `./install.sh` does. Store, snap,
+/// PPA and Windows package builds leave it unset, so they don't offer them, and a config naming
+/// one is refused with [`Provider::unavailable_reason`].
+pub const EXPERIMENTAL_PROVIDERS: bool = match option_env!("CLOUDDROP_EXPERIMENTAL_PROVIDERS") {
+    Some(v) => v.len() == 1 && v.as_bytes()[0] == b'1',
+    None => false,
+};
 
 /// What the engine and the apps need to know about a provider without a client.
 #[derive(Debug)]
@@ -91,6 +126,8 @@ pub struct ProviderInfo {
     pub caps: Capabilities,
     pub sign_in: SignIn,
     pub web_url: fn(Kind, &str) -> Option<String>,
+    /// Offered only by builds that turn experimental providers on ([`EXPERIMENTAL_PROVIDERS`]).
+    pub experimental: bool,
 }
 
 /// How someone connects CloudDrop to a provider; the setup assistants are drawn from it
@@ -316,6 +353,7 @@ pub enum Remote {
     S3(Box<crate::s3::S3>),
     Sftp(crate::sftp::Sftp),
     Mega(crate::mega::Mega),
+    Proton(crate::proton::Proton),
 }
 
 /// Runs `$body` with `$c` bound to whichever client `$remote` holds.
@@ -329,6 +367,7 @@ macro_rules! each_client {
             Remote::S3($c) => $body,
             Remote::Sftp($c) => $body,
             Remote::Mega($c) => $body,
+            Remote::Proton($c) => $body,
         }
     };
 }
@@ -343,6 +382,7 @@ impl Remote {
             Remote::S3(_) => Provider::S3,
             Remote::Sftp(_) => Provider::Sftp,
             Remote::Mega(_) => Provider::Mega,
+            Remote::Proton(_) => Provider::Proton,
         }
     }
 
@@ -445,6 +485,17 @@ mod tests {
         assert!(toml::from_str::<C>("provider = \"floppy\"").is_err());
         for p in Provider::ALL {
             assert_eq!(Provider::parse(p.as_str()), Some(*p), "ids are unique and parse back");
+        }
+    }
+
+    #[test]
+    fn experimental_providers_only_in_builds_that_turn_them_on() {
+        assert!(Provider::Proton.info().experimental);
+        let offered: Vec<Provider> = Provider::available().collect();
+        assert_eq!(offered.contains(&Provider::Proton), EXPERIMENTAL_PROVIDERS);
+        assert_eq!(Provider::Proton.unavailable_reason().is_some(), !EXPERIMENTAL_PROVIDERS);
+        for p in Provider::ALL.iter().filter(|p| !p.info().experimental) {
+            assert!(offered.contains(p) && p.unavailable_reason().is_none(), "{p:?} is always offered");
         }
     }
 

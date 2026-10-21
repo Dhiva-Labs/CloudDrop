@@ -993,6 +993,9 @@ void main() {
         expect(list.single.dataDir, multi.dataDir);
         expect(list.single.folder, multi.syncDir);
 
+        // The app's look is the installation's: a new folder starts with it.
+        final home = base.forConnection('default');
+        expect((await home.configSet('accent', 'teal')).ok, isTrue);
         final add = await base.addConnection('Work', folder: workDir, driveFolder: 'Multi Work');
         expect(add.ok, isTrue, reason: add.message);
         expect(add.message, contains('Added "Work"'));
@@ -1011,6 +1014,14 @@ void main() {
         final st = await work.status();
         expect((st.configured, st.signedIn, st.folder), (true, false, workDir));
         expect((await work.configGet())!.driveFolder, 'Multi Work');
+        expect((await work.configGet())!.accent, 'teal');
+        // ...and setting it on one folder sets it on every one.
+        expect((await work.configSet('theme', 'dark')).ok, isTrue);
+        expect((await work.configSet('accent', 'default')).ok, isTrue);
+        final look = (await home.configGet())!;
+        expect((look.theme, look.accent), ('dark', 'default'));
+        expect((await home.configSet('theme', 'system')).ok, isTrue);
+        expect((await work.configGet())!.theme, 'system');
         expect((await base.forConnection('default').configGet())!.driveFolder, 'Multi Home');
 
         // Refused, each with the engine's sentence: a folder in use, one inside another's, a

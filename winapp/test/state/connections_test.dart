@@ -318,6 +318,21 @@ void main() {
       expect((w().icon, w().line), (SummaryIcon.attention, 'Not running'));
     });
 
+    test("the app's look: one `config set`, and switching folders never flashes another", () async {
+      final (t, work) = await twoFolders();
+      final app = t.controller;
+      await app.setSetting('theme', 'dark');
+      await app.setSetting('accent', 'purple');
+      expect(t.engine.calls, ['config set theme dark', 'config set accent purple']);
+      expect(work.engine.calls, isEmpty, reason: 'the CLI gives every folder the look itself');
+      final seen = <(String?, String?)>[];
+      app.addListener(() => seen.add((app.config?.theme, app.config?.accent)));
+      await app.selectConnection('Work');
+      await app.selectConnection('default');
+      expect(seen, isNotEmpty);
+      expect(seen.toSet(), {('dark', 'purple')});
+    });
+
     test('a folder removed elsewhere: the app moves on to another', () async {
       final (t, _) = await twoFolders(remember: 'Work');
       final app = t.controller;
@@ -571,6 +586,31 @@ void main() {
       expect(app.connectionName, 'Work');
       expect(t.prefs.remembered, 'Work');
       expect(app.switcher.map((e) => e.name), ['default', 'Work']);
+    });
+
+    test("showing the new folder keeps the app's look (it starts with it)", () async {
+      final t = TestApp(
+        daemon: heartbeat(Phase.idle),
+        config: busyConfig.copyWith(theme: 'dark', accent: 'teal'),
+      );
+      await t.ready();
+      final c = await adding(t);
+      await toSignIn(t, c, '/home/me/Work');
+      final f = c.signInWithBrowser();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      expect(t.engine.log, [
+        'default: connections add Work folder=/home/me/Work drive=Work provider=gdrive',
+      ]);
+      t.engine.view('Work').logins.single
+        ..urlC.complete('https://accounts.example/auth')
+        ..doneC.complete(const ActionResult(true, 'Signed in.'));
+      await f;
+      final app = t.controller;
+      final seen = <(String?, String?)>[];
+      app.addListener(() => seen.add((app.config?.theme, app.config?.accent)));
+      await c.finish();
+      expect(app.connectionName, 'Work');
+      expect(seen.toSet(), {('dark', 'teal')});
     });
 
     test('the service is started if it is not running', () async {

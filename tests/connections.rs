@@ -379,12 +379,18 @@ fn connections_cli_rules() {
     assert!(err.contains("is the folder of the connection \"Other\""), "{err}");
     let err = sb.fails(&strs(&webdav_add("around", &sb.root.join("home"), Some("me"))));
     assert!(err.contains("holds the folder"), "{err}");
+    // The look (theme, accent) is the installation's: set once, every connection has it, and a
+    // connection added later starts with it.
+    sb.ok(&["--connection", "other", "config", "set", "theme", "dark"]);
+    let look = |name: &str| sb.json(&["--connection", name, "config", "get", "--json"])["theme"].clone();
+    assert_eq!((look("default"), look("Other")), (serde_json::json!("dark"), serde_json::json!("dark")));
     // `setup` with a new name makes a connection too.
     sb.ok(&[
         "--connection", "third", "setup", "--provider", "webdav", "--folder", &third.to_string_lossy(),
         "--set", "url=http://127.0.0.1:9/dav/", "--set", "user=me3", "--secret", "password=pw3", "--no-login", "--no-bookmark",
     ]);
     assert_eq!(names(&sb.json(&["connections", "--json"])), ["default", "Other", "third"]);
+    assert_eq!(look("third"), serde_json::json!("dark"), "a new connection looks like the others");
     let creds = |dir: &Path| std::fs::read_to_string(dir.join("credentials.json")).unwrap_or_default();
     assert!(creds(&sb.connection_data("third")).contains("pw3"), "secrets stay in the connection's own data");
     assert!(!creds(&sb.data).contains("pw3"));

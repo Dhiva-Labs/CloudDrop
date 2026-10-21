@@ -27,6 +27,7 @@ use tokio::sync::OnceCell;
 pub const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
 pub static INFO: ProviderInfo = ProviderInfo {
+    experimental: false,
     id: "onedrive",
     name: "OneDrive",
     caps: Capabilities {
@@ -663,7 +664,7 @@ fn encode_segment(name: &str) -> String {
 }
 
 /// "report.pdf" → "report (replaced 2026-10-21).pdf"; ".bashrc" → ".bashrc (replaced 2026-10-21)".
-fn replaced_name(name: &str, date: &str) -> String {
+pub(crate) fn replaced_name(name: &str, date: &str) -> String {
     match name.rfind('.') {
         Some(i) if i > 0 => format!("{} (replaced {date}){}", &name[..i], &name[i..]),
         _ => format!("{name} (replaced {date})"),
@@ -671,7 +672,7 @@ fn replaced_name(name: &str, date: &str) -> String {
 }
 
 /// The UTC date of `t` as YYYY-MM-DD (Howard Hinnant's days-to-civil algorithm).
-fn utc_date(t: SystemTime) -> String {
+pub(crate) fn utc_date(t: SystemTime) -> String {
     let days = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() / 86_400).unwrap_or(0) as i64;
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

@@ -190,7 +190,7 @@ IconData providerIcon(String id) => switch (id) {
   'nextcloud' || 'webdav' => FluentIcons.fabric_network_folder,
   's3' => FluentIcons.blob_storage,
   'sftp' => FluentIcons.command_prompt,
-  'mega' => FluentIcons.lock,
+  'mega' || 'proton' => FluentIcons.lock,
   _ => FluentIcons.cloud,
 };
 

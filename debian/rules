@@ -17,6 +17,8 @@ PKG := $(CURDIR)/debian/clouddrop
 # Not in git; packaging/set-oauth-client.sh writes it before a PPA upload.
 -include packaging/oauth-client.env
 export CLOUDDROP_CLIENT_ID CLOUDDROP_CLIENT_SECRET
+# Packaged builds never offer experimental providers (Proton Drive): docs/PROVIDERS.md.
+unexport CLOUDDROP_EXPERIMENTAL_PROVIDERS
 
 export HOME := $(CURDIR)/debian/.home
 export CARGO_HOME := $(CURDIR)/debian/.cargo

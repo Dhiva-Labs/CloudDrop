@@ -1,4 +1,4 @@
-//! Settings tab: account, folders, upload behaviour, startup.
+//! Settings tab: appearance, account, folders, upload behaviour, startup.
 
 use crate::ops::Ops;
 use crate::providers::Choice;
@@ -6,6 +6,7 @@ use crate::snapshot::Snapshot;
 use crate::{cli, fsops, rt, ui};
 use adw::prelude::*;
 use clouddrop::connections;
+use clouddrop::config;
 use clouddrop::control;
 use clouddrop::db::Kind;
 use clouddrop::util;
@@ -41,6 +42,18 @@ pub fn keep_summary(n: usize) -> String {
         1 => "1 folder".into(),
         n => format!("{n} folders"),
     }
+}
+
+/// The theme choices, in the order of `config::THEMES`.
+pub const THEME_LABELS: [&str; 3] = ["Follow System", "Light", "Dark"];
+
+/// "teal" → "Teal"; "default" → "System Default".
+pub fn accent_label(name: &str) -> String {
+    if name == "default" {
+        return "System Default".into();
+    }
+    let mut c = name.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// The page's sentences that name the provider.
@@ -90,6 +103,8 @@ pub fn remove_dialog_text(folder: &str, cloud: &str) -> (&'static str, String) {
 pub struct SettingsPage {
     pub page: adw::PreferencesPage,
     ops: Rc<Ops>,
+    theme: adw::ComboRow,
+    accents: Vec<(&'static str, gtk::ToggleButton)>,
     space: adw::PreferencesGroup,
     auto_free: adw::ComboRow,
     auto_opts: RefCell<Vec<Option<u32>>>,
@@ -123,6 +138,33 @@ impl SettingsPage {
         let page = adw::PreferencesPage::new();
         let win = ops.win.clone();
         let hooks = ops.hooks().clone();
+
+        let appearance = adw::PreferencesGroup::builder().title("Appearance").build();
+        let theme = adw::ComboRow::builder()
+            .title("Style")
+            .model(&gtk::StringList::new(&THEME_LABELS))
+            .build();
+        theme.add_prefix(&gtk::Image::from_icon_name("weather-clear-night-symbolic"));
+        let accent_row = adw::ActionRow::builder().title("Accent color").build();
+        accent_row.add_prefix(&gtk::Image::from_icon_name("applications-graphics-symbolic"));
+        let swatches = gtk::Box::builder().spacing(8).valign(gtk::Align::Center).build();
+        let mut accents: Vec<(&'static str, gtk::ToggleButton)> = Vec::new();
+        for name in config::ACCENTS {
+            let b = gtk::ToggleButton::builder()
+                .tooltip_text(accent_label(name))
+                .css_classes(["accent-swatch", name])
+                .build();
+            b.update_property(&[gtk::accessible::Property::Label(&accent_label(name))]);
+            if let Some((_, first)) = accents.first() {
+                b.set_group(Some(first));
+            }
+            swatches.append(&b);
+            accents.push((name, b));
+        }
+        accent_row.add_suffix(&swatches);
+        appearance.add(&theme);
+        appearance.add(&accent_row);
+        page.add(&appearance);
 
         let space = adw::PreferencesGroup::builder()
             .title("Space Saving")
@@ -246,6 +288,8 @@ impl SettingsPage {
         let me = Rc::new(SettingsPage {
             page,
             ops,
+            theme,
+            accents,
             space,
             auto_free,
             auto_opts: RefCell::new(AUTO_FREE_PRESETS.to_vec()),
@@ -272,6 +316,26 @@ impl SettingsPage {
             filled: Cell::new(false),
             last: RefCell::default(),
         });
+        {
+            let me2 = Rc::downgrade(&me);
+            me.theme.connect_selected_notify(move |row| {
+                if let Some(me) = me2.upgrade()
+                    && let Some(name) = config::THEMES.get(row.selected() as usize)
+                {
+                    me.save_appearance(|c| c.set_key("theme", name));
+                }
+            });
+        }
+        for (name, b) in &me.accents {
+            let (name, me2): (&'static str, _) = (name, Rc::downgrade(&me));
+            b.connect_toggled(move |b| {
+                if let Some(me) = me2.upgrade()
+                    && b.is_active()
+                {
+                    me.save_appearance(|c| c.set_key("accent", name));
+                }
+            });
+        }
         {
             let me2 = Rc::downgrade(&me);
             me.auto_free.connect_selected_notify(move |row| {
@@ -496,6 +560,21 @@ impl SettingsPage {
         self.ops.edit_config("Settings saved", edit);
     }
 
+    /// Saves the theme or accent and shows it right away; the upload service doesn't need it.
+    fn save_appearance(&self, edit: impl FnOnce(&mut clouddrop::config::Config) -> anyhow::Result<()>) {
+        if self.filling.get() {
+            return;
+        }
+        let Some(mut cfg) = self.ops.cfg() else {
+            return;
+        };
+        if edit(&mut cfg).is_err() {
+            return;
+        }
+        ui::apply_appearance(cfg.theme_name(), cfg.accent_name());
+        self.ops.edit_appearance(cfg.theme_name(), cfg.accent_name());
+    }
+
     fn restart_now(self: &Rc<Self>) {
         self.ops.restart_now("Upload service restarted");
     }
@@ -596,6 +675,11 @@ impl SettingsPage {
             self.sync_space_saving(cfg);
             if !self.filled.get() {
                 self.filling.set(true);
+                let theme = config::THEMES.iter().position(|t| *t == cfg.theme_name()).unwrap_or(0);
+                self.theme.set_selected(theme as u32);
+                for (name, b) in &self.accents {
+                    b.set_active(*name == cfg.accent_name());
+                }
                 self.parallel.set_value(cfg.parallel_uploads as f64);
                 self.settle.set_value(cfg.settle_secs as f64);
                 self.notifications.set_active(cfg.notifications);

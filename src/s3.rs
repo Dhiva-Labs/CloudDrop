@@ -61,6 +61,7 @@ const META_MD5: &str = "clouddrop-md5";
 const META_UPLOAD: &str = "clouddrop-upload";
 
 pub static INFO: ProviderInfo = ProviderInfo {
+    experimental: false,
     id: "s3",
     name: "S3-compatible storage",
     caps: Capabilities {

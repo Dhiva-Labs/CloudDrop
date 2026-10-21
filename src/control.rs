@@ -259,7 +259,7 @@ pub struct SetupParams {
 /// Writes the config (keeping other settings) and creates the folder.
 pub fn apply_setup(p: &SetupParams) -> Result<Config> {
     let path = config::config_path();
-    let mut cfg = Config::load_from(&path).unwrap_or_default();
+    let mut cfg = Config::load_from(&path).unwrap_or_else(|_| new_config());
     let (id, secret) = match &p.client {
         Some((id, secret)) => (id.trim().to_string(), secret.trim().to_string()),
         None => builtin_client()
@@ -332,7 +332,7 @@ pub fn bound_elsewhere(provider: Provider) -> Option<String> {
 /// provider's own section struct) and its secrets, after checking the form's required fields.
 pub fn apply_provider_setup(p: &ProviderSetup) -> Result<Config> {
     let path = config::config_path();
-    let mut cfg = Config::load_from(&path).unwrap_or_default();
+    let mut cfg = Config::load_from(&path).unwrap_or_else(|_| new_config());
     let (id, name) = (p.provider.as_str(), p.provider.display_name());
     let sync_dir = std::path::absolute(&p.sync_dir)?;
     crate::connections::check_folder(&sync_dir, &crate::connections::current().name)?;
@@ -388,6 +388,13 @@ pub fn apply_provider_setup(p: &ProviderSetup) -> Result<Config> {
         crate::credentials::save(id, secrets)?;
     }
     Ok(cfg)
+}
+
+/// The settings of a connection set up now: the defaults, with the other connections' look.
+fn new_config() -> Config {
+    let mut cfg = Config::default();
+    crate::connections::inherit_appearance(&mut cfg);
+    cfg
 }
 
 /// Set up: the config loads, and Google Drive (whose client is in the config) has a client.
@@ -491,8 +498,7 @@ pub fn providers_json() -> serde_json::Value {
         FieldKind::Secret => "secret",
         FieldKind::File => "file",
     };
-    Provider::ALL
-        .iter()
+    Provider::available()
         .map(|p| {
             let info = p.info();
             let sign_in = match &info.sign_in {
@@ -511,7 +517,8 @@ pub fn providers_json() -> serde_json::Value {
                 "id": info.id,
                 "name": info.name,
                 "verify_by_download": info.caps.hash.is_none(),
-                "web_links": has_web_links(*p),
+                "web_links": has_web_links(p),
+                "experimental": info.experimental,
                 "sign_in": sign_in,
             })
         })
@@ -953,9 +960,11 @@ mod tests {
         assert_eq!(
             *google,
             serde_json::json!({"id": "gdrive", "name": "Google Drive", "verify_by_download": false,
-                               "web_links": true, "sign_in": {"kind": "google"}})
+                               "web_links": true, "experimental": false, "sign_in": {"kind": "google"}})
         );
-        assert_eq!(all.as_array().unwrap().len(), Provider::ALL.len());
+        assert_eq!(all.as_array().unwrap().len(), Provider::available().count());
+        let proton = all.as_array().unwrap().iter().find(|p| p["id"] == "proton");
+        assert_eq!(proton.is_some(), crate::remote::EXPERIMENTAL_PROVIDERS, "offered only when the build says so");
     }
 
     #[test]
