@@ -69,6 +69,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::io::AsyncWriteExt;
 
 pub static INFO: ProviderInfo = ProviderInfo {
+    experimental: false,
     id: "mega",
     name: "MEGA",
     caps: Capabilities {

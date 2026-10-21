@@ -26,6 +26,7 @@ use tokio::io::AsyncWriteExt;
 pub const REDIRECT_PORT: u16 = 53691;
 
 pub static INFO: ProviderInfo = ProviderInfo {
+    experimental: false,
     id: "dropbox",
     name: "Dropbox",
     caps: Capabilities {

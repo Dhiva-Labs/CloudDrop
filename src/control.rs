@@ -409,8 +409,7 @@ pub fn providers_json() -> serde_json::Value {
         FieldKind::Secret => "secret",
         FieldKind::File => "file",
     };
-    Provider::ALL
-        .iter()
+    Provider::available()
         .map(|p| {
             let info = p.info();
             let sign_in = match &info.sign_in {
@@ -429,7 +428,8 @@ pub fn providers_json() -> serde_json::Value {
                 "id": info.id,
                 "name": info.name,
                 "verify_by_download": info.caps.hash.is_none(),
-                "web_links": has_web_links(*p),
+                "web_links": has_web_links(p),
+                "experimental": info.experimental,
                 "sign_in": sign_in,
             })
         })
@@ -869,9 +869,11 @@ mod tests {
         assert_eq!(
             *google,
             serde_json::json!({"id": "gdrive", "name": "Google Drive", "verify_by_download": false,
-                               "web_links": true, "sign_in": {"kind": "google"}})
+                               "web_links": true, "experimental": false, "sign_in": {"kind": "google"}})
         );
-        assert_eq!(all.as_array().unwrap().len(), Provider::ALL.len());
+        assert_eq!(all.as_array().unwrap().len(), Provider::available().count());
+        let proton = all.as_array().unwrap().iter().find(|p| p["id"] == "proton");
+        assert_eq!(proton.is_some(), crate::remote::EXPERIMENTAL_PROVIDERS, "offered only when the build says so");
     }
 
     #[test]

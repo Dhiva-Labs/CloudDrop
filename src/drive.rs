@@ -20,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 pub const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 
 pub static INFO: ProviderInfo = ProviderInfo {
+    experimental: false,
     id: "gdrive",
     name: "Google Drive",
     caps: Capabilities {

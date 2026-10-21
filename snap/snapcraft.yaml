@@ -86,6 +86,8 @@ parts:
       if [ -f packaging/oauth-client.env ]; then
         set -a; . packaging/oauth-client.env; set +a
       fi
+      # Packaged builds never offer experimental providers (Proton Drive): docs/PROVIDERS.md.
+      unset CLOUDDROP_EXPERIMENTAL_PROVIDERS
       export RUSTUP_HOME="$CRAFT_PART_BUILD/.rustup" CARGO_HOME="$CRAFT_PART_BUILD/.cargo"
       export RUSTUP_TOOLCHAIN=1.97.1
       curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN" --no-modify-path

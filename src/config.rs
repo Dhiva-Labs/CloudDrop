@@ -68,6 +68,9 @@ pub struct Config {
     pub sftp: crate::sftp::SftpConfig,
     #[serde(default, skip_serializing_if = "crate::mega::MegaConfig::is_default")]
     pub mega: crate::mega::MegaConfig,
+    /// `[proton]`: Proton Drive through Proton's CLI (experimental, see `Provider::available`).
+    #[serde(default, skip_serializing_if = "crate::proton::ProtonConfig::is_default")]
+    pub proton: crate::proton::ProtonConfig,
 }
 
 /// Google endpoints; overridable so tests can point at a local fake.
@@ -150,6 +153,7 @@ impl Default for Config {
             s3: Default::default(),
             sftp: Default::default(),
             mega: Default::default(),
+            proton: Default::default(),
         }
     }
 }
@@ -222,6 +226,9 @@ impl Config {
         }
         if self.parallel_uploads == 0 {
             bail!("parallel_uploads must be at least 1");
+        }
+        if let Some(why) = self.provider.unavailable_reason() {
+            bail!("{why}");
         }
         Ok(())
     }

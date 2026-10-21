@@ -13,6 +13,7 @@ pub mod dropbox_mock;
 pub mod webdav_mock;
 pub mod s3_mock;
 pub mod mega_mock;
+pub mod proton_fake;
 
 use axum::Router;
 use axum::body::Bytes;

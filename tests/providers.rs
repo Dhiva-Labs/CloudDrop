@@ -180,3 +180,15 @@ async fn mega() {
     everyday_use(h).await;
 }
 
+
+#[tokio::test]
+async fn proton() {
+    let fake = common::proton_fake::FakeProton::new();
+    let mut h = Harness::new().await;
+    h.cfg.provider = Provider::Proton;
+    h.cfg.proton = fake.config();
+    let client = clouddrop::remote_for(&h.cfg, h.token_path());
+    h.use_client(client);
+    everyday_use(h).await;
+    assert!(fake.overlaps().is_empty(), "one CLI command at a time: {:?}", fake.overlaps());
+}

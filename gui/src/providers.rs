@@ -1,6 +1,6 @@
 //! The clouds CloudDrop can upload to, as plain data for the setup assistant and the window.
 //!
-//! The app links the engine, so it reads [`Provider::ALL`] and [`Provider::info`] directly
+//! The app links the engine, so it reads [`Provider::available`] and [`Provider::info`] directly
 //! (the Windows app runs `clouddrop providers --json` for the same list). What the engine
 //! doesn't say (a one-line description, whether CloudDrop only sees its own folder, an icon)
 //! comes from [`extras`]. Everything here is plain data, so tests and previews can build
@@ -81,6 +81,12 @@ pub fn extras(id: &str) -> (&'static str, bool, &'static str) {
         ),
         "sftp" => ("Any computer or server you can reach over SSH.", false, "utilities-terminal-symbolic"),
         "mega" => ("MEGA's end-to-end encrypted cloud storage.", false, "channel-secure-symbolic"),
+        "proton" => (
+            "Experimental: Proton Drive through Proton's own command-line app, which signs in. \
+             This is a third-party application not officially supported by Proton.",
+            false,
+            "channel-secure-symbolic",
+        ),
         _ => ("", false, CLOUD_ICON),
     }
 }
@@ -182,7 +188,7 @@ pub fn is_configured() -> bool {
 /// OAuth, Nextcloud and form pages can be seen before those providers exist. Their setup
 /// fails at the CLI (it doesn't know them) and shows that error on the page.
 pub fn all() -> Vec<Choice> {
-    let mut list: Vec<Choice> = Provider::ALL.iter().map(|p| Choice::of(*p)).collect();
+    let mut list: Vec<Choice> = Provider::available().map(Choice::of).collect();
     if std::env::var("CLOUDDROP_FAKE_PROVIDERS").is_ok_and(|v| v == "1") {
         for f in fakes() {
             if !list.iter().any(|c| c.id == f.id) {
