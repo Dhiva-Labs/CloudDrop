@@ -50,9 +50,10 @@ struct SetupArgs {
     /// Local folder to upload from (default ~/CloudDrop).
     #[arg(long)]
     folder: Option<PathBuf>,
-    /// Name of the top folder in the cloud (in My Drive for Google Drive).
-    #[arg(long, default_value = "CloudDrop")]
-    drive_folder: String,
+    /// Name of the top folder in the cloud (in My Drive for Google Drive). Default: "CloudDrop",
+    /// or for a new connection its folder's name, so connections to one account don't share it.
+    #[arg(long)]
+    drive_folder: Option<String>,
     /// Don't add the folder to the Files sidebar.
     #[arg(long)]
     no_bookmark: bool,
@@ -351,6 +352,14 @@ async fn setup(a: SetupArgs, no_login: bool) -> Result<String> {
         Some(f) => connections::lexical(&f),
         None => existing.as_ref().map(|c| c.sync_dir.clone()).unwrap_or_else(|| Config::default().sync_dir),
     };
+    let drive_folder = drive_folder.unwrap_or_else(|| {
+        let own = sync_dir.file_name().map(|n| n.to_string_lossy().into_owned()).filter(|n| !n.trim().is_empty());
+        match (&existing, connections::current().is_default()) {
+            (Some(c), _) => c.drive_folder.clone(),
+            (None, false) => own.unwrap_or_else(|| "CloudDrop".into()),
+            (None, true) => "CloudDrop".into(),
+        }
+    });
     let cfg = if provider == Provider::GoogleDrive {
         if !settings.is_empty() || !secrets.is_empty() {
             bail!("Google Drive has no --set or --secret settings; use --client-id/--client-secret or --client-json");

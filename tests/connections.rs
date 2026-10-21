@@ -216,6 +216,7 @@ async fn two_clouds_side_by_side() {
 
     let list = sb.json(&["connections", "--json"]);
     assert_eq!(names(&list), ["default", "work"]);
+    assert_eq!(list[1]["drive_folder"], "Work", "a new connection's cloud folder is named after its folder");
     assert_eq!(list[0]["label"], "CloudDrop", "the default connection is shown as its folder");
     assert_eq!((list[1]["label"].as_str(), list[1]["provider"].as_str()), (Some("work"), Some("webdav")));
     assert_eq!(list[1]["configured"], true);
@@ -227,11 +228,11 @@ async fn two_clouds_side_by_side() {
     let daemon = sb.daemon();
     wait("both clouds to have their file", &daemon, || {
         drive.lock().unwrap().lookup("CloudDrop/a.txt").is_some_and(|i| i.content == b"for Drive")
-            && dav.lock().unwrap().file("/Backups/CloudDrop/w.txt").as_deref() == Some(b"for WebDAV".as_slice())
+            && dav.lock().unwrap().file("/Backups/Work/w.txt").as_deref() == Some(b"for WebDAV".as_slice())
     })
     .await;
     // Each cloud got only its own folder.
-    assert!(dav.lock().unwrap().file("/Backups/CloudDrop/a.txt").is_none());
+    assert!(dav.lock().unwrap().file("/Backups/Work/a.txt").is_none());
     assert!(drive.lock().unwrap().lookup("CloudDrop/w.txt").is_none());
     let beat: Value = serde_json::from_slice(&std::fs::read(sb.data.join("daemon.json")).unwrap()).unwrap();
     assert_eq!(beat["connections"], serde_json::json!(["default", "work"]));
@@ -258,10 +259,10 @@ async fn two_clouds_side_by_side() {
     std::fs::write(work.join("x.txt"), "waits").unwrap();
     wait("Drive's second file", &daemon, || drive.lock().unwrap().lookup("CloudDrop/b.txt").is_some()).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(dav.lock().unwrap().file("/Backups/CloudDrop/x.txt").is_none(), "work is paused");
+    assert!(dav.lock().unwrap().file("/Backups/Work/x.txt").is_none(), "work is paused");
     assert_ne!(phase(&sb.data).as_deref(), Some("paused"));
     sb.ok(&["--connection", "work", "resume"]);
-    wait("work resumed", &daemon, || dav.lock().unwrap().file("/Backups/CloudDrop/x.txt").is_some()).await;
+    wait("work resumed", &daemon, || dav.lock().unwrap().file("/Backups/Work/x.txt").is_some()).await;
 
     // A path picks its connection: freeing a file of Work frees it there (WebDAV has no hash,
     // so this downloads the cloud copy to prove it first).
@@ -284,7 +285,7 @@ async fn two_clouds_side_by_side() {
     sb.quick("Photos");
     std::fs::write(photos.join("p.jpg"), "a photo").unwrap();
     wait("the photo in S3", &daemon, || {
-        s3.lock().unwrap().content("laptop/CloudDrop/p.jpg").as_deref() == Some(b"a photo".as_slice())
+        s3.lock().unwrap().content("laptop/Photos/p.jpg").as_deref() == Some(b"a photo".as_slice())
     })
     .await;
     assert_eq!(names(&sb.json(&["connections", "--json"])), ["default", "Photos", "work"], "default first, then by name");
@@ -303,7 +304,7 @@ async fn two_clouds_side_by_side() {
     assert!(removed.contains("Removed \"work\""), "{removed}");
     assert!(!sb.connection_data("work").exists() && !sb.connection_config("work").exists());
     assert_eq!(std::fs::read_to_string(work.join("x.txt")).unwrap(), "waits", "the folder keeps its files");
-    assert!(dav.lock().unwrap().file("/Backups/CloudDrop/w.txt").is_some(), "the cloud keeps its files");
+    assert!(dav.lock().unwrap().file("/Backups/Work/w.txt").is_some(), "the cloud keeps its files");
     wait("the heartbeat without work", &daemon, || {
         std::fs::read(sb.data.join("daemon.json"))
             .ok()
@@ -314,7 +315,7 @@ async fn two_clouds_side_by_side() {
     std::fs::write(work.join("late.txt"), "not uploaded").unwrap();
     std::fs::write(home.join("c.txt"), "the default goes on").unwrap();
     wait("Drive's third file", &daemon, || drive.lock().unwrap().lookup("CloudDrop/c.txt").is_some()).await;
-    assert!(dav.lock().unwrap().file("/Backups/CloudDrop/late.txt").is_none());
+    assert!(dav.lock().unwrap().file("/Backups/Work/late.txt").is_none());
     assert_eq!(names(&sb.json(&["connections", "--json"])), ["default", "Photos"]);
     let err = sb.fails(&["--connection", "work", "status"]);
     assert!(err.contains("no connection named \"work\""), "{err}");

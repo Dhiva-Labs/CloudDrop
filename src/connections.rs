@@ -172,6 +172,46 @@ pub fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// A name for a new connection uploading `folder`: its folder's name made valid (characters a
+/// name can't have become '-'), numbered "Work 2", "Work 3"… when taken.
+pub fn suggest_name(folder: &Path) -> String {
+    let base: String = folder
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.') { c } else { '-' })
+        .collect();
+    let base = base.trim_start_matches(|c: char| !c.is_alphanumeric());
+    let mut base: String = base.chars().take(MAX_NAME - 3).collect();
+    while base.ends_with([' ', '.']) {
+        base.pop();
+    }
+    if check_name(&base).is_err() {
+        base = if base.is_empty() { "Folder".into() } else { format!("{base} folder") };
+        if check_name(&base).is_err() {
+            base = "Folder".into();
+        }
+    }
+    let taken: Vec<String> = existing_names().iter().map(|n| n.to_lowercase()).collect();
+    std::iter::once(base.clone())
+        .chain((2..).map(|n| format!("{base} {n}")))
+        .find(|n| !taken.contains(&n.to_lowercase()))
+        .expect("unbounded")
+}
+
+/// Leaves nothing behind of a connection whose setup didn't finish: no config file means its
+/// directories hold nothing anyone needs. The default connection is never touched.
+pub fn discard_unfinished(conn: &Connection) {
+    if conn.is_default() || conn.exists() {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(&conn.data);
+    if let Some(dir) = conn.config.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// The names of the connections in `connections/` that have a config file, in no order.
 fn existing_names() -> Vec<String> {
     let Ok(dir) = std::fs::read_dir(config_root()) else {
@@ -379,6 +419,24 @@ mod tests {
             std::os::unix::fs::symlink(&a, d.path().join("link")).unwrap();
             assert!(folders_overlap(&d.path().join("link"), &a), "links resolve");
         }
+    }
+
+    #[test]
+    fn suggested_names_are_valid() {
+        for (folder, want) in [
+            ("/home/me/Work", "Work"),
+            ("/home/me/My Photos!", "My Photos-"),
+            ("/home/me/.hidden", "hidden"),
+            ("/home/me/con", "con folder"),
+            ("/home/me/default", "default folder"),
+            ("/", "Folder"),
+            ("/home/me/trailing. ", "trailing"),
+        ] {
+            let got = suggest_name(Path::new(folder));
+            assert_eq!(got, want, "{folder}");
+            check_name(&got).unwrap();
+        }
+        assert!(suggest_name(Path::new(&format!("/x/{}", "y".repeat(60)))).chars().count() <= MAX_NAME);
     }
 
     #[test]

@@ -707,7 +707,9 @@ but the process (`daemon::supervise`):
   [--drive-folder N] [--client-json F]`**: `setup --connection NAME --no-login` for a name not in
   use, with a folder no other connection uses. Then `clouddrop login --connection NAME` (or `check`
   for form providers). A new Google Drive connection takes the build's client, or the one another
-  connection already uses.
+  connection already uses. Its cloud folder (`--drive-folder`) is named after its folder unless
+  given, so two connections to one account don't share one; `setup` keeps the cloud folder name a
+  connection already has (it no longer falls back to "CloudDrop").
 - **`clouddrop connections remove NAME`**: deletes the connection's config.toml (the daemon stops
   its engine within 2 seconds), waits for its status.json to go (10 seconds at most), then deletes
   its config directory and data directory. The sync folder and everything in it stay, and nothing in

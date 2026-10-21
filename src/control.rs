@@ -273,13 +273,13 @@ pub fn apply_setup(p: &SetupParams) -> Result<Config> {
     if !looks_like_client_id(&id) {
         bail!("the client ID should end with .apps.googleusercontent.com");
     }
+    crate::connections::check_folder(&p.sync_dir, &crate::connections::current().name)?;
     if let Ok(db_root) = Db::open_default().and_then(|db| db.meta_get("sync_root"))
         && let Some(root) = db_root
         && Path::new(&root) != std::path::absolute(&p.sync_dir)?
     {
         bail!("CloudDrop already uses {root}; the folder can't be changed after setup");
     }
-    crate::connections::check_folder(&p.sync_dir, &crate::connections::current().name)?;
     cfg.client_id = id;
     cfg.client_secret = secret;
     cfg.sync_dir = std::path::absolute(&p.sync_dir)?;
@@ -335,13 +335,13 @@ pub fn apply_provider_setup(p: &ProviderSetup) -> Result<Config> {
     let mut cfg = Config::load_from(&path).unwrap_or_default();
     let (id, name) = (p.provider.as_str(), p.provider.display_name());
     let sync_dir = std::path::absolute(&p.sync_dir)?;
+    crate::connections::check_folder(&sync_dir, &crate::connections::current().name)?;
     if let Ok(db_root) = Db::open_default().and_then(|db| db.meta_get("sync_root"))
         && let Some(root) = db_root
         && Path::new(&root) != sync_dir
     {
         bail!("CloudDrop already uses {root}; the folder can't be changed after setup");
     }
-    crate::connections::check_folder(&sync_dir, &crate::connections::current().name)?;
     let fields: &[crate::remote::Field] = match p.provider.info().sign_in {
         SignIn::Form(fields) => fields,
         _ => &[],
