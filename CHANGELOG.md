@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 — 2026-10-21
+
+OneDrive and Dropbox, ready to use.
+
+- **OneDrive and Dropbox sign in out of the box** in the packaged builds (snap, PPA, Microsoft
+  Store): they carry CloudDrop's own app registrations, so nobody has to bring a client id.
+- **OneDrive uploads work on a real OneDrive.** OneDrive refused the upload request 0.3.0 sent
+  (a size hint its documentation lists), so every upload failed with "Invalid request (400)".
+  Found in the first test with a real account; Dropbox passed the same test unchanged.
+
 ## 0.3.0 — 2026-10-21
 
 More clouds, several folders at once, a new look with a dark style, and ARM64.
