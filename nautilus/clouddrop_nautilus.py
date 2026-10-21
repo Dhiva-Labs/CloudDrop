@@ -436,10 +436,9 @@ class Connection:
             return None
 
     def learn_root(self, live):
-        """Remember its folder: the database's, else config.toml's sync_dir.
-
-        A database that can't say right now (busy, or not created yet) keeps
-        the folder learnt before.
+        """Remember its folder: the database's sync_root when it can say,
+        else config.toml's sync_dir (no database yet), else the folder
+        learnt before (a busy database).
         """
         self.root = live or configured_folder(self.config) or self.root
 
