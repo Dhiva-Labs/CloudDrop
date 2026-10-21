@@ -26,6 +26,22 @@ What the app runs (all through `lib/data/engine_api.dart`):
 | sign out | `logout` (stops the service, forgets the sign-in), then the assistant restarts at its sign-in page |
 | background service | `service status --json` → `{running, at_login}`, `service start\|enable\|disable` |
 | files | `free`, `restore`, `retry`, `pause`, `resume`, `keep`, `unkeep`, `url` |
+| the folders (connections) | `connections --json` → `[{name, label, folder, provider, data_dir, configured, error, …}]` |
+| another folder | `connections add NAME --folder=… --drive-folder=… [--provider=…] [--set K=V] [--secret K=V]`, then `login --no-browser` or `check` with `--connection NAME` |
+| remove a folder | `connections remove NAME` (the folder and the cloud keep everything) |
+
+Several folders can upload side by side, each a **connection** with its own settings, sign-in,
+`state.db` and `status.json` (in its `data_dir`; see
+[PROVIDERS.md](../docs/PROVIDERS.md#several-clouds-at-once)). Every command about one folder
+carries `--connection NAME` (also `default`), so the app's working directory never matters;
+`connections`, `providers` and `service` are the whole installation's. With more than one
+folder the navigation pane lists them above Home, each with its status dot (a drop-down above
+the screen in a narrow window), and "Add Another Folder…" runs the setup assistant for a new
+connection named after its folder; Settings has "Add Another Folder…" and "Remove This
+Folder…". The folder shown is remembered in `app.json` in the data directory
+(`{"connection": name}`, shared with the GTK app); if it is gone, the first one is shown. An
+engine from before connections (no `connections` command) is used as before, without
+`--connection`.
 
 On Windows a freed item stays in the sync folder as a Cloud Files placeholder that downloads when
 opened, so the Files screen simply opens it; only an item that is gone from the folder offers
@@ -37,6 +53,7 @@ Files, in the order the app looks for them (override with the usual variables):
 | --- | --- | --- | --- |
 | config | `%APPDATA%\clouddrop\config.toml` | `~/.config/clouddrop/config.toml` | `CLOUDDROP_CONFIG` |
 | state db, status | `%LOCALAPPDATA%\clouddrop\` | `~/.local/share/clouddrop/` | `CLOUDDROP_DATA_DIR` |
+| another connection NAME | `connections\NAME\` beside config.toml and in the data folder | the same | |
 | CLI | `CLOUDDROP_BIN`, else `clouddrop.exe` next to the app, else `PATH` | same, `clouddrop` | `CLOUDDROP_BIN` |
 
 ## Build
@@ -81,5 +98,6 @@ themselves); regenerate them with `flutter test --tags store --update-goldens te
 
 `test/ui/*golden*` render every screen, light and dark, 1100x760 and 480 wide, with a bundled
 open font (`test/fonts`: Noto Sans, Liberation Sans for symbols; test only).
-`test/integration` starts the real `clouddrop run` and the fake Drive in a sandbox with an empty
-environment and drives the app's data layer against them.
+`test/integration` starts the real `clouddrop run` and the fake Drive (on a free port) in a sandbox
+with an empty environment and drives the app's data layer against them, with one folder and with
+two (connections).

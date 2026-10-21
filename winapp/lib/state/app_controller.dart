@@ -851,13 +851,14 @@ class AppController extends ChangeNotifier {
     return c;
   }
 
-  /// `clouddrop logout`, then back to the sign-in page of the setup assistant.
+  /// `clouddrop logout`, then back to the sign-in page of the setup assistant. With several
+  /// folders Home offers the sign-in instead, so the others stay a click away.
   Future<ActionResult> signOut() async {
     final r = await engine.logout();
     _report(r);
     if (r.ok) {
       await refreshNow();
-      beginSetup(atSignIn: true);
+      if (!several) beginSetup(atSignIn: true);
     }
     return r;
   }
@@ -890,8 +891,11 @@ class AppController extends ChangeNotifier {
     return services.pathExists(paths.absolute(root, rel));
   }
 
-  /// Opens the folder that holds `config.toml` (to fix or move the file by hand).
-  void openSettingsFolder() => services.system.openPath(paths.configDir);
+  /// The selected connection's settings file (`config.toml`).
+  String get configPath => connection?.config ?? paths.configPath;
+
+  /// Opens the folder that holds its `config.toml` (to fix or move the file by hand).
+  void openSettingsFolder() => services.system.openPath(paths.context.dirname(configPath));
 
   void openFolder() {
     final root = syncDir;

@@ -1103,7 +1103,11 @@ class _DonePage extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('CloudDrop is in File Explorer'),
+                    Text(
+                      c.createdName != null
+                          ? '“CloudDrop - ${c.createdName}” is in File Explorer'
+                          : 'CloudDrop is in File Explorer',
+                    ),
                     Text(
                       "Find it in File Explorer's sidebar. Files show a cloud icon until they're "
                       'downloaded, and a green check when they are on this computer.',

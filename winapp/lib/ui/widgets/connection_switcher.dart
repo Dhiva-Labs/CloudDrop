@@ -80,11 +80,20 @@ class ConnectionIcon extends StatelessWidget {
 String connectionTooltip(ConnectionEntry c) => '${c.label} · ${c.line}';
 
 /// The pane items above Home (expanded and compact pane): one item per connection, "Add Another
-/// Folder…" and a separator. Empty with one connection.
-List<NavigationPaneItem> connectionPaneItems(BuildContext context, AppController app) {
+/// Folder…" and a separator. Empty with one connection. The selected folder is ticked; in the
+/// [compact] pane (icons only) its tile is filled instead.
+List<NavigationPaneItem> connectionPaneItems(
+  BuildContext context,
+  AppController app, {
+  bool compact = false,
+}) {
   final rows = app.switcher;
   if (rows.isEmpty) return const [];
   final theme = FluentTheme.of(context);
+  final res = theme.resources;
+  final filled = WidgetStateProperty.resolveWith<Color?>(
+    (states) => states.isHovered ? res.subtleFillColorTertiary : res.subtleFillColorSecondary,
+  );
   return [
     for (final c in rows)
       PaneItemAction(
@@ -100,6 +109,7 @@ List<NavigationPaneItem> connectionPaneItems(BuildContext context, AppController
           overflow: TextOverflow.ellipsis,
           style: c.selected ? const TextStyle(fontWeight: FontWeight.w600) : null,
         ),
+        tileColor: compact && c.selected ? filled : null,
         trailing: c.selected
             ? Padding(
                 padding: const EdgeInsetsDirectional.only(end: 10),

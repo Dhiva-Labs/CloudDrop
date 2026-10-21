@@ -312,7 +312,7 @@ class _ConfigProblem extends StatelessWidget {
     final theme = FluentTheme.of(context);
     final error = app.configError ?? '';
     final firstLine = error.trim().split(RegExp(r'\r?\n')).first;
-    final path = app.paths.configPath;
+    final path = app.configPath;
     return ScaffoldPage(
       content: Center(
         child: ConstrainedBox(
@@ -323,6 +323,14 @@ class _ConfigProblem extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // With several folders the others stay a click away.
+                if (app.several) ...[
+                  Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: ConnectionMenu(app: app),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 Text("CloudDrop's settings can't be read", style: theme.typography.subtitle),
                 const SizedBox(height: 12),
                 InfoBar(
@@ -407,7 +415,8 @@ class MainView extends StatelessWidget {
             autoSuggestBox: mode == PaneDisplayMode.expanded ? _StatusChip(app: app) : null,
             items: [
               // Several folders: each one with its status, above the screens.
-              if (mode != PaneDisplayMode.top) ...connectionPaneItems(context, app),
+              if (mode != PaneDisplayMode.top)
+                ...connectionPaneItems(context, app, compact: mode == PaneDisplayMode.compact),
               PaneItem(
                 icon: const Icon(FluentIcons.home),
                 title: const Text('Home'),

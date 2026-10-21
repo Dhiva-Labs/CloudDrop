@@ -178,6 +178,29 @@ void main() {
     expect(find.textContaining('no longer uploads “Work”'), findsOneWidget);
   });
 
+  uiTest("a folder whose settings can't be read still lets you switch to the others", (
+    tester,
+  ) async {
+    final t = twoFoldersApp(remember: 'Work');
+    t.engine.view('Work').statusValue = const EngineStatus.unconfigured(
+      configError: 'invalid config: TOML parse error at line 1, column 5',
+    );
+    await pumpApp(tester, t);
+    expect(find.text("CloudDrop's settings can't be read"), findsOneWidget);
+    expect(
+      find.textContaining('/connections/Work/config.toml'),
+      findsNothing,
+      reason: 'Windows paths in this scenario',
+    );
+    expect(find.textContaining(r'connections\Work\config.toml'), findsOneWidget);
+    await tester.tap(find.byType(DropDownButton));
+    await tester.settle();
+    await tester.tap(inMenu('CloudDrop'));
+    await tester.settle();
+    expect(t.controller.connectionName, 'default');
+    expect(find.text('Everything is uploaded'), findsOneWidget);
+  });
+
   uiTest('removing the only folder leads to the setup assistant', (tester) async {
     final t = calmApp();
     await pumpApp(tester, t, size: const Size(1100, 1400));

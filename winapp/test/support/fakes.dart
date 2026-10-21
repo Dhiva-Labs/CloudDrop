@@ -555,12 +555,15 @@ class TestApp {
       engine.providerList = [...engine.providerList, provider];
     }
     final o = others[name] = TestConnection(name, view)..status.value = daemon;
+    final paths = controller.paths;
     engine.connectionList = [
       ...engine.listed,
       Connection(
         name: name,
         label: name,
         folder: dir,
+        config: ctx.join(ctx.dirname(paths.configPath), 'connections', name, 'config.toml'),
+        dataDir: ctx.join(paths.dataDir, 'connections', name),
         provider: provider.id,
         providerName: provider.name,
         driveFolder: driveFolder,

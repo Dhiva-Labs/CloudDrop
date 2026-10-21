@@ -312,6 +312,27 @@ void main() {
       expect(app.connectionName, 'default');
     });
 
+    test('signing out of one of several folders leaves Home offering the sign-in', () async {
+      final (t, work) = await twoFolders(remember: 'Work');
+      final app = t.controller;
+      work.engine.result = (call) => const ActionResult(true, 'Signed out.');
+      final r = await app.signOut();
+      expect(r.ok, isTrue);
+      expect(work.engine.calls, ['logout']);
+      expect(t.engine.calls, isEmpty);
+      expect(app.setupActive, isFalse, reason: 'the other folders stay a click away');
+    });
+
+    test("the settings file of the folder shown is the one named on its error page", () async {
+      final (t, _) = await twoFolders(remember: 'Work');
+      final app = t.controller;
+      expect(app.configPath, '/home/me/.config/clouddrop/connections/Work/config.toml');
+      app.openSettingsFolder();
+      expect(t.system.opened, ['/home/me/.config/clouddrop/connections/Work']);
+      await app.selectConnection('default');
+      expect(app.configPath, '/home/me/.config/clouddrop/config.toml');
+    });
+
     test('with several folders, one that needs a sign-in says so on Home, no assistant', () async {
       final t = TestApp(status: const EngineStatus(configured: true, signedIn: false));
       t.addConnection('Work');

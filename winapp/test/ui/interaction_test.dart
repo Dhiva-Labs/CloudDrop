@@ -939,7 +939,8 @@ void main() {
     Future<TestApp> settings(WidgetTester tester, {Size size = wide, TestApp? app}) async {
       final t = app ?? busyApp();
       t.controller.pane.value = AppPane.settings;
-      await pumpApp(tester, t, size: Size(size.width, 1300));
+      // The whole page on screen (it has the folders' Add and Remove cards too).
+      await pumpApp(tester, t, size: Size(size.width, 1450));
       return t;
     }
 
