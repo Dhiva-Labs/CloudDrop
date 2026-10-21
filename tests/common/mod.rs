@@ -740,7 +740,7 @@ impl Harness {
     pub fn start_with_store(&mut self, store: std::sync::Arc<dyn clouddrop::store::LocalStore>) {
         assert!(self.engine.is_none());
         let (tx, rx) = watch::channel(false);
-        let opts = clouddrop::engine::RunOptions { config_file: None, store };
+        let opts = clouddrop::engine::RunOptions { store, ..Default::default() };
         let handle = tokio::spawn(clouddrop::engine::run_with_caps(
             self.cfg.clone(),
             opts,
