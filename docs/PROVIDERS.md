@@ -657,7 +657,8 @@ notices both by looking.
 
 What belongs to the whole installation stays at the top of the data directory: `engine.lock` (one
 daemon), `daemon.json` (its heartbeat), `daemon.stop` (a request to stop it), `tray.lock` (one
-top-bar icon, which shows every connection) and the Windows agent's `agent.log`.
+top-bar icon, which shows every connection), `app.json` (the apps' remembered choice,
+`{"connection": name}`) and the Windows agent's `agent.log`.
 
 - **Names**: 1 to 32 characters: letters, digits, spaces, `-`, `_` and `.`, starting with a letter
   or digit and not ending in a space or dot. Unique ignoring case (Windows folders ignore case).

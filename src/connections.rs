@@ -329,7 +329,10 @@ fn forget_files(conn: &Connection) -> Result<()> {
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         // What belongs to the installation, not to the default connection.
-        if matches!(name.as_str(), DIR | "engine.lock" | "daemon.json" | "daemon.stop" | "tray.lock" | "agent.log") {
+        if matches!(
+            name.as_str(),
+            DIR | "engine.lock" | "daemon.json" | "daemon.stop" | "tray.lock" | "agent.log" | "app.json"
+        ) {
             continue;
         }
         let path = e.path();
