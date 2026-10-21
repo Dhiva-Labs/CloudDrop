@@ -146,7 +146,7 @@ pub fn name_factory(ctx: Rc<ViewCtx>, on_setup: impl Fn(&gtk::ListItem, &gtk::Wi
             let flat = ctx.flat.get();
             if flat {
                 let parent = util::parent_of(&e.path);
-                c.sub.set_label(if parent.is_empty() { "CloudDrop" } else { parent });
+                c.sub.set_label(&if parent.is_empty() { crate::ui::root_name() } else { parent.to_string() });
             }
             c.sub.set_visible(flat);
             c.pin.set_visible(is_dir && fsops::covered(&ctx.keep.borrow(), &e.path));

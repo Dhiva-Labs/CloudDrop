@@ -151,9 +151,9 @@ impl S3Config {
     }
 }
 
-/// The secret key `clouddrop setup` saved, if any.
-pub fn saved_secret() -> Option<String> {
-    match crate::credentials::load(INFO.id) {
+/// The secret key `clouddrop setup` saved in `credentials` (a connection's credentials.json), if any.
+pub fn saved_secret(credentials: &std::path::Path) -> Option<String> {
+    match crate::credentials::load_from(credentials, INFO.id) {
         Ok(secrets) => secrets
             .and_then(|m| m.get("secret_access_key")?.as_str().map(str::to_string))
             .filter(|s| !s.is_empty()),
@@ -179,8 +179,8 @@ pub struct S3 {
     region: String,
     access_key: String,
     secret: Mutex<Option<String>>,
-    /// Read the secret from the credentials store again while there is none.
-    reload_secret: bool,
+    /// The credentials file to read the secret from again while there is none.
+    reload_secret: Option<std::path::PathBuf>,
     /// Cleared once the service turns out not to take `x-amz-checksum-*` headers.
     checksums: AtomicBool,
     versioning: Mutex<Option<(Instant, bool)>>,
@@ -418,7 +418,7 @@ impl S3 {
             region,
             access_key: cfg.access_key_id.trim().to_string(),
             secret: Mutex::new(secret.filter(|s| !s.is_empty())),
-            reload_secret: false,
+            reload_secret: None,
             checksums: AtomicBool::new(true),
             versioning: Mutex::new(None),
             uploads: Mutex::new(HashMap::new()),
@@ -432,16 +432,18 @@ impl S3 {
 
     /// With the secret key from the credentials store, read again on use until there is one
     /// (so a running service picks up `clouddrop setup`).
-    pub fn with_saved_secret(http: reqwest::Client, cfg: &S3Config) -> Self {
-        let mut s = Self::new(http, cfg, saved_secret());
-        s.reload_secret = true;
+    pub fn with_saved_secret(http: reqwest::Client, cfg: &S3Config, credentials: &std::path::Path) -> Self {
+        let mut s = Self::new(http, cfg, saved_secret(credentials));
+        s.reload_secret = Some(credentials.to_path_buf());
         s
     }
 
     fn secret(&self) -> Option<String> {
         let mut secret = self.secret.lock().unwrap();
-        if secret.is_none() && self.reload_secret {
-            *secret = saved_secret();
+        if secret.is_none()
+            && let Some(file) = &self.reload_secret
+        {
+            *secret = saved_secret(file);
         }
         secret.clone()
     }

@@ -88,11 +88,11 @@ Described describe(Activity a, {String cloud = 'Google Drive'}) {
   }
 }
 
-/// "Photos · from Trips/a.jpg · 1.2 MB · 12:09"
-String subtitle(Activity a, Civil time) {
+/// "Photos · from Trips/a.jpg · 1.2 MB · 12:09"; [root] names the top of the folder.
+String subtitle(Activity a, Civil time, {String root = 'CloudDrop'}) {
   final d = describe(a);
   final parent = parentOf(a.path);
-  final parts = <String>[parent.isEmpty ? 'CloudDrop' : parent];
+  final parts = <String>[parent.isEmpty ? root : parent];
   if (d.detail != null) parts.add(d.detail!);
   final b = a.bytes;
   if (b != null && b > 0 && a.kind != ActivityKind.failed) parts.add(humanBytes(b));

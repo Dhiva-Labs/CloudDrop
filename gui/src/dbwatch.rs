@@ -8,30 +8,42 @@ use std::path::PathBuf;
 /// Watches SQLite's `PRAGMA data_version`, which changes whenever any other connection
 /// (the daemon, the CLI, our own actions) commits.
 pub struct DbWatch {
-    path: PathBuf,
-    conn: RefCell<Option<Connection>>,
+    /// None: the database of the connection the window shows, whichever that is now.
+    fixed: Option<PathBuf>,
+    open: RefCell<Option<(PathBuf, Connection)>>,
     last: Cell<Option<i64>>,
 }
 
 impl DbWatch {
     pub fn new() -> Self {
-        Self::at(config::data_dir().join("state.db"))
+        DbWatch { fixed: None, open: RefCell::default(), last: Cell::new(None) }
     }
 
+    #[cfg(test)]
     pub fn at(path: PathBuf) -> Self {
-        DbWatch { path, conn: RefCell::default(), last: Cell::new(None) }
+        DbWatch { fixed: Some(path), open: RefCell::default(), last: Cell::new(None) }
+    }
+
+    fn path(&self) -> PathBuf {
+        self.fixed.clone().unwrap_or_else(|| config::data_dir().join("state.db"))
     }
 
     fn version(&self) -> Option<i64> {
-        let mut conn = self.conn.borrow_mut();
-        if conn.is_none() {
-            *conn = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+        let path = self.path();
+        let mut open = self.open.borrow_mut();
+        if open.as_ref().is_some_and(|(p, _)| *p != path) {
+            // Another connection now: its own database.
+            *open = None;
+            self.last.set(None);
         }
-        let v = conn.as_ref()?.query_row("PRAGMA data_version", [], |r| r.get(0));
+        if open.is_none() {
+            *open = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok().map(|c| (path, c));
+        }
+        let v = open.as_ref()?.1.query_row("PRAGMA data_version", [], |r| r.get(0));
         match v {
             Ok(v) => Some(v),
             Err(_) => {
-                *conn = None; // reopen next time (the file may have been replaced)
+                *open = None; // reopen next time (the file may have been replaced)
                 None
             }
         }

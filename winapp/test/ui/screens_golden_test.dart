@@ -186,14 +186,14 @@ void main() {
   );
 
   // ---------- Settings ----------
-  screen('settings', busyApp, pane: AppPane.settings, tall: 1400);
+  screen('settings', busyApp, pane: AppPane.settings, tall: 1600);
   // The accent setting colours the whole app.
   screen('home_purple', () => busyApp(config: busyConfig.copyWith(accent: 'purple')));
   screen(
     'settings_sign_out_dialog',
     busyApp,
     pane: AppPane.settings,
-    tall: 1400,
+    tall: 1600,
     act: (tester, t) async {
       await tester.tap(find.text('Sign out'));
     },
@@ -209,7 +209,7 @@ void main() {
       return t;
     },
     pane: AppPane.settings,
-    tall: 1250,
+    tall: 1500,
   );
 
   // ---------- another provider: WebDAV (no web links, proves copies by downloading) ----------
@@ -236,12 +236,12 @@ void main() {
       scopeOf(tester).files.selectOnly('setup-guide.md');
     },
   );
-  screen('settings_webdav', () => busyApp(provider: webdav), pane: AppPane.settings, tall: 1400);
+  screen('settings_webdav', () => busyApp(provider: webdav), pane: AppPane.settings, tall: 1600);
   screen(
     'settings_switch_dialog',
     () => busyApp(provider: oneDrive),
     pane: AppPane.settings,
-    tall: 1400,
+    tall: 1600,
     act: (tester, t) async {
       await tester.tap(find.text('Switch Provider…'));
     },

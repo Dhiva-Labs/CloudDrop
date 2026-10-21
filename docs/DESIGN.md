@@ -24,6 +24,13 @@ differ, the engine follows the provider's `Capabilities` (see "Providers" below)
 
 ## Files on disk
 
+Each sync folder is a **connection** with its own config file and data directory
+([PROVIDERS.md › Several clouds at once](PROVIDERS.md#several-clouds-at-once)). The table
+describes the first one, `default`; any other connection NAME has
+`connections/NAME/config.toml` beside config.toml and its data in `connections/NAME/` in the
+data directory. The data directory also holds what belongs to the whole installation:
+`engine.lock`, `daemon.json`, `daemon.stop`, `tray.lock` and `app.json`.
+
 | What | Default path | Override |
 | --- | --- | --- |
 | Config | `$XDG_CONFIG_HOME/clouddrop/config.toml` (`~/.config/clouddrop/config.toml`) | `CLOUDDROP_CONFIG` = path to file |
@@ -214,11 +221,21 @@ Pausing sets meta `paused` = `1` (`clouddrop pause`, the app, or the top-bar
 icon). Within a tick the daemon stops scheduling and cancels running uploads; their
 resumable sessions are kept, so `resume` continues where each upload stopped.
 
+One daemon runs every connection's engine (`daemon::supervise`), each with its own
+status.json in its data directory; it writes `daemon.json` (`{"pid", "updated_ms",
+"connections"}`) every 2 s, which is how `service status` knows it runs. Meta `stop` = `1`
+in a connection's database restarts that connection's engine; `daemon.stop` in the data
+directory (written by `clouddrop service stop` where there is no systemd) stops them all.
+
 ## CLI (used by the Nautilus extension)
 
 All path arguments may be absolute or relative to the current directory and must
 be inside `sync_dir`. Commands exit 0 on success and print a short human message;
 failures exit non-zero with the message on stderr.
+
+Every command takes `--connection NAME`. Without it, a command works on the connection
+whose folder holds its first path argument, else the one whose folder holds the current
+directory, else `default`. `run`, `service` and `providers` are for the whole installation.
 
 | Command | Effect |
 | --- | --- |
@@ -227,8 +244,11 @@ failures exit non-zero with the message on stderr.
 | `clouddrop providers [--json]` | every provider: `[{"id", "name", "verify_by_download", "web_links", "sign_in": {"kind": "google"\|"oauth"\|"nextcloud"\|"form", "fields": […]}}]` |
 | `clouddrop login [--no-browser]` | (re)run the provider's browser sign-in; for form and Nextcloud providers it says what to do instead |
 | `clouddrop check [--json]` | connect with the saved settings; `--json`: `{"ok", "provider", "provider_name", "message", "folder_exists", "quota"}` or `{"ok": false, …, "error_kind"}` |
-| `clouddrop run` | the daemon (systemd user service) |
-| `clouddrop status [--json]` | counts per state, errors; JSON has `provider` and `provider_name` |
+| `clouddrop run` | the daemon (systemd user service): an engine per connection |
+| `clouddrop status [--json] [--all]` | counts per state, errors; JSON has `provider`, `provider_name`, `connection` and `label`; `--all`: every connection (JSON: an array) |
+| `clouddrop connections [--json]` | the connections: `[{"name", "label", "folder", "provider", "provider_name", "drive_folder", "config", "data_dir", "configured", "signed_in", "error"}]` |
+| `clouddrop connections add NAME --folder DIR [setup's options]` | another folder uploading to a cloud: `setup --no-login` for a new connection |
+| `clouddrop connections remove NAME` | stop uploading it and forget its settings and state; nothing is deleted in the folder or the cloud |
 | `clouddrop free PATH...` | free up space: delete verified local copies (dirs: all synced files inside, folders are kept) |
 | `clouddrop restore PATH...` | download cloud-only files back (a dir restores all cloud-only files beneath it) |
 | `clouddrop open PATH` | open the file/folder in Drive in the browser |

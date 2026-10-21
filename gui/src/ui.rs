@@ -110,6 +110,13 @@ pub fn link_row(title: &str, subtitle: &str, url: &'static str) -> adw::ActionRo
 }
 
 /// "~/CloudDrop" style display of a path.
+/// What the top of the shown folder is called in paths ("CloudDrop › Photos"): CloudDrop for
+/// the first connection, as always; another connection's name for its own folder.
+pub fn root_name() -> String {
+    let c = clouddrop::connections::current();
+    if c.is_default() { "CloudDrop".into() } else { c.name }
+}
+
 pub fn pretty_path(p: &Path) -> String {
     if let Some(home) = dirs_home()
         && let Ok(rest) = p.strip_prefix(&home)
@@ -179,6 +186,7 @@ const CSS: &str = "
 .drop-zone { border: 2px dashed alpha(@window_fg_color, 0.18); border-radius: 18px; margin: 24px; }
 columnview.files row { min-height: 40px; }
 .provider-row { padding: 10px 12px; }
+.connection-row { padding: 6px 8px; }
 .own-folder { color: @success_color; }
 ";
 

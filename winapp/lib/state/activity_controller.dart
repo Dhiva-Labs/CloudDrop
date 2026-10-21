@@ -15,6 +15,7 @@ class ActivityController extends ChangeNotifier {
   ActivityController(this.app) {
     app.dbVersion.addListener(_onDbChanged);
     app.pane.addListener(_onPane);
+    app.connectionVersion.addListener(_onConnection);
     visible = _shows(app.pane.value);
   }
 
@@ -81,6 +82,26 @@ class ActivityController extends ChangeNotifier {
     if (_visible) refresh();
   }
 
+  /// Another folder is shown: its own history, from the top.
+  void _onConnection() {
+    items = const [];
+    loaded = false;
+    _lastId = null;
+    shown = pageSize;
+    if (!_disposed) notifyListeners();
+    // A read of the old connection may be running: read again once it's done.
+    final running = _running;
+    if (running != null) {
+      running.whenComplete(() {
+        _lastId = null;
+        loaded = false;
+        if (_visible) refresh();
+      });
+    } else if (_visible) {
+      refresh();
+    }
+  }
+
   /// Reads the history if something new was logged since the last read.
   Future<void> refresh() {
     final running = _running;
@@ -92,14 +113,19 @@ class ActivityController extends ChangeNotifier {
   Future<void>? _running;
 
   Future<void> _read() async {
-    final db = app.services.db;
+    final version = app.connectionVersion.value;
+    final db = app.db;
     final id = await db.lastActivityId();
     final today = nowCivil().days;
+    if (version != app.connectionVersion.value) return;
     if (loaded && _lastId == id && _day == today) return;
     final first = _lastId == null;
     _lastId = id;
     _day = today;
-    items = await db.recentActivity(load);
+    final rows = await db.recentActivity(load);
+    // Another folder was selected meanwhile: these rows are not its.
+    if (version != app.connectionVersion.value) return;
+    items = rows;
     if (first) shown = pageSize;
     loaded = true;
     if (!_disposed) notifyListeners();
@@ -110,6 +136,7 @@ class ActivityController extends ChangeNotifier {
     _disposed = true;
     app.dbVersion.removeListener(_onDbChanged);
     app.pane.removeListener(_onPane);
+    app.connectionVersion.removeListener(_onConnection);
     super.dispose();
   }
 }

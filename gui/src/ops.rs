@@ -292,7 +292,7 @@ impl Ops {
         if sources.is_empty() {
             return;
         }
-        let dest_name = if dest_rel.is_empty() { "CloudDrop".to_string() } else { util::name_of(&dest_rel).to_string() };
+        let dest_name = if dest_rel.is_empty() { ui::root_name() } else { util::name_of(&dest_rel).to_string() };
         let dest_dir = root.join(&dest_rel);
         let me = self.clone();
         rt::blocking(
@@ -314,8 +314,8 @@ impl Ops {
 
     // ---------- configuration ----------
 
-    /// Edits the config file now and restarts the upload service shortly after
-    /// (several quick edits share one restart). `message` is shown once the service is back.
+    /// Edits the config file now and restarts this connection's engine shortly after (several
+    /// quick edits share one restart; the others carry on). `message` is shown once it's back.
     pub fn edit_config(self: &Rc<Self>, message: &str, edit: impl FnOnce(&mut Config)) -> bool {
         let path = config::config_path();
         let result = Config::load_from(&path).and_then(|mut c| {
@@ -335,7 +335,7 @@ impl Ops {
         let id = glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
             if let Some(me) = me.upgrade() {
                 me.restart.borrow_mut().take();
-                me.restart_service();
+                me.restart_engine();
             }
         });
         *self.restart.borrow_mut() = Some(id);
@@ -345,22 +345,30 @@ impl Ops {
         true
     }
 
-    /// Saves a setting only the apps read (theme, accent): no service restart.
-    pub fn edit_appearance(&self, edit: impl FnOnce(&mut Config)) {
-        let path = config::config_path();
-        let result = Config::load_from(&path).and_then(|mut c| {
-            edit(&mut c);
-            c.validate()?;
-            c.save_to(&path)
-        });
-        if let Err(e) = result {
-            self.toast(&format!("Couldn't save: {e:#}"));
-        }
+    /// Saves a setting only the apps read (theme, accent): no service restart. The look is the
+    /// installation's, so every connection's config gets it.
+    /// Returns the shown connection's config as saved.
+    pub fn edit_appearance(&self, key: &str, value: &str) -> Option<Config> {
+        let result = clouddrop::connections::set_appearance(key, value).and_then(|()| Config::load());
+        result.map_err(|e| self.toast(&format!("Couldn't save: {e:#}"))).ok()
     }
 
     pub fn restart_now(self: &Rc<Self>, message: &str) {
         *self.restart_msg.borrow_mut() = message.to_string();
         self.restart_service();
+    }
+
+    /// Restarts the shown connection's engine (the background service starts it again at once).
+    fn restart_engine(self: &Rc<Self>) {
+        let Some(db) = self.db() else {
+            return;
+        };
+        let msg = std::mem::take(&mut *self.restart_msg.borrow_mut());
+        self.toast(&match control::restart_engine(&db, &config::data_dir()) {
+            Ok(()) if msg.is_empty() => "Settings saved".to_string(),
+            Ok(()) => msg,
+            Err(e) => format!("{e:#}"),
+        });
     }
 
     fn restart_service(self: &Rc<Self>) {

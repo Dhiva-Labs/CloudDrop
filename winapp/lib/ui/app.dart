@@ -18,6 +18,11 @@ import 'pages/settings_page.dart';
 import 'scope.dart';
 import 'setup/setup_page.dart';
 import 'theme.dart';
+import 'widgets/connection_switcher.dart';
+
+/// The window's title: "CloudDrop", or with several folders the one shown ("Work - CloudDrop").
+String windowTitle(AppController app) =>
+    app.several && app.label != 'CloudDrop' ? '${app.label} - CloudDrop' : 'CloudDrop';
 
 class CloudDropApp extends StatefulWidget {
   const CloudDropApp({
@@ -29,6 +34,7 @@ class CloudDropApp extends StatefulWidget {
     this.themeMode,
     this.enableDrop = true,
     this.onBrightness,
+    this.onTitle,
   });
 
   final AppController app;
@@ -46,6 +52,9 @@ class CloudDropApp extends StatefulWidget {
 
   /// Called when the effective brightness changes (the window effect follows it).
   final void Function(Brightness brightness)? onBrightness;
+
+  /// Called when the window's title changes ([windowTitle]).
+  final void Function(String title)? onTitle;
 
   @override
   State<CloudDropApp> createState() => _CloudDropAppState();
@@ -114,17 +123,23 @@ class _CloudDropAppState extends State<CloudDropApp> {
         fontFamilyFallback: w.fontFamilyFallback,
         accent: accent,
       ),
-      home: _Root(app: w.app, enableDrop: w.enableDrop, onBrightness: w.onBrightness),
+      home: _Root(
+        app: w.app,
+        enableDrop: w.enableDrop,
+        onBrightness: w.onBrightness,
+        onTitle: w.onTitle,
+      ),
     );
   }
 }
 
 class _Root extends StatefulWidget {
-  const _Root({required this.app, required this.enableDrop, this.onBrightness});
+  const _Root({required this.app, required this.enableDrop, this.onBrightness, this.onTitle});
 
   final AppController app;
   final bool enableDrop;
   final void Function(Brightness brightness)? onBrightness;
+  final void Function(String title)? onTitle;
 
   @override
   State<_Root> createState() => _RootState();
@@ -135,15 +150,25 @@ class _RootState extends State<_Root> {
   late final ActivityController _activity = ActivityController(widget.app);
   StreamSubscription<AppMessage>? _messages;
   Brightness? _reported;
+  String _title = 'CloudDrop';
 
   @override
   void initState() {
     super.initState();
     _messages = widget.app.messages.listen(_toast);
+    widget.app.addListener(_retitle);
+  }
+
+  void _retitle() {
+    final t = windowTitle(widget.app);
+    if (t == _title) return;
+    _title = t;
+    widget.onTitle?.call(t);
   }
 
   @override
   void dispose() {
+    widget.app.removeListener(_retitle);
     _messages?.cancel();
     _files.dispose();
     _activity.dispose();
@@ -218,18 +243,23 @@ class _GateState extends State<_Gate> {
     if (_setup != null || _making) return;
     _making = true;
     final app = widget.app;
-    final locked = await app.services.db.meta('sync_root');
+    final adding = app.setupAdding;
+    // A new folder has no database yet; the one shown now keeps its folder.
+    // (Always asynchronous: this runs from build.)
+    final locked = await (adding ? Future<String?>.value() : app.db.meta('sync_root'));
     if (!mounted) return;
     final atSignIn = app.setupAtSignIn;
     final switching = app.setupSwitching;
     app.setupAtSignIn = false;
     app.setupSwitching = false;
+    app.setupAdding = false;
     setState(() {
       _setup = SetupController(
         app,
         lockedRoot: locked,
         startAtSignIn: atSignIn,
         switching: switching,
+        adding: adding,
       );
       _making = false;
     });
@@ -338,7 +368,7 @@ class _ConfigProblem extends StatelessWidget {
     final theme = FluentTheme.of(context);
     final error = app.configError ?? '';
     final firstLine = error.trim().split(RegExp(r'\r?\n')).first;
-    final path = app.paths.configPath;
+    final path = app.configPath;
     return ScaffoldPage(
       content: Center(
         child: ConstrainedBox(
@@ -349,6 +379,14 @@ class _ConfigProblem extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // With several folders the others stay a click away.
+                if (app.several) ...[
+                  Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: ConnectionMenu(app: app),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 Text("CloudDrop's settings can't be read", style: theme.typography.subtitle),
                 const SizedBox(height: 12),
                 InfoBar(
@@ -432,6 +470,9 @@ class MainView extends StatelessWidget {
             // The status, on every screen (the pane's search slot, when the pane is open).
             autoSuggestBox: mode == PaneDisplayMode.expanded ? _StatusChip(app: app) : null,
             items: [
+              // Several folders: each one with its status, above the screens.
+              if (mode != PaneDisplayMode.top)
+                ...connectionPaneItems(context, app, compact: mode == PaneDisplayMode.compact),
               PaneItem(
                 icon: const Icon(FluentIcons.home),
                 title: const Text('Home'),
@@ -459,15 +500,33 @@ class MainView extends StatelessWidget {
               ),
             ],
           ),
-          paneBodyBuilder: (item, body) => IndexedStack(
-            index: selected,
-            children: [
-              const HomePage(),
-              FilesPage(enableDrop: enableDrop),
-              const ActivityPage(),
-              const SettingsPage(),
-            ],
-          ),
+          paneBodyBuilder: (item, body) {
+            final pages = IndexedStack(
+              index: selected,
+              children: [
+                const HomePage(),
+                FilesPage(enableDrop: enableDrop),
+                const ActivityPage(),
+                const SettingsPage(),
+              ],
+            );
+            if (mode != PaneDisplayMode.top || !app.several) return pages;
+            // Narrow, several folders: the switcher above the screen (the tabs keep the top).
+            final gutter = pageGutter(width);
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: EdgeInsets.fromLTRB(gutter, 12, gutter, 0),
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: ConnectionMenu(app: app),
+                  ),
+                ),
+                Expanded(child: pages),
+              ],
+            );
+          },
         );
       },
     );
@@ -484,12 +543,7 @@ class _StatusChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = FluentTheme.of(context);
     final sum = summarize(app.snapshot);
-    final dot = switch (sum.icon) {
-      SummaryIcon.idle => theme.success.fg,
-      SummaryIcon.syncing => theme.accent.fg,
-      SummaryIcon.paused => theme.secondaryText,
-      SummaryIcon.attention => theme.caution.fg,
-    };
+    final dot = statusDotColor(theme, sum.icon);
     return Tooltip(
       message: sum.title,
       child: HoverButton(

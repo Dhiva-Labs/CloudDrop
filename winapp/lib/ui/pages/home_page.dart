@@ -234,7 +234,7 @@ class _UploadsCard extends StatelessWidget {
                         Text(nameOf(uploads[i].path), maxLines: 1, overflow: TextOverflow.ellipsis),
                         Text(
                           parentOf(uploads[i].path).isEmpty
-                              ? 'CloudDrop'
+                              ? AppScope.of(context).app.rootName
                               : parentOf(uploads[i].path),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -284,13 +284,15 @@ class _Tiles extends StatelessWidget {
       _Tile(
         icon: FluentIcons.open_folder_horizontal,
         label: 'Open Folder',
-        tooltip: 'Open the CloudDrop folder in File Explorer',
+        tooltip: app.several
+            ? 'Open “${app.label}” in File Explorer'
+            : 'Open the CloudDrop folder in File Explorer',
         onPressed: app.syncDir == null ? null : app.openFolder,
       ),
       _Tile(
         icon: FluentIcons.add,
         label: 'Add Files…',
-        tooltip: 'Copy files into CloudDrop to upload them',
+        tooltip: 'Copy files into ${app.rootName} to upload them',
         onPressed: s.ready ? () => app.addFiles('') : null,
       ),
       _Tile(
@@ -445,7 +447,7 @@ class _Storage extends StatelessWidget {
         title: 'This computer',
         headline: 'Nothing yet',
         muted: true,
-        note: 'Files you add to CloudDrop show up here',
+        note: 'Files you add to ${app.rootName} show up here',
         actionIcon: FluentIcons.open_folder_horizontal,
         actionTooltip: 'Open folder',
         onAction: app.syncDir == null ? null : app.openFolder,

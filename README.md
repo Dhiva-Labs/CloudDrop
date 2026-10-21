@@ -10,8 +10,9 @@ An upload-only Google Drive folder for Linux and Windows, on Intel/AMD (x64) and
 
 > **New, in preview:** OneDrive, Dropbox, WebDAV, Nextcloud, S3-compatible storage, SFTP and MEGA
 > as well as Google Drive, and Proton Drive (experimental, through Proton's CLI) in builds from
-> source; see [docs/PROVIDERS.md](docs/PROVIDERS.md) for what's tested and what's still to come.
-> The rest of this page describes Google Drive.
+> source, and several folders at once, each to a cloud of its own (*Add Another Folder…*,
+> `clouddrop connections add`); see [docs/PROVIDERS.md](docs/PROVIDERS.md) for what's tested and
+> what's still to come. The rest of this page describes one folder on Google Drive.
 
 Anything you put in your CloudDrop folder (`~/CloudDrop`, or `%USERPROFILE%\CloudDrop`
 on Windows) is uploaded to Google Drive with the same

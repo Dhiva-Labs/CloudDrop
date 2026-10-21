@@ -20,6 +20,13 @@ A new look, ARM64, and more clouds.
   yet ([docs/PROVIDERS.md](docs/PROVIDERS.md#proton-drive)).
 - Command line: `clouddrop providers`, `setup --provider <id> --set … --secret …`, `check`;
   `login` signs in to whichever provider is set up.
+- **Several folders, several clouds**: upload another folder to a cloud of its own, e.g.
+  `~/CloudDrop` to Google Drive and `~/Work` to a Nextcloud (*Add Another Folder…* in the app,
+  or `clouddrop connections add`). The window switches between them, the top-bar icon lists
+  them all, each folder is its own cloud folder in File Explorer, and *Remove This Folder…*
+  stops uploading one without deleting anything. Existing installations carry on unchanged.
+- Command line: `clouddrop connections [add|remove]`, `--connection NAME` on every command,
+  `status --all`.
 
 - New logo: a cloud on a sky-blue tile with a drop cut through it, on Linux, Windows, the
   Microsoft Store and the notification-area icons.

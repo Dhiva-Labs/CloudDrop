@@ -161,10 +161,17 @@ impl Choice {
     /// password, form passwords and keys) under the id in `credentials.json`. A form without
     /// required secrets (SFTP through the SSH agent) needs nothing saved.
     pub fn signed_in(&self) -> bool {
-        let saved = || clouddrop::credentials::load(&self.id).ok().flatten().is_some();
+        self.signed_in_at(&config::data_dir())
+    }
+
+    /// [`Choice::signed_in`] for the connection whose data directory is `data`.
+    pub fn signed_in_at(&self, data: &std::path::Path) -> bool {
+        let saved = || {
+            clouddrop::credentials::load_from(&data.join("credentials.json"), &self.id).ok().flatten().is_some()
+        };
         match &self.sign_in {
-            SignInKind::Google => control::is_signed_in(),
-            SignInKind::OAuth => config::data_dir().join(format!("token-{}.json", self.id)).exists(),
+            SignInKind::Google => control::signed_in(Provider::GoogleDrive, data),
+            SignInKind::OAuth => data.join(format!("token-{}.json", self.id)).exists(),
             SignInKind::Nextcloud => saved(),
             SignInKind::Form(fields) => saved() || !fields.iter().any(|f| f.kind == FieldKind::Secret && f.required),
         }

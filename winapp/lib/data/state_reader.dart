@@ -44,6 +44,10 @@ abstract class StateReader {
   /// connection (the engine, the CLI) commits. null = the database can't be read.
   Future<int?> dataVersion();
 
+  /// Lets go of the database file, so it can be deleted (Windows refuses to delete an open
+  /// file); the next read opens it again.
+  void release();
+
   void close();
 }
 
@@ -466,6 +470,9 @@ class SqliteStateReader implements StateReader {
 
   @override
   Future<int?> dataVersion() async => _cheap((db) => db.dataVersion(), null);
+
+  @override
+  void release() => _drop();
 
   @override
   void close() {

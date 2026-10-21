@@ -1,8 +1,10 @@
 pub mod actions;
 pub mod auth;
 pub mod config;
+pub mod connections;
 pub mod control;
 pub mod credentials;
+pub mod daemon;
 pub mod db;
 pub mod drive;
 pub mod dropbox;
@@ -23,11 +25,21 @@ pub mod winstore;
 pub mod util;
 pub mod webdav;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// The configured provider's client, wired to its endpoints and the given token file.
+/// The configured provider's client, wired to its endpoints and the given token file (in the
+/// data directory of the connection [`connections::current`]).
 pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remote> {
+    let data_dir = token_file.parent().map(PathBuf::from).unwrap_or_default();
+    remote_in(cfg, &data_dir, &config::config_path())
+}
+
+/// A connection's client: its sign-in and secrets are in `data_dir`, and `config_file` is where
+/// the client writes back what it learns (SFTP's host key).
+pub fn remote_in(cfg: &config::Config, data_dir: &Path, config_file: &Path) -> Arc<remote::Remote> {
+    let token_file = data_dir.join("token.json");
+    let credentials = data_dir.join("credentials.json");
     match cfg.provider {
         remote::Provider::GoogleDrive => {
             let http = drive::http_client();
@@ -46,31 +58,29 @@ pub fn remote_for(cfg: &config::Config, token_file: PathBuf) -> Arc<remote::Remo
             Arc::new(remote::Remote::Dropbox(dropbox::Dropbox::new(http, api, content, tokens)))
         }
         // The app password is in credentials.json, next to the token file in the data directory.
-        remote::Provider::WebDav | remote::Provider::Nextcloud => Arc::new(remote::Remote::WebDav(Box::new(
-            webdav::WebDav::from_config(cfg, &token_file.with_file_name("credentials.json")),
-        ))),
-        remote::Provider::S3 => {
-            Arc::new(remote::Remote::S3(Box::new(s3::S3::with_saved_secret(drive::http_client(), &cfg.s3))))
+        remote::Provider::WebDav | remote::Provider::Nextcloud => {
+            Arc::new(remote::Remote::WebDav(Box::new(webdav::WebDav::from_config(cfg, &credentials))))
         }
+        remote::Provider::S3 => Arc::new(remote::Remote::S3(Box::new(s3::S3::with_saved_secret(
+            drive::http_client(),
+            &cfg.s3,
+            &credentials,
+        )))),
         remote::Provider::Sftp => {
-            let secrets = credentials::load("sftp").unwrap_or_else(|e| {
+            let secrets = credentials::load_from(&credentials, "sftp").unwrap_or_else(|e| {
                 tracing::warn!("cannot read the SFTP password: {e:#}");
                 None
             });
             let secrets = sftp::Secrets::from_map(&secrets.unwrap_or_default());
-            let client = sftp::Sftp::new(cfg.sftp.clone(), secrets, Some(config::config_path()));
+            let client = sftp::Sftp::new(cfg.sftp.clone(), secrets, Some(config_file.to_path_buf()));
             Arc::new(remote::Remote::Sftp(client))
         }
-        // The session lives in credentials.json next to the token file (the data directory).
+        // The session lives in credentials.json in the data directory.
         remote::Provider::Mega => {
-            let data_dir = token_file.parent().map(PathBuf::from).unwrap_or_default();
-            Arc::new(remote::Remote::Mega(mega::Mega::new(drive::http_client(), &cfg.mega, &data_dir)))
+            Arc::new(remote::Remote::Mega(mega::Mega::new(drive::http_client(), &cfg.mega, data_dir)))
         }
         // Proton's CLI keeps the sign-in; uploads are staged in the data directory.
-        remote::Provider::Proton => {
-            let data_dir = token_file.parent().map(PathBuf::from).unwrap_or_default();
-            Arc::new(remote::Remote::Proton(proton::Proton::new(&cfg.proton, &data_dir)))
-        }
+        remote::Provider::Proton => Arc::new(remote::Remote::Proton(proton::Proton::new(&cfg.proton, data_dir))),
     }
 }
 

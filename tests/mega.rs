@@ -329,7 +329,7 @@ async fn engine_uploads_a_folder_into_mega() {
     let cfg = s.cfg();
     let db = Arc::new(Db::open(&s.data.join("state.db")).unwrap());
     let (tx, rx) = tokio::sync::watch::channel(false);
-    let opts = clouddrop::engine::RunOptions { config_file: None, store: Arc::new(clouddrop::store::PlainStore) };
+    let opts = clouddrop::engine::RunOptions { store: Arc::new(clouddrop::store::PlainStore), ..Default::default() };
     let engine = tokio::spawn(clouddrop::engine::run_with_options(cfg, opts, db, s.remote(), s.data.clone(), rx));
 
     let want = vec![

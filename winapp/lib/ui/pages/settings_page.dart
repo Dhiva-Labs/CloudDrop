@@ -123,6 +123,33 @@ class _SettingsPageState extends State<SettingsPage> {
                       )
                     : null,
               ),
+              const SizedBox(height: 4),
+              _SettingCard(
+                icon: FluentIcons.fabric_new_folder,
+                title: 'Upload another folder',
+                subtitle: 'Each folder uploads to a cloud of its own, this one or another',
+                stack: true,
+                trailing: Button(
+                  onPressed: app.beginAddConnection,
+                  child: const Text('Add Another Folder…'),
+                ),
+              ),
+              const SizedBox(height: 4),
+              _SettingCard(
+                icon: FluentIcons.remove_link,
+                title: 'Stop uploading this folder',
+                subtitle: 'The folder and ${app.provider.name} keep everything',
+                stack: true,
+                trailing: Button(
+                  onPressed: () => _removeFolder(context, app, cfg),
+                  style: ButtonStyle(
+                    foregroundColor: WidgetStatePropertyAll(
+                      FluentTheme.of(context).resources.systemFillColorCritical,
+                    ),
+                  ),
+                  child: const Text('Remove This Folder…'),
+                ),
+              ),
               const SectionTitle('Uploading'),
               _uploading(context, app, cfg),
               const SectionTitle('Background'),
@@ -265,7 +292,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       children: [
                         Text(nameOf(rel)),
                         Text(
-                          parentOf(rel).isEmpty ? 'CloudDrop' : parentOf(rel),
+                          parentOf(rel).isEmpty ? app.rootName : parentOf(rel),
                           style: theme.typography.caption?.copyWith(color: theme.secondaryText),
                         ),
                       ],
@@ -361,6 +388,16 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  Future<void> _removeFolder(BuildContext context, AppController app, AppConfig cfg) async {
+    final ok = await confirmRemoveFolder(
+      context,
+      folder: app.paths.pretty(cfg.syncDir),
+      cloud: app.provider.name,
+      last: !app.several,
+    );
+    if (ok) await app.removeConnection();
+  }
+
   Future<void> _signOut(BuildContext context, AppController app) async {
     if (await confirmSignOut(context, cloud: app.provider.name)) await app.signOut();
   }
@@ -375,7 +412,12 @@ class _SettingsPageState extends State<SettingsPage> {
           'from $cloud.',
       trailing: Button(
         onPressed: () async {
-          if (await confirmSwitchProvider(context, cloud: cloud)) {
+          final ok = await confirmSwitchProvider(
+            context,
+            cloud: cloud,
+            folder: app.several ? '“${app.label}”' : 'your CloudDrop folder',
+          );
+          if (ok) {
             app.beginSetup(switching: true);
           }
         },
@@ -505,7 +547,11 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _background(BuildContext context, AppController app) {
     final svc = app.service;
-    final running = app.snapshot.daemon != null;
+    // With several folders the service runs them all: one that isn't uploading (not signed in,
+    // say) doesn't mean the service is down.
+    final running = app.several
+        ? (svc?.running ?? app.snapshot.daemon != null)
+        : app.snapshot.daemon != null;
     return Column(
       children: [
         _SettingCard(

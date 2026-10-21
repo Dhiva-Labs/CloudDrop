@@ -112,7 +112,7 @@ pub fn describe_in(a: &Activity, cloud: &str) -> Described {
 pub fn subtitle(a: &Activity, time: Civil) -> String {
     let d = describe(a);
     let parent = util::parent_of(&a.path);
-    let mut parts = vec![if parent.is_empty() { "CloudDrop".to_string() } else { parent.to_string() }];
+    let mut parts = vec![if parent.is_empty() { ui::root_name() } else { parent.to_string() }];
     if let Some(detail) = d.detail {
         parts.push(detail);
     }
@@ -234,6 +234,14 @@ impl ActivityPage {
             }
         });
         me
+    }
+
+    /// The window shows another connection: its history is read afresh.
+    pub fn reset(self: &Rc<Self>) {
+        self.last_id.set(None);
+        self.items.borrow_mut().clear();
+        self.shown.set(PAGE);
+        self.rebuild();
     }
 
     /// Called every second; only reads the database when something new was logged.

@@ -120,9 +120,73 @@ pub fn write_status(data_dir: &Path, status: &DaemonStatus) -> Result<()> {
     Ok(())
 }
 
-/// Asks a running daemon to exit (works where there is no service manager).
+/// Asks the engine of this database's connection to stop. The daemon starts it again a second
+/// later (so this restarts it) once the connection is still there, set up and signed in.
 pub fn request_stop(db: &Db) -> Result<()> {
     db.meta_set("stop", "1")
+}
+
+/// Restarts the engine of the connection whose database this is, if it is running, so it picks
+/// up changes it can't apply live (a new cloud folder after `reset-cloud`).
+pub fn restart_engine(db: &Db, data_dir: &Path) -> Result<()> {
+    if read_status(data_dir).is_some_and(|s| s.is_live()) {
+        request_stop(db)?;
+    }
+    Ok(())
+}
+
+// ---------- the daemon (every connection's engine in one process) ----------
+
+/// The daemon's heartbeat, `daemon.json` in the data directory, rewritten every 2 seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaemonBeat {
+    pub pid: u32,
+    pub updated_ms: i64,
+    /// The connections whose engines run now.
+    #[serde(default)]
+    pub connections: Vec<String>,
+}
+
+impl DaemonBeat {
+    pub fn is_live(&self) -> bool {
+        now_ms() - self.updated_ms < 10_000 && process_exists(self.pid)
+    }
+}
+
+pub fn daemon_file() -> PathBuf {
+    config::base_data_dir().join("daemon.json")
+}
+
+pub fn read_daemon() -> Option<DaemonBeat> {
+    serde_json::from_slice(&std::fs::read(daemon_file()).ok()?).ok()
+}
+
+pub fn write_daemon(beat: &DaemonBeat) -> Result<()> {
+    let path = daemon_file();
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(beat)?)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
+}
+
+/// `daemon.stop` in the data directory: the daemon stops every engine and exits when it appears
+/// (where there is no service manager to stop it: the snap, Windows).
+pub fn daemon_stop_file() -> PathBuf {
+    config::base_data_dir().join("daemon.stop")
+}
+
+pub fn request_daemon_stop() -> Result<()> {
+    std::fs::create_dir_all(config::base_data_dir())?;
+    std::fs::write(daemon_stop_file(), b"")?;
+    // A daemon from before connections watched the default database instead.
+    let default = config::base_data_dir().join("state.db");
+    if default.exists()
+        && read_daemon().is_none()
+        && let Ok(db) = Db::open(&default)
+    {
+        let _ = request_stop(&db);
+    }
+    Ok(())
 }
 
 pub fn stop_requested(db: &Db) -> bool {
@@ -195,7 +259,7 @@ pub struct SetupParams {
 /// Writes the config (keeping other settings) and creates the folder.
 pub fn apply_setup(p: &SetupParams) -> Result<Config> {
     let path = config::config_path();
-    let mut cfg = Config::load_from(&path).unwrap_or_default();
+    let mut cfg = Config::load_from(&path).unwrap_or_else(|_| new_config());
     let (id, secret) = match &p.client {
         Some((id, secret)) => (id.trim().to_string(), secret.trim().to_string()),
         None => builtin_client()
@@ -203,11 +267,13 @@ pub fn apply_setup(p: &SetupParams) -> Result<Config> {
             .or_else(|| {
                 (!cfg.client_id.is_empty()).then(|| (cfg.client_id.clone(), cfg.client_secret.clone()))
             })
+            .or_else(other_google_client)
             .ok_or_else(|| anyhow!("a Google client ID and secret are needed"))?,
     };
     if !looks_like_client_id(&id) {
         bail!("the client ID should end with .apps.googleusercontent.com");
     }
+    crate::connections::check_folder(&p.sync_dir, &crate::connections::current().name)?;
     if let Ok(db_root) = Db::open_default().and_then(|db| db.meta_get("sync_root"))
         && let Some(root) = db_root
         && Path::new(&root) != std::path::absolute(&p.sync_dir)?
@@ -266,9 +332,10 @@ pub fn bound_elsewhere(provider: Provider) -> Option<String> {
 /// provider's own section struct) and its secrets, after checking the form's required fields.
 pub fn apply_provider_setup(p: &ProviderSetup) -> Result<Config> {
     let path = config::config_path();
-    let mut cfg = Config::load_from(&path).unwrap_or_default();
+    let mut cfg = Config::load_from(&path).unwrap_or_else(|_| new_config());
     let (id, name) = (p.provider.as_str(), p.provider.display_name());
     let sync_dir = std::path::absolute(&p.sync_dir)?;
+    crate::connections::check_folder(&sync_dir, &crate::connections::current().name)?;
     if let Ok(db_root) = Db::open_default().and_then(|db| db.meta_get("sync_root"))
         && let Some(root) = db_root
         && Path::new(&root) != sync_dir
@@ -323,11 +390,33 @@ pub fn apply_provider_setup(p: &ProviderSetup) -> Result<Config> {
     Ok(cfg)
 }
 
+/// The settings of a connection set up now: the defaults, with the other connections' look.
+fn new_config() -> Config {
+    let mut cfg = Config::default();
+    crate::connections::inherit_appearance(&mut cfg);
+    cfg
+}
+
 /// Set up: the config loads, and Google Drive (whose client is in the config) has a client.
 pub fn is_configured() -> bool {
-    Config::load().is_ok_and(|c| {
-        c.provider != Provider::GoogleDrive || (!c.client_id.is_empty() && !c.client_secret.is_empty())
-    })
+    Config::load().is_ok_and(|c| configured(&c))
+}
+
+/// The config is complete: Google Drive has its client (other providers keep their settings in
+/// their sections and their secrets in the credentials file).
+pub fn configured(c: &Config) -> bool {
+    c.provider != Provider::GoogleDrive || (!c.client_id.is_empty() && !c.client_secret.is_empty())
+}
+
+/// A Google client another connection already uses, for a new Google Drive connection.
+fn other_google_client() -> Option<(String, String)> {
+    let me = crate::connections::current().name;
+    crate::connections::all()
+        .into_iter()
+        .filter(|c| c.name != me)
+        .filter_map(|c| c.load().ok())
+        .find(|c| c.provider == Provider::GoogleDrive && !c.client_id.is_empty() && !c.client_secret.is_empty())
+        .map(|c| (c.client_id, c.client_secret))
 }
 
 /// How to start the background service, for messages.
@@ -438,9 +527,11 @@ pub fn providers_json() -> serde_json::Value {
 
 // ---------- background service (systemd on Linux, login item on Windows) ----------
 
-/// Whether the daemon is running right now (judged by its live status file).
+/// Whether the daemon is running right now: its heartbeat, or the default connection's live
+/// status file (all a daemon from before connections writes).
 pub fn daemon_running() -> bool {
-    read_status(&config::data_dir()).is_some_and(|s| s.is_live())
+    read_daemon().is_some_and(|b| b.is_live())
+        || read_status(&config::base_data_dir()).is_some_and(|s| s.is_live())
 }
 
 #[cfg(windows)]
@@ -585,7 +676,7 @@ pub fn stop_service() -> Result<()> {
         systemctl(&["stop", SERVICE])?;
         return Ok(());
     }
-    request_stop(&Db::open_default()?)
+    request_daemon_stop()
 }
 
 /// Starts the daemon at sign-in from now on.
@@ -742,7 +833,7 @@ pub fn restart_if_running() -> Result<()> {
 pub fn restart_service() -> Result<()> {
     if in_snap() {
         if daemon_running() {
-            request_stop(&Db::open_default()?)?;
+            request_daemon_stop()?;
             for _ in 0..40 {
                 if !daemon_running() {
                     break;

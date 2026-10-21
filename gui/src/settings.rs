@@ -5,6 +5,7 @@ use crate::providers::Choice;
 use crate::snapshot::Snapshot;
 use crate::{cli, fsops, rt, ui};
 use adw::prelude::*;
+use clouddrop::connections;
 use clouddrop::config;
 use clouddrop::control;
 use clouddrop::db::Kind;
@@ -84,6 +85,17 @@ pub fn switch_dialog_text(cloud: &str) -> (&'static str, String) {
             "CloudDrop will upload everything in your CloudDrop folder again, to the cloud you choose next. \
              Nothing is deleted from {cloud}. Files that are only in {cloud} (freed from this computer) stay \
              there, but CloudDrop stops listing them."
+        ),
+    )
+}
+
+/// "Remove this folder?": what removing a connection does, and doesn't.
+pub fn remove_dialog_text(folder: &str, cloud: &str) -> (&'static str, String) {
+    (
+        "Remove this folder from CloudDrop?",
+        format!(
+            "CloudDrop stops uploading {folder} to {cloud} and forgets what it uploaded from it. \
+             Nothing is deleted: the folder keeps its files, and {cloud} keeps everything uploaded so far."
         ),
     )
 }
@@ -206,6 +218,24 @@ impl SettingsPage {
         drive.add_suffix(&open_drive);
         folders.add(&folder);
         folders.add(&drive);
+        let add_folder = adw::ActionRow::builder()
+            .title("Upload another folder")
+            .subtitle("Each folder can go to a cloud of its own")
+            .build();
+        let add_btn = gtk::Button::builder().label("Add Another Folder…").valign(gtk::Align::Center).build();
+        add_folder.add_suffix(&add_btn);
+        folders.add(&add_folder);
+        let remove_folder = adw::ActionRow::builder()
+            .title("Stop uploading this folder")
+            .subtitle("Nothing is deleted here or in the cloud")
+            .build();
+        let remove_btn = gtk::Button::builder()
+            .label("Remove This Folder…")
+            .valign(gtk::Align::Center)
+            .css_classes(["destructive-action"])
+            .build();
+        remove_folder.add_suffix(&remove_btn);
+        folders.add(&remove_folder);
         page.add(&folders);
 
         let uploading = adw::PreferencesGroup::builder().title("Uploading").build();
@@ -292,7 +322,7 @@ impl SettingsPage {
                 if let Some(me) = me2.upgrade()
                     && let Some(name) = config::THEMES.get(row.selected() as usize)
                 {
-                    me.save_appearance(|c| c.set_key("theme", name));
+                    me.save_appearance("theme", name);
                 }
             });
         }
@@ -302,7 +332,7 @@ impl SettingsPage {
                 if let Some(me) = me2.upgrade()
                     && b.is_active()
                 {
-                    me.save_appearance(|c| c.set_key("accent", name));
+                    me.save_appearance("accent", name);
                 }
             });
         }
@@ -352,6 +382,13 @@ impl SettingsPage {
                 let (hooks, me2) = (hooks.clone(), me2.clone());
                 d.connect_response(Some("out"), move |_, _| {
                     if provider.is_google() {
+                        // Its engine stops too; the background service starts it again after sign-in.
+                        let conn = connections::current();
+                        if conn.live_status().is_some()
+                            && let Ok(db) = conn.open_db()
+                        {
+                            let _ = control::request_stop(&db);
+                        }
                         if let Err(e) = control::sign_out()
                             && let Some(me) = me2.upgrade()
                         {
@@ -387,6 +424,49 @@ impl SettingsPage {
                 d.set_response_appearance("choose", adw::ResponseAppearance::Suggested);
                 let hooks = hooks.clone();
                 d.connect_response(Some("choose"), move |_, _| (hooks.setup)(crate::setup::Start::Switch));
+                d.present(Some(&win));
+            });
+        }
+        {
+            let hooks = hooks.clone();
+            add_btn.connect_clicked(move |_| (hooks.setup)(crate::setup::Start::AddFolder));
+        }
+        {
+            let (win, hooks, me2) = (win.clone(), hooks.clone(), Rc::downgrade(&me));
+            remove_btn.connect_clicked(move |_| {
+                let Some(me) = me2.upgrade() else {
+                    return;
+                };
+                let Some((folder, cloud)) = me
+                    .last
+                    .borrow()
+                    .as_ref()
+                    .and_then(|s| s.cfg.as_ref().map(|c| (ui::pretty_path(&c.sync_dir), s.provider.name.clone())))
+                else {
+                    return;
+                };
+                let (heading, body) = remove_dialog_text(&folder, &cloud);
+                let d = adw::AlertDialog::new(Some(heading), Some(&body));
+                d.add_response("cancel", "Cancel");
+                d.add_response("remove", "Remove Folder");
+                d.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+                let (hooks, me2) = (hooks.clone(), me2.clone());
+                d.connect_response(Some("remove"), move |_, _| {
+                    let conn = connections::current();
+                    let (hooks, me2, folder) = (hooks.clone(), me2.clone(), folder.clone());
+                    rt::blocking(
+                        move || connections::remove(&conn, std::time::Duration::from_secs(10)),
+                        move |res| {
+                            if let Some(me) = me2.upgrade() {
+                                me.ops.toast(&match res {
+                                    Ok(()) => format!("{folder} is no longer uploaded; nothing was deleted"),
+                                    Err(e) => format!("{e:#}"),
+                                });
+                            }
+                            (hooks.refresh)();
+                        },
+                    );
+                });
                 d.present(Some(&win));
             });
         }
@@ -481,21 +561,17 @@ impl SettingsPage {
     }
 
     /// Saves the theme or accent and shows it right away; the upload service doesn't need it.
-    fn save_appearance(&self, edit: impl FnOnce(&mut clouddrop::config::Config) -> anyhow::Result<()>) {
+    /// Saves the theme or the accent and shows it right away; the upload service doesn't need it.
+    fn save_appearance(&self, key: &str, value: &str) {
         if self.filling.get() {
             return;
         }
-        let Some(mut cfg) = self.ops.cfg() else {
-            return;
-        };
-        if edit(&mut cfg).is_err() {
-            return;
+        // Only the key that changed is written, and the look is shown from the file just saved:
+        // the window's copy of the settings is up to a second old, and may not have the other key's
+        // latest value yet.
+        if let Some(cfg) = self.ops.edit_appearance(key, value) {
+            ui::apply_appearance(cfg.theme_name(), cfg.accent_name());
         }
-        ui::apply_appearance(cfg.theme_name(), cfg.accent_name());
-        self.ops.edit_appearance(move |c| {
-            c.theme = cfg.theme;
-            c.accent = cfg.accent;
-        });
     }
 
     fn restart_now(self: &Rc<Self>) {
@@ -549,7 +625,7 @@ impl SettingsPage {
             let parent = util::parent_of(rel);
             let row = adw::ActionRow::builder()
                 .title(util::name_of(rel))
-                .subtitle(if parent.is_empty() { "CloudDrop".to_string() } else { parent.to_string() })
+                .subtitle(if parent.is_empty() { ui::root_name() } else { parent.to_string() })
                 .use_markup(false)
                 .build();
             row.add_prefix(&gtk::Image::from_icon_name("folder-symbolic"));
@@ -568,6 +644,12 @@ impl SettingsPage {
         self.keep.remove(&self.keep_add);
         self.keep.add_row(&self.keep_add);
         self.keep.set_subtitle(&keep_summary(list.len()));
+    }
+
+    /// The window shows another connection: its settings are filled in afresh.
+    pub fn reset(&self) {
+        self.filled.set(false);
+        self.shown_keep.borrow_mut().take();
     }
 
     pub fn refresh(self: &Rc<Self>, s: &Snapshot) {
@@ -656,6 +738,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn removing_a_folder_says_nothing_is_deleted() {
+        let (h, b) = remove_dialog_text("~/Work", "Nextcloud");
+        assert_eq!(h, "Remove this folder from CloudDrop?");
+        assert_eq!(
+            b,
+            "CloudDrop stops uploading ~/Work to Nextcloud and forgets what it uploaded from it. Nothing is \
+             deleted: the folder keeps its files, and Nextcloud keeps everything uploaded so far."
+        );
+    }
 
     #[test]
     fn auto_free_labels() {

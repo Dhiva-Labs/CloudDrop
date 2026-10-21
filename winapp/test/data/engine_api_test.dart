@@ -351,6 +351,190 @@ void main() {
     );
   });
 
+  group('connections: --connection on every command of one', () {
+    late FakeCliRunner runner;
+    late CliEngineApi api;
+    setUp(() {
+      runner = FakeCliRunner();
+      api = CliEngineApi(runner, connection: 'Work');
+    });
+
+    test('every command that concerns one connection names it first', () async {
+      runner.onRun = (a, e) => CliResult(
+        0,
+        a.contains('status')
+            ? '{"configured": false, "connection": "Work", "label": "Work"}'
+            : a.contains('get')
+            ? '{"sync_dir": "/s"}'
+            : 'ok',
+        '',
+      );
+      await api.status();
+      await api.configGet();
+      await api.configSet('parallel_uploads', '3');
+      await api.setup(folder: '/s', driveFolder: 'Work');
+      await api.check();
+      await api.logout();
+      await api.resetCloud();
+      await api.free(['/s/a']);
+      await api.restore(['/s/a']);
+      await api.retry(const []);
+      await api.pause();
+      await api.resume();
+      await api.keep(['/s/k']);
+      await api.unkeep(['/s/k']);
+      await api.driveUrl('/s/a');
+      expect(runner.calls, hasLength(15));
+      for (final c in runner.calls) {
+        expect(c.take(2), ['--connection', 'Work'], reason: c.join(' '));
+      }
+      expect(runner.calls.map((c) => c[2]), [
+        'status',
+        'config',
+        'config',
+        'setup',
+        'check',
+        'logout',
+        'reset-cloud',
+        'free',
+        'restore',
+        'retry',
+        'pause',
+        'resume',
+        'keep',
+        'unkeep',
+        'url',
+      ]);
+    });
+
+    test('the default connection is named too, so the working directory never matters', () async {
+      final d = api.forConnection('default');
+      expect(d.connection, 'default');
+      await d.pause();
+      expect(runner.calls.single, ['--connection', 'default', 'pause']);
+      expect(identical(api.forConnection('Work'), api), isTrue);
+    });
+
+    test('sign-in names it too', () async {
+      final session = api.login();
+      await Future<void>.delayed(Duration.zero);
+      expect(runner.calls.single, ['--connection', 'Work', 'login', '--no-browser']);
+      session.cancel();
+      await session.done;
+    });
+
+    test('what concerns the whole installation names none', () async {
+      runner.onRun = (a, e) => CliResult(
+        0,
+        a.first == 'service'
+            ? '{"running": true, "at_login": true}'
+            : a.first == 'providers'
+            ? '[]'
+            : '[]',
+        '',
+      );
+      await api.serviceStatus();
+      await api.serviceStart();
+      await api.serviceStop();
+      await api.serviceEnable();
+      await api.serviceDisable();
+      await api.providers();
+      await api.connections();
+      await api.removeConnection('Old');
+      expect(runner.calls, [
+        ['service', 'status', '--json'],
+        ['service', 'start'],
+        ['service', 'stop'],
+        ['service', 'enable'],
+        ['service', 'disable'],
+        ['providers', '--json'],
+        ['connections', '--json'],
+        ['connections', 'remove', 'Old'],
+      ]);
+    });
+
+    test('an engine from before connections gets no --connection at all', () async {
+      final old = CliEngineApi(runner);
+      expect(old.connection, isNull);
+      await old.pause();
+      expect(runner.calls.single, ['pause']);
+    });
+
+    test('connections --json is parsed; an engine that does not know it says null', () async {
+      runner.onRun = (a, e) => const CliResult(
+        0,
+        '[{"name": "default", "label": "CloudDrop", "folder": "/s", "data_dir": "/d", '
+            '"configured": true, "error": null}]',
+        '',
+      );
+      final list = (await api.connections())!;
+      expect(list.single.name, 'default');
+      expect(list.single.dataDir, '/d');
+      runner.onRun = (a, e) =>
+          const CliResult(2, '', "error: unrecognized subcommand 'connections'\n");
+      expect(await api.connections(), isNull);
+      runner.onRun = (a, e) => const CliResult(0, 'No connections yet', '');
+      expect(await api.connections(), isNull, reason: 'not JSON');
+      runner.onRun = (a, e) => throw CliUnavailable('clouddrop', 'missing');
+      expect(await api.connections(), isNull);
+    });
+
+    test('connections add: the setup arguments after the name; the key in a temp file', () async {
+      String? jsonText;
+      runner.onRun = (args, env) {
+        final j = args.firstWhere((a) => a.startsWith('--client-json='), orElse: () => '');
+        if (j.isNotEmpty) jsonText = File(j.substring('--client-json='.length)).readAsStringSync();
+        return const CliResult(0, 'Added "Family Photos"', '');
+      };
+      var r = await api.addConnection(
+        'Family Photos',
+        folder: '/home/me/Family Photos',
+        driveFolder: 'Family Photos',
+        clientId: '1-x.apps.googleusercontent.com',
+        clientSecret: 'GOCSPX-s',
+        provider: 'gdrive',
+      );
+      expect(r.ok, isTrue);
+      var args = runner.calls.last;
+      expect(args.take(3), ['connections', 'add', 'Family Photos']);
+      expect(args, contains('--folder=/home/me/Family Photos'));
+      expect(args, contains('--drive-folder=Family Photos'));
+      expect(args, contains('--provider=gdrive'));
+      expect(args, isNot(contains('--connection')));
+      expect(args.join(' '), isNot(contains('GOCSPX-s')));
+      expect(jsonDecode(jsonText!)['installed']['client_secret'], 'GOCSPX-s');
+
+      await api.addConnection(
+        'NAS',
+        folder: '/srv/nas',
+        driveFolder: 'CloudDrop',
+        provider: 'webdav',
+        settings: {'url': 'https://nas/dav', 'user': 'me'},
+        secrets: {'password': 'pw'},
+      );
+      args = runner.calls.last;
+      expect(args.sublist(args.indexOf('--provider=webdav')), [
+        '--provider=webdav',
+        '--set',
+        'url=https://nas/dav',
+        '--set',
+        'user=me',
+        '--secret',
+        'password=pw',
+      ]);
+
+      runner.onRun = (a, e) => const CliResult(
+        1,
+        '',
+        'clouddrop: /home/me/CloudDrop/sub is inside the folder of the connection "default" '
+            '(/home/me/CloudDrop); each connection needs a folder of its own\n',
+      );
+      r = await api.addConnection('sub', folder: '/home/me/CloudDrop/sub', driveFolder: 'sub');
+      expect(r.ok, isFalse);
+      expect(r.message, startsWith('/home/me/CloudDrop/sub is inside the folder'));
+    });
+  });
+
   group('sign-in (login --no-browser)', () {
     late FakeCliRunner runner;
     late CliEngineApi api;

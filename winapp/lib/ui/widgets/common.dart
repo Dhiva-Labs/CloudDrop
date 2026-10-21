@@ -291,8 +291,9 @@ class ActivityRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = FluentTheme.of(context);
-    final d = describe(activity, cloud: AppScope.of(context).app.provider.name);
-    final sub = subtitle(activity, civilFromMs(activity.atMs));
+    final app = AppScope.of(context).app;
+    final d = describe(activity, cloud: app.provider.name);
+    final sub = subtitle(activity, civilFromMs(activity.atMs), root: app.rootName);
     return Tooltip(
       message: activity.path,
       child: HoverButton(

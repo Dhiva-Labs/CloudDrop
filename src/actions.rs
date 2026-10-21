@@ -17,8 +17,11 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn load() -> Result<Self> {
-        let cfg = Config::load()?;
-        let db = Db::open_default()?;
+        Self::load_for(Config::load()?, Db::open_default()?)
+    }
+
+    /// A connection's config and database (checked to belong to its folder).
+    pub fn load_for(cfg: Config, db: Db) -> Result<Self> {
         db.bind_root(&cfg.sync_dir)?;
         Ok(Self { cfg, db })
     }

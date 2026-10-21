@@ -176,7 +176,20 @@ pub fn default_ignore() -> Vec<String> {
     .collect()
 }
 
+/// The config file of the connection being worked on ([`crate::connections::select`]; the
+/// default connection's unless another was selected).
 pub fn config_path() -> PathBuf {
+    crate::connections::current().config
+}
+
+/// The data directory of the connection being worked on (state.db, status.json, sign-in).
+pub fn data_dir() -> PathBuf {
+    crate::connections::current().data
+}
+
+/// The default connection's config file: `CLOUDDROP_CONFIG`, else the platform's place.
+/// Named connections are in `connections/` beside it.
+pub fn base_config_path() -> PathBuf {
     if let Some(p) = std::env::var_os("CLOUDDROP_CONFIG") {
         return PathBuf::from(p);
     }
@@ -186,7 +199,9 @@ pub fn config_path() -> PathBuf {
         .join("config.toml")
 }
 
-pub fn data_dir() -> PathBuf {
+/// The installation's data directory, which is also the default connection's:
+/// `CLOUDDROP_DATA_DIR`, else the platform's place. Named connections are in `connections/`.
+pub fn base_data_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("CLOUDDROP_DATA_DIR") {
         return PathBuf::from(p);
     }

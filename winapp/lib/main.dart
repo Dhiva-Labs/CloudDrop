@@ -27,5 +27,5 @@ Future<void> main() async {
     ),
   )..start();
 
-  runApp(CloudDropApp(app: app, mica: mica, onBrightness: syncMica));
+  runApp(CloudDropApp(app: app, mica: mica, onBrightness: syncMica, onTitle: setWindowTitle));
 }

@@ -82,6 +82,8 @@ pub struct Engine {
     data_dir: PathBuf,
     token_path: PathBuf,
     notifier: Notifier,
+    /// The connection's name in notifications (None: the default connection).
+    label: Option<String>,
     /// Sign-in problem: (message, token file mtime then, when).
     paused: Option<(String, Option<SystemTime>, Instant)>,
     /// Paused from the app/CLI (meta "paused").
@@ -252,6 +254,8 @@ pub struct RunOptions {
     pub config_file: Option<PathBuf>,
     /// How local copies are represented (plain files, or Windows placeholders).
     pub store: Arc<dyn LocalStore>,
+    /// The connection's name for notification titles (None: the default connection).
+    pub label: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -259,6 +263,7 @@ impl Default for RunOptions {
         Self {
             config_file: None,
             store: crate::store::platform(),
+            label: None,
         }
     }
 }
@@ -298,7 +303,7 @@ pub async fn run_with_caps(
     data_dir: PathBuf,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let RunOptions { config_file, store } = opts;
+    let RunOptions { config_file, store, label } = opts;
     let root = cfg.sync_dir.clone();
     std::fs::create_dir_all(&root)
         .with_context(|| format!("cannot create {}", root.display()))?;
@@ -315,7 +320,8 @@ pub async fn run_with_caps(
     let remote_provider = remote.provider();
     let mut eng = Engine {
         ignore: build_ignore(&cfg.ignore)?,
-        notifier: Notifier::new(cfg.notifications),
+        notifier: Notifier::for_connection(cfg.notifications, label.clone()),
+        label,
         root,
         cfg,
         db,
@@ -1093,7 +1099,7 @@ impl Engine {
                 Err(e) => tracing::warn!("ignore patterns not applied: {e:#}"),
             }
         }
-        self.notifier = Notifier::new(new.notifications);
+        self.notifier = Notifier::for_connection(new.notifications, self.label.clone());
         if new.auto_free_days != self.cfg.auto_free_days || new.keep_local != self.cfg.keep_local {
             self.last_auto_free = None;
         }

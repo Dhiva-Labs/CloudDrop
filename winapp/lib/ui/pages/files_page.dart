@@ -245,7 +245,10 @@ class _FilesPageState extends State<FilesPage> {
                   children: [
                     IconBadge(icon: FluentIcons.cloud_upload, tint: theme.accent, size: 64),
                     const SizedBox(height: 12),
-                    Text('Drop to add to CloudDrop', style: theme.typography.subtitle),
+                    Text(
+                      'Drop to add to ${AppScope.of(context).app.rootName}',
+                      style: theme.typography.subtitle,
+                    ),
                   ],
                 ),
               ),
@@ -457,7 +460,7 @@ class _Crumbs extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = FluentTheme.of(context);
-    final segments = <(String label, String path)>[('CloudDrop', '')];
+    final segments = <(String label, String path)>[(files.app.rootName, '')];
     if (files.search.isEmpty) {
       var acc = '';
       for (final part in files.dir.split('/').where((p) => p.isNotEmpty)) {
@@ -867,7 +870,7 @@ class _FileRowState extends State<_FileRow> {
               ),
               if (flat)
                 Text(
-                  parent.isEmpty ? 'CloudDrop' : parent,
+                  parent.isEmpty ? AppScope.of(context).app.rootName : parent,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: theme.typography.caption?.copyWith(color: theme.secondaryText),
