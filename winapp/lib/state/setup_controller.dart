@@ -297,7 +297,10 @@ class SetupController extends ChangeNotifier {
   /// Switching providers can be called off until the new provider's settings are written; adding
   /// a folder until it is done (what was written is removed again).
   bool get canCancel =>
-      ((switching && !_switchStarted) || adding) && step != SetupStep.done && !_cancelling;
+      ((switching && !_switchStarted) ||
+          (adding && !settingUp && test != ConnectionTest.testing)) &&
+      step != SetupStep.done &&
+      !_cancelling;
 
   bool _cancelling = false;
 
@@ -348,6 +351,10 @@ class SetupController extends ChangeNotifier {
         return;
       }
       createdName = null;
+      app.cancelSetup();
+      // The switcher forgets it at once.
+      await app.refreshNow();
+      return;
     }
     app.cancelSetup();
   }

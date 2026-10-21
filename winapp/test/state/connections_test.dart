@@ -224,6 +224,34 @@ void main() {
       },
     );
 
+    test('the other folder shows once it is read: no half-read screen in between', () async {
+      final (t, _) = await twoFolders();
+      final app = t.controller;
+      final seen = <(String, bool, Phase?, int)>[];
+      app.addListener(
+        () => seen.add((
+          app.connectionName,
+          app.snapshot.cfg != null,
+          app.snapshot.daemon?.phase,
+          app.snapshot.counts.synced,
+        )),
+      );
+      await app.selectConnection('Work');
+      expect(seen, isNotEmpty);
+      expect(seen.toSet(), {('Work', true, Phase.uploading, 1)});
+    });
+
+    test('only the folder shown keeps its database open', () async {
+      final db = TestDb.memory();
+      final reader = ReleaseRecorder(db.reader());
+      final t = TestApp(db: db, reader: reader, daemon: heartbeat(Phase.idle));
+      t.addConnection('Work');
+      final app = await t.ready();
+      expect(reader.released, 0);
+      await app.selectConnection('Work');
+      expect(reader.released, 1);
+    });
+
     test('Files and Activity start over in the folder selected', () async {
       final (t, _) = await twoFolders();
       final app = t.controller;
@@ -534,8 +562,11 @@ void main() {
         isEmpty,
         reason: 'the running service takes the folder on; "start at sign-in" is left alone',
       );
-      await c.finish();
       final app = t.controller;
+      final seen = <(String, bool)>[];
+      app.addListener(() => seen.add((app.connectionName, app.setupActive)));
+      await c.finish();
+      expect(seen.toSet(), {('Work', false)}, reason: 'the main window opens on the new folder');
       expect(app.setupActive, isFalse);
       expect(app.connectionName, 'Work');
       expect(t.prefs.remembered, 'Work');
@@ -589,6 +620,23 @@ void main() {
       expect(t.engine.listed.map((x) => x.name), ['default']);
       expect(t.controller.setupActive, isFalse);
       expect(t.controller.connectionName, 'default');
+    });
+
+    test('no Cancel while the folder is being written', () async {
+      final t = TestApp(daemon: heartbeat(Phase.idle));
+      t.engine.providerList = allProviders;
+      await t.ready();
+      final c = await adding(t);
+      c.choose(webdav);
+      await toSignIn(t, c, '/srv/nas');
+      c.setField('url', 'https://nas/dav');
+      c.setField('user', 'me');
+      c.setField('password', 'pw');
+      final testing = c.testConnection();
+      expect(c.test, ConnectionTest.testing);
+      expect(c.canCancel, isFalse);
+      await testing;
+      expect(c.canCancel, isTrue);
     });
 
     test('Cancel before anything was written removes nothing', () async {

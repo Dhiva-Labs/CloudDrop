@@ -251,11 +251,16 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Shows connection [name] from now on: its engine, database and status. Doesn't notify (the
-  /// next poll publishes what it reads).
+  /// Shows connection [name] from now on: its engine, database and status. Doesn't notify: the
+  /// next poll publishes once it has read the new one (no half-read screen in between).
   void _switchTo(String name) {
+    final old = _current;
     _selected = name;
     _current = _servicesFor(name);
+    // Only the folder shown keeps its database open (Windows can't delete an open file, should
+    // the other one be removed).
+    if (old != null && !identical(old.db, _current!.db)) old.db.release();
+    _switching = true;
     config = null;
     engineStatus = null;
     _haveAggregates = false;
@@ -274,6 +279,9 @@ class AppController extends ChangeNotifier {
     dbVersion.value++;
   }
 
+  /// Another connection was selected and its local state isn't read yet.
+  bool _switching = false;
+
   /// Waits for the round in flight, so nothing it read lands on another connection.
   Future<void> _quiet() async {
     while (_polling != null) {
@@ -289,7 +297,6 @@ class AppController extends ChangeNotifier {
     if (_disposed) return;
     _switchTo(want);
     unawaited(services.prefs.setConnection(want));
-    _publish(force: true);
     await poll(forceEngine: true);
   }
 
@@ -520,7 +527,8 @@ class AppController extends ChangeNotifier {
       setupActive = !st.ready && !several;
     }
     loaded = true;
-    _publish();
+    // Just switched: the rest is read before anything is shown.
+    if (!_switching) _publish();
   }
 
   /// One failed answer (a slow or busy moment) keeps what is on screen; a few in a row, or a
@@ -564,6 +572,7 @@ class AppController extends ChangeNotifier {
       }
     }
     await _readOtherStatus();
+    _switching = false;
     _publish();
   }
 
@@ -586,9 +595,8 @@ class AppController extends ChangeNotifier {
   String _lastSelected = Connection.defaultName;
   List<Connection> _lastConnections = const [];
 
-  /// Builds the snapshot from the latest reads and tells listeners if anything changed
-  /// (or [force]).
-  void _publish({bool force = false}) {
+  /// Builds the snapshot from the latest reads and tells listeners if anything changed.
+  void _publish() {
     final cfg = config;
     final st = engineStatus;
     final next = (cfg != null && st != null && st.configured)
@@ -608,7 +616,6 @@ class AppController extends ChangeNotifier {
         : Snapshot(signedIn: st?.signedIn ?? false, provider: provider);
     final switcher = _buildSwitcher(summarize(next));
     final changed =
-        force ||
         !_published ||
         next != snapshot ||
         fatal != _lastFatal ||
@@ -705,13 +712,19 @@ class AppController extends ChangeNotifier {
     await refreshNow();
   }
 
-  /// The assistant set up the new connection [name]: show it from now on.
+  /// The assistant set up the new connection [name]: show it from now on (and remember it).
   Future<void> finishAdding(String name) async {
-    setupActive = false;
     await _quiet();
-    // The engine lists it now; select it as the CLI spells it.
+    final list = await services.engine.connections();
+    if (list != null) connections = list;
+    final want = _match(name);
+    if (want != null) {
+      _switchTo(want);
+      unawaited(services.prefs.setConnection(want));
+    }
+    setupActive = false;
+    // One publish, with the new folder read.
     await poll(forceEngine: true);
-    await selectConnection(name);
   }
 
   /// Settings › "Remove This Folder…" (the user confirmed): `connections remove`. The folder and
