@@ -24,7 +24,7 @@ for a in "$@"; do
     fi
 done
 GOOGLE_SECRET=$secret python3 - "$out" "$@" <<'PY'
-import json, os, sys
+import json, os, re, sys
 out, args = sys.argv[1], sys.argv[2:]
 env = {}
 if os.path.exists(out):
@@ -37,8 +37,8 @@ said = []
 while args:
     a = args.pop(0)
     if a == "--google":
-        if not args or not args[0].strip().endswith(".apps.googleusercontent.com"):
-            sys.exit("--google needs the client id (….apps.googleusercontent.com)")
+        if not args or not re.fullmatch(r"[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com", args[0].strip()):
+            sys.exit("--google needs your client id: digits-letters.apps.googleusercontent.com, from the console's client page")
         cid = args.pop(0).strip()
         secret = os.environ.get("GOOGLE_SECRET", "").strip()
         if not secret:
