@@ -1111,6 +1111,51 @@ void main() {
       expect(again.snapshot.counts.synced, 2);
     });
 
+    testWidgets('the screens with two folders: the switcher, and each folder\'s own', (
+      tester,
+    ) async {
+      tester.useWindow(wide);
+      final real = AppController(multi.services(FakeSystem()));
+      addTearDown(real.dispose);
+      await tester.runAsync(() async {
+        await eventually<bool>(() async {
+          await real.poll(forceEngine: true);
+          return real.switcher.length == 2 && real.switcher.every((e) => e.icon == SummaryIcon.idle)
+              ? true
+              : null;
+        }, what: 'both folders to be up to date');
+      });
+      expect(real.connectionName, 'Work', reason: 'remembered in app.json');
+      await tester.pumpWidget(
+        CloudDropApp(
+          app: real,
+          fontFamily: testFont,
+          fontFamilyFallback: const [testFallback],
+          themeMode: ThemeMode.light,
+          enableDrop: false,
+        ),
+      );
+      await tester.settle();
+      expect(find.text('Add Another Folder…'), findsOneWidget);
+      expect(find.text('Everything is uploaded'), findsOneWidget);
+      expect(find.textContaining('2 files · '), findsOneWidget, reason: "Work's two files");
+
+      real.showFiles();
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 600)));
+      await tester.settle();
+      expect(find.text('plan.txt'), findsOneWidget);
+      expect(find.text('home.txt'), findsNothing);
+
+      await tester.runAsync(() => real.selectConnection('default'));
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 600)));
+      await tester.settle();
+      expect(find.text('home.txt'), findsOneWidget);
+      expect(find.text('plan.txt'), findsNothing);
+      await tester.runAsync(() => real.selectConnection('Work'));
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 1));
+    });
+
     slowTest(
       'Remove This Folder: its settings and state go; the folder and the cloud keep everything',
       () async {
