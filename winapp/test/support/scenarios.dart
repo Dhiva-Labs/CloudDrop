@@ -330,3 +330,37 @@ TestApp calmApp({bool windows = true, CloudProvider? provider, DaemonStatus? dae
   fillActivity(t.db);
   return t;
 }
+
+// ---------- several folders ----------
+
+/// Two folders: the tidy CloudDrop folder (up to date, uploading to Google Drive) and "Work"
+/// (uploading to OneDrive right now). [remember] is the one app.json names.
+TestApp twoFoldersApp({String? remember}) {
+  final t = calmApp();
+  final work = t.addConnection(
+    'Work',
+    provider: oneDrive,
+    driveFolder: 'Work',
+    daemon: DaemonStatus(
+      pid: 4243,
+      updatedMs: nowMs,
+      phase: Phase.uploading,
+      waiting: 2,
+      uploads: const [Upload(path: 'Plans/Roadmap 2027.pptx', sent: 3 * mb, total: 8 * mb)],
+      quota: const Quota(limit: 1024 * gb, usage: 212 * gb, usageInDrive: 212 * gb),
+    ),
+  );
+  work.db.meta('root_id', 'WORK-ROOT');
+  work.db.dir('Plans');
+  work.db.file(
+    'Plans/Roadmap 2027.pptx',
+    state: 'uploading',
+    size: 8 * mb,
+    mtimeMs: ago(minutes: 4),
+  );
+  work.db.file('Plans/Budget.xlsx', state: 'pending', size: 96 * kb, mtimeMs: ago(minutes: 3));
+  work.db.file('Contracts.pdf', size: 1200 * kb, mtimeMs: ago(days: 4), uploadedAt: ago(days: 4));
+  work.db.activity('uploaded', 'Contracts.pdf', at: ago(days: 4), bytes: 1200 * kb);
+  t.prefs.remembered = remember;
+  return t;
+}

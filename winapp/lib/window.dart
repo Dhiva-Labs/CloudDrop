@@ -51,6 +51,16 @@ Future<bool> initWindow() async {
   return mica;
 }
 
+/// The window's title ("Work - CloudDrop" with several folders).
+Future<void> setWindowTitle(String title) async {
+  if (!_desktop) return;
+  try {
+    await windowManager.setTitle(title);
+  } catch (e) {
+    debugPrint('Window title update failed: $e');
+  }
+}
+
 /// Makes the Mica material follow the app's light/dark theme.
 Future<void> syncMica(Brightness brightness) async {
   if (!_windows11) return;

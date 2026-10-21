@@ -188,7 +188,8 @@ class _GateState extends State<_Gate> {
     final app = widget.app;
     final adding = app.setupAdding;
     // A new folder has no database yet; the one shown now keeps its folder.
-    final locked = adding ? null : await app.db.meta('sync_root');
+    // (Always asynchronous: this runs from build.)
+    final locked = await (adding ? Future<String?>.value() : app.db.meta('sync_root'));
     if (!mounted) return;
     final atSignIn = app.setupAtSignIn;
     final switching = app.setupSwitching;
@@ -384,7 +385,7 @@ class MainView extends StatelessWidget {
             displayMode: mode,
             size: const NavigationPaneSize(openWidth: 232, openMinWidth: 232),
             header: mode == PaneDisplayMode.top
-                ? (app.several ? ConnectionMenu(app: app) : null)
+                ? null
                 : Padding(
                     padding: const EdgeInsetsDirectional.fromSTEB(14, 6, 12, 10),
                     child: Row(
@@ -405,7 +406,7 @@ class MainView extends StatelessWidget {
             autoSuggestBox: mode == PaneDisplayMode.expanded ? _StatusChip(app: app) : null,
             items: [
               // Several folders: each one with its status, above the screens.
-              if (mode != PaneDisplayMode.top) ...connectionPaneItems(context, app, mode),
+              if (mode != PaneDisplayMode.top) ...connectionPaneItems(context, app),
               PaneItem(
                 icon: const Icon(FluentIcons.home),
                 title: const Text('Home'),
@@ -433,15 +434,33 @@ class MainView extends StatelessWidget {
               ),
             ],
           ),
-          paneBodyBuilder: (item, body) => IndexedStack(
-            index: selected,
-            children: [
-              const HomePage(),
-              FilesPage(enableDrop: enableDrop),
-              const ActivityPage(),
-              const SettingsPage(),
-            ],
-          ),
+          paneBodyBuilder: (item, body) {
+            final pages = IndexedStack(
+              index: selected,
+              children: [
+                const HomePage(),
+                FilesPage(enableDrop: enableDrop),
+                const ActivityPage(),
+                const SettingsPage(),
+              ],
+            );
+            if (mode != PaneDisplayMode.top || !app.several) return pages;
+            // Narrow, several folders: the switcher above the screen (the tabs keep the top).
+            final gutter = pageGutter(width);
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: EdgeInsets.fromLTRB(gutter, 12, gutter, 0),
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: ConnectionMenu(app: app),
+                  ),
+                ),
+                Expanded(child: pages),
+              ],
+            );
+          },
         );
       },
     );

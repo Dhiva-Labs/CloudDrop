@@ -299,8 +299,8 @@ class _ProviderPage extends StatelessWidget {
               ? 'Everything in your CloudDrop folder is uploaded again to the place you pick. '
                     'Nothing is deleted from ${c.current.name}.'
               : c.adding
-              ? 'Pick the cloud the new folder uploads to. It can be another one than your '
-                    'other folders use.'
+              ? 'Pick the cloud the new folder uploads to: the one your other folders use, '
+                    'or another.'
               : 'Pick the cloud CloudDrop uploads to. You can switch later in Settings.',
         ),
         const SizedBox(height: 20),
@@ -620,9 +620,7 @@ class _FolderPageState extends State<_FolderPage> {
           _title(
             context,
             'Choose your folders',
-            subtitle: c.adding
-                ? 'Pick a folder no other CloudDrop folder holds or is inside of.'
-                : null,
+            subtitle: c.adding ? "Pick a folder CloudDrop doesn't upload yet." : null,
           ),
           const SectionTitle('On this computer'),
           Surface(

@@ -186,12 +186,12 @@ void main() {
   );
 
   // ---------- Settings ----------
-  screen('settings', busyApp, pane: AppPane.settings, tall: 1250);
+  screen('settings', busyApp, pane: AppPane.settings, tall: 1400);
   screen(
     'settings_sign_out_dialog',
     busyApp,
     pane: AppPane.settings,
-    tall: 1250,
+    tall: 1400,
     act: (tester, t) async {
       await tester.tap(find.text('Sign out'));
     },
@@ -207,7 +207,7 @@ void main() {
       return t;
     },
     pane: AppPane.settings,
-    tall: 1100,
+    tall: 1250,
   );
 
   // ---------- another provider: WebDAV (no web links, proves copies by downloading) ----------
@@ -234,12 +234,12 @@ void main() {
       scopeOf(tester).files.selectOnly('setup-guide.md');
     },
   );
-  screen('settings_webdav', () => busyApp(provider: webdav), pane: AppPane.settings, tall: 1250);
+  screen('settings_webdav', () => busyApp(provider: webdav), pane: AppPane.settings, tall: 1400);
   screen(
     'settings_switch_dialog',
     () => busyApp(provider: oneDrive),
     pane: AppPane.settings,
-    tall: 1250,
+    tall: 1400,
     act: (tester, t) async {
       await tester.tap(find.text('Switch Provider…'));
     },

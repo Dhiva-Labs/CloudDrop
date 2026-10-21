@@ -79,18 +79,13 @@ class ConnectionIcon extends StatelessWidget {
 /// What a connection's row says when hovered: its label and status line.
 String connectionTooltip(ConnectionEntry c) => '${c.label} · ${c.line}';
 
-/// The pane items above Home (expanded and compact pane): a "Folders" heading, one item per
-/// connection, "Add Another Folder…" and a separator. Empty with one connection.
-List<NavigationPaneItem> connectionPaneItems(
-  BuildContext context,
-  AppController app,
-  PaneDisplayMode mode,
-) {
+/// The pane items above Home (expanded and compact pane): one item per connection, "Add Another
+/// Folder…" and a separator. Empty with one connection.
+List<NavigationPaneItem> connectionPaneItems(BuildContext context, AppController app) {
   final rows = app.switcher;
   if (rows.isEmpty) return const [];
   final theme = FluentTheme.of(context);
   return [
-    if (mode == PaneDisplayMode.expanded) PaneItemHeader(header: const Text('Folders')),
     for (final c in rows)
       PaneItemAction(
         key: ValueKey('connection:${c.name}'),
@@ -127,8 +122,8 @@ List<NavigationPaneItem> connectionPaneItems(
   ];
 }
 
-/// The switcher of a narrow window (tabs along the top): the selected connection, opening a
-/// list of all of them and "Add Another Folder…".
+/// The switcher of a narrow window (tabs along the top), above the screen: the selected
+/// connection, opening a list of all of them and "Add Another Folder…".
 class ConnectionMenu extends StatelessWidget {
   const ConnectionMenu({super.key, required this.app});
 
@@ -148,7 +143,7 @@ class ConnectionMenu extends StatelessWidget {
             ConnectionIcon(current.icon),
             const SizedBox(width: 8),
             ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 96),
+              constraints: const BoxConstraints(maxWidth: 240),
               child: Text(current.label, maxLines: 1, overflow: TextOverflow.ellipsis),
             ),
           ],
