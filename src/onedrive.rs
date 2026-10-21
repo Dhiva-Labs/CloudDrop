@@ -411,8 +411,10 @@ impl OneDrive {
                 Some(id) => (format!("{}/createUploadSession", self.item_url(id)), "replace"),
                 None => (self.child_url(parent, name, Some("/createUploadSession")), "fail"),
             };
-            // fileSize lets OneDrive refuse a file that won't fit before any of it is sent.
-            let body = json!({ "item": { "@microsoft.graph.conflictBehavior": behavior, "fileSize": size } });
+            // No `fileSize`: personal OneDrive answers it with 400 invalidRequest (seen live,
+            // 2026-10), though the docs list it. A file that won't fit is refused (507) when its
+            // first fragment arrives instead.
+            let body = json!({ "item": { "@microsoft.graph.conflictBehavior": behavior } });
             let v: Value = json(self.call(|c| c.post(&url).json(&body)).await?).await?;
             let upload = v["uploadUrl"]
                 .as_str()
@@ -606,6 +608,8 @@ fn next_expected(v: &Value) -> Option<u64> {
 
 async fn classify(resp: Response) -> RemoteError {
     let status = resp.status();
+    // The path only: upload URLs carry their authorisation in the query.
+    let at = format!("{}{}", resp.url().host_str().unwrap_or(""), resp.url().path());
     let retry_after = resp
         .headers()
         .get(RETRY_AFTER)
@@ -613,6 +617,7 @@ async fn classify(resp: Response) -> RemoteError {
         .and_then(|v| v.trim().parse().ok());
     let body = resp.text().await.unwrap_or_default();
     let (codes, message) = graph_error(&body);
+    tracing::debug!("OneDrive answered {status} for {at}: {body}");
     let message = message.unwrap_or_else(|| status.canonical_reason().unwrap_or("error").to_string());
     error_for(status.as_u16(), &codes, &message, retry_after)
 }

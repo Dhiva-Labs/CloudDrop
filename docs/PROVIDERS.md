@@ -111,8 +111,9 @@ without a client id in the build or the config, every call asks to sign in.
 
 - An app registration in Microsoft Entra ID for "personal Microsoft accounts and accounts in any
   organizational directory", as a **public client** (no secret, "Allow public client flows"),
-  platform "Mobile and desktop applications" with the **loopback redirect** `http://localhost`
-  (Entra ignores the port for loopback; register the host name the sign-in actually uses), and
+  platform "Mobile and desktop applications" with the **loopback redirect** `http://127.0.0.1`
+  (the host the sign-in actually uses; Entra ignores the port for loopback but not the host, so
+  `http://localhost` alone fails), and
   delegated Graph permissions `Files.ReadWrite.AppFolder` and `offline_access`. Its client id
   goes into the build.
 - **Publisher verification** (a verified Microsoft partner account on the registration), so work

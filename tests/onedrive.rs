@@ -343,8 +343,10 @@ async fn quota_from_the_drive() {
     s.upload(None, "q.bin", &top, &data(1000), UNIT).await;
     s.mock.lock().unwrap().quota_total = 1_000_000;
     assert_eq!(s.od.storage_quota().await.unwrap(), (Some(1_000_000), 1000, 1000));
-    // An upload that won't fit is refused before any of it is sent.
-    let full = s.od.start_upload(None, "huge.bin", (&top, None), 2_000_000, "").await;
+    // An upload that won't fit is refused when its first fragment arrives (OneDrive refuses
+    // `fileSize` in the session request, so it can't be refused earlier).
+    let session = s.od.start_upload(None, "huge.bin", (&top, None), 2_000_000, "").await.unwrap();
+    let full = s.od.put_chunk(&session, bytes::Bytes::from(data(UNIT)), 0, 2_000_000).await;
     assert!(matches!(full, Err(RemoteError::Quota(_))), "{full:?}");
 }
 

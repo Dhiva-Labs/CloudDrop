@@ -421,6 +421,10 @@ fn update(st: &mut MockState, id: &str, body: &Value) -> Response {
 }
 
 fn create_session(st: &mut MockState, target: Target, body: &Value) -> Response {
+    // Real OneDrive (personal accounts, 2026) refuses `fileSize` here, although the docs list it.
+    if body["item"].get("fileSize").is_some() {
+        return error(400, "invalidRequest", "Invalid request");
+    }
     let replace = body["item"]["@microsoft.graph.conflictBehavior"].as_str() == Some("replace");
     let (item, parent, name) = match target {
         Target::Id(id) => match st.items.get(&id) {
@@ -438,12 +442,7 @@ fn create_session(st: &mut MockState, target: Target, body: &Value) -> Response 
             }
         }
     };
-    let total = body["item"]["fileSize"].as_u64().map(|n| n as usize);
-    if let Some(n) = total
-        && st.used() + n as u64 > st.quota_total
-    {
-        return error(507, "quotaLimitReached", "Insufficient Space Available");
-    }
+    let total = None;
     let sid = st.id().replace('!', "-");
     st.sessions_created += 1;
     st.sessions.insert(sid.clone(), Session { item, parent, name, replace, total, received: vec![] });
@@ -496,6 +495,14 @@ async fn upload(AxState(s): AxState<Shared>, method: Method, h: HeaderMap, AxPat
         return error(400, "invalidRange", "The total size changed.");
     }
     sess.total = Some(total);
+    // A file that won't fit is refused when its data arrives.
+    let used = st.used();
+    if used + total as u64 > st.quota_total {
+        return error(507, "quotaLimitReached", "Insufficient Space Available");
+    }
+    let Some(sess) = st.sessions.get_mut(&sid) else {
+        return not_found();
+    };
     if a != sess.received.len() {
         return error(416, "invalidRange", "Fragment overlaps or skips what was received.");
     }
