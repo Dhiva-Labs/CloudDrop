@@ -10,11 +10,12 @@ FluentThemeData buildTheme(
   bool mica = false,
   String? fontFamily,
   List<String>? fontFamilyFallback,
+  AccentColor? accent,
 }) {
   var base = FluentThemeData(
     brightness: brightness,
     fontFamily: fontFamily,
-    accentColor: Colors.blue,
+    accentColor: accent ?? brandAccent,
     visualDensity: VisualDensity.standard,
   );
   if (fontFamilyFallback != null) {
@@ -38,6 +39,67 @@ FluentThemeData buildTheme(
   return base.copyWith(
     scaffoldBackgroundColor: Colors.transparent,
     micaBackgroundColor: Colors.transparent,
+  );
+}
+
+/// CloudDrop blue, the middle of the logo's sky gradient, as a Fluent accent.
+final AccentColor brandAccent = AccentColor.swatch(const <String, Color>{
+  'darkest': Color(0xFF0E3A8F),
+  'darker': Color(0xFF1650BA),
+  'dark': Color(0xFF1F63D6),
+  'normal': Color(0xFF2F7CF0),
+  'light': Color(0xFF5A98F4),
+  'lighter': Color(0xFF84B3F7),
+  'lightest': Color(0xFFAECEFA),
+});
+
+/// The `accent` setting's colours, as offered in Settings (`gui/src/ui.rs` has the same ones).
+/// "default" is CloudDrop blue, so "blue" isn't offered separately here.
+const Map<String, Color> accentChoices = {
+  'default': Color(0xFF2F7CF0),
+  'teal': Color(0xFF0F8B8D),
+  'green': Color(0xFF3A944A),
+  'purple': Color(0xFF7C4DD6),
+  'pink': Color(0xFFD0457F),
+  'orange': Color(0xFFE2620E),
+};
+
+/// The accent for the `accent` setting; unknown names get CloudDrop blue.
+AccentColor accentFor(String name) {
+  final base = accentChoices[name];
+  if (base == null || name == 'default') return brandAccent;
+  Color shade(Color to, double t) => Color.lerp(base, to, t)!;
+  return AccentColor.swatch({
+    'darkest': shade(Colors.black, 0.45),
+    'darker': shade(Colors.black, 0.3),
+    'dark': shade(Colors.black, 0.15),
+    'normal': base,
+    'light': shade(Colors.white, 0.2),
+    'lighter': shade(Colors.white, 0.4),
+    'lightest': shade(Colors.white, 0.6),
+  });
+}
+
+/// The logo's colours, for the few places that wear the brand (Home's status card, setup).
+abstract final class Brand {
+  static const Color cyan = Color(0xFF41D9EF);
+  static const Color blue = Color(0xFF2F7CF0);
+  static const Color indigo = Color(0xFF4B3FD8);
+
+  /// A soft wash of the logo's sky behind a card.
+  static Gradient wash(Brightness b) => LinearGradient(
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+    colors: b == Brightness.dark
+        ? const [Color(0xFF0F2A3D), Color(0xFF15254A), Color(0xFF211B4A)]
+        : const [Color(0xFFE6F8FD), Color(0xFFE9F0FE), Color(0xFFEEECFD)],
+  );
+
+  /// The logo's sky itself.
+  static const Gradient sky = LinearGradient(
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+    colors: [cyan, blue, indigo],
   );
 }
 

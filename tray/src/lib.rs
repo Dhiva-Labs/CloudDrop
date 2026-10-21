@@ -32,7 +32,7 @@ use std::time::Duration;
 
 pub use anyhow::Result;
 use anyhow::anyhow;
-use ksni::menu::StandardItem;
+use ksni::menu::{StandardItem, SubMenu};
 use ksni::{Category, MenuItem, Status, ToolTip, TrayMethods};
 
 const ID: &str = "clouddrop";
@@ -76,15 +76,45 @@ pub struct TrayState {
     pub can_pause: bool,
     /// Show "Open in Google Drive" (false until the Drive folder exists).
     pub has_drive_folder: bool,
+    /// Where CloudDrop uploads, for "Open in Google Drive" ("OneDrive", …).
+    pub provider_name: String,
+    /// The provider has web pages to open (WebDAV, S3 and SFTP have none).
+    pub web_links: bool,
+    /// Every connection, when there are several: the menu then lists each one (its label and
+    /// status line) with its own folder, cloud and pause items, instead of the ones above
+    /// (which describe the only connection). Empty or one: the menu is as it always was.
+    pub connections: Vec<TrayConnection>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One connection (a folder uploading to a cloud) in the menu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrayConnection {
+    /// Its name, handed back in the commands for it.
+    pub name: String,
+    /// What the menu calls it ("CloudDrop", "Work").
+    pub label: String,
+    /// e.g. "Up to date", "Paused".
+    pub status_line: String,
+    pub paused: bool,
+    /// Show its pause/resume item (false until it is set up).
+    pub can_pause: bool,
+    /// Its cloud folder exists, so "Open in …" has somewhere to go.
+    pub has_drive_folder: bool,
+    pub provider_name: String,
+    pub web_links: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayCommand {
     ShowWindow,
     OpenFolder,
     OpenInDrive,
     TogglePause,
     Quit,
+    /// The same three for the connection of that name (several connections).
+    OpenFolderOf(String),
+    OpenInDriveOf(String),
+    TogglePauseOf(String),
 }
 
 /// Handle to the published top-bar icon. Dropping it removes the icon.
@@ -209,24 +239,31 @@ impl ksni::Tray for SniTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        menu_model(&self.state)
-            .into_iter()
-            .map(|entry| match entry {
-                Entry::Status(label) => StandardItem {
-                    label,
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-                Entry::Separator => MenuItem::Separator,
-                Entry::Action(label, command) => StandardItem {
-                    label: label.into(),
-                    activate: Box::new(move |this: &mut Self| (this.on_command)(command)),
-                    ..Default::default()
-                }
-                .into(),
-            })
-            .collect()
+        menu_model(&self.state).into_iter().map(menu_item).collect()
+    }
+}
+
+fn menu_item(entry: Entry) -> MenuItem<SniTray> {
+    match entry {
+        Entry::Status(label) => StandardItem {
+            label,
+            enabled: false,
+            ..Default::default()
+        }
+        .into(),
+        Entry::Separator => MenuItem::Separator,
+        Entry::Action(label, command) => StandardItem {
+            label,
+            activate: Box::new(move |this: &mut SniTray| (this.on_command)(command.clone())),
+            ..Default::default()
+        }
+        .into(),
+        Entry::Sub(label, entries) => SubMenu {
+            label,
+            submenu: entries.into_iter().map(menu_item).collect(),
+            ..Default::default()
+        }
+        .into(),
     }
 }
 
@@ -236,23 +273,47 @@ enum Entry {
     /// The disabled first row. The label is already menu-escaped.
     Status(String),
     Separator,
-    Action(&'static str, TrayCommand),
+    /// The label is already menu-escaped.
+    Action(String, TrayCommand),
+    /// A connection's submenu. The label is already menu-escaped.
+    Sub(String, Vec<Entry>),
 }
 
-/// The context menu for a state: status line, folder/Drive/window shortcuts,
-/// the optional pause toggle, then Quit.
+/// The context menu for a state: status line, folder/cloud/window shortcuts,
+/// the optional pause toggle, then Quit. With several connections: the status line, a submenu
+/// per connection (folder, cloud, pause), then the window and Quit.
 fn menu_model(state: &TrayState) -> Vec<Entry> {
-    use Entry::{Action, Separator};
+    use Entry::Separator;
+    let action = |label: &str, command| Entry::Action(escape_mnemonics(label), command);
 
+    if state.connections.len() > 1 {
+        let mut menu = vec![Entry::Status(escape_mnemonics(&state.status_line)), Separator];
+        for c in &state.connections {
+            let mut sub = vec![action("Open Folder", TrayCommand::OpenFolderOf(c.name.clone()))];
+            if c.has_drive_folder && c.web_links {
+                sub.push(action(&format!("Open in {}", c.provider_name), TrayCommand::OpenInDriveOf(c.name.clone())));
+            }
+            if c.can_pause {
+                let label = if c.paused { "Resume Uploads" } else { "Pause Uploads" };
+                sub.push(action(label, TrayCommand::TogglePauseOf(c.name.clone())));
+            }
+            menu.push(Entry::Sub(escape_mnemonics(&format!("{} — {}", c.label, c.status_line)), sub));
+        }
+        menu.push(Separator);
+        menu.push(action("Show CloudDrop", TrayCommand::ShowWindow));
+        menu.push(Separator);
+        menu.push(action("Quit", TrayCommand::Quit));
+        return menu;
+    }
     let mut menu = vec![
         Entry::Status(escape_mnemonics(&state.status_line)),
         Separator,
-        Action("Open CloudDrop Folder", TrayCommand::OpenFolder),
+        action("Open CloudDrop Folder", TrayCommand::OpenFolder),
     ];
-    if state.has_drive_folder {
-        menu.push(Action("Open in Google Drive", TrayCommand::OpenInDrive));
+    if state.has_drive_folder && state.web_links {
+        menu.push(action(&format!("Open in {}", state.provider_name), TrayCommand::OpenInDrive));
     }
-    menu.push(Action("Show CloudDrop", TrayCommand::ShowWindow));
+    menu.push(action("Show CloudDrop", TrayCommand::ShowWindow));
     if state.can_pause {
         menu.push(Separator);
         let label = if state.paused {
@@ -260,10 +321,10 @@ fn menu_model(state: &TrayState) -> Vec<Entry> {
         } else {
             "Pause Uploads"
         };
-        menu.push(Action(label, TrayCommand::TogglePause));
+        menu.push(action(label, TrayCommand::TogglePause));
     }
     menu.push(Separator);
-    menu.push(Action("Quit", TrayCommand::Quit));
+    menu.push(action("Quit", TrayCommand::Quit));
     menu
 }
 
@@ -295,18 +356,98 @@ mod tests {
             paused: false,
             can_pause: true,
             has_drive_folder: true,
+            provider_name: "Google Drive".into(),
+            web_links: true,
+            connections: Vec::new(),
         }
     }
 
     fn labels(state: &TrayState) -> Vec<String> {
-        menu_model(state)
-            .into_iter()
-            .map(|e| match e {
-                Entry::Status(s) => s,
-                Entry::Separator => "---".into(),
-                Entry::Action(label, _) => label.into(),
-            })
-            .collect()
+        menu_model(state).into_iter().map(|e| text(&e)).collect()
+    }
+
+    fn text(e: &Entry) -> String {
+        match e {
+            Entry::Status(s) => s.clone(),
+            Entry::Separator => "---".into(),
+            Entry::Action(label, _) => label.clone(),
+            Entry::Sub(label, entries) => {
+                format!("{label} > [{}]", entries.iter().map(text).collect::<Vec<_>>().join(", "))
+            }
+        }
+    }
+
+    fn connection(name: &str, provider: &str) -> TrayConnection {
+        TrayConnection {
+            name: name.to_lowercase(),
+            label: name.into(),
+            status_line: "Up to date".into(),
+            paused: false,
+            can_pause: true,
+            has_drive_folder: true,
+            provider_name: provider.into(),
+            web_links: true,
+        }
+    }
+
+    #[test]
+    fn several_connections_each_get_a_submenu() {
+        let s = TrayState {
+            status_line: "Work: Paused".into(),
+            connections: vec![
+                connection("CloudDrop", "Google Drive"),
+                TrayConnection {
+                    status_line: "Paused".into(),
+                    paused: true,
+                    web_links: false,
+                    ..connection("Work", "Nextcloud")
+                },
+                TrayConnection { can_pause: false, has_drive_folder: false, ..connection("New_one", "Dropbox") },
+            ],
+            ..state()
+        };
+        assert_eq!(
+            labels(&s),
+            [
+                "Work: Paused",
+                "---",
+                "CloudDrop — Up to date > [Open Folder, Open in Google Drive, Pause Uploads]",
+                "Work — Paused > [Open Folder, Resume Uploads]",
+                "New__one — Up to date > [Open Folder]",
+                "---",
+                "Show CloudDrop",
+                "---",
+                "Quit",
+            ]
+        );
+        let one = TrayState { connections: vec![connection("CloudDrop", "Google Drive")], ..state() };
+        assert_eq!(labels(&one), labels(&state()), "one connection: the menu as it always was");
+    }
+
+    #[test]
+    fn submenu_items_name_their_connection() {
+        let s = TrayState { connections: vec![connection("A", "Google Drive"), connection("B", "OneDrive")], ..state() };
+        let (mut tray, seen) = sni(s);
+        for item in tray.menu() {
+            if let MenuItem::SubMenu(sub) = item {
+                for inner in sub.submenu {
+                    if let MenuItem::Standard(i) = inner {
+                        (i.activate)(&mut tray);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                TrayCommand::OpenFolderOf("a".into()),
+                TrayCommand::OpenInDriveOf("a".into()),
+                TrayCommand::TogglePauseOf("a".into()),
+                TrayCommand::OpenFolderOf("b".into()),
+                TrayCommand::OpenInDriveOf("b".into()),
+                TrayCommand::TogglePauseOf("b".into()),
+            ]
+        );
     }
 
     #[test]
@@ -346,6 +487,16 @@ mod tests {
         };
         assert!(labels(&s).contains(&"Resume Uploads".to_string()));
         assert!(!labels(&s).contains(&"Pause Uploads".to_string()));
+    }
+
+    #[test]
+    fn the_cloud_item_names_the_provider_and_needs_web_links() {
+        let s = TrayState { provider_name: "OneDrive".into(), ..state() };
+        assert!(labels(&s).contains(&"Open in OneDrive".to_string()));
+        let s = TrayState { provider_name: "WebDAV".into(), web_links: false, ..state() };
+        assert!(!labels(&s).iter().any(|l| l.starts_with("Open in")));
+        let s = TrayState { provider_name: "My_Cloud".into(), ..state() };
+        assert!(labels(&s).contains(&"Open in My__Cloud".to_string()), "menu-escaped");
     }
 
     #[test]

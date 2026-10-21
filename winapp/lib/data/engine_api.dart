@@ -9,7 +9,9 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import 'cli_runner.dart';
+import 'connections.dart';
 import 'models.dart';
+import 'providers.dart';
 
 /// A finished command: the engine's sentence, or its error.
 class ActionResult {
@@ -37,6 +39,9 @@ class EngineStatus {
     this.paused = false,
     this.rootId,
     this.configError,
+    this.provider,
+    this.providerName,
+    this.account,
   });
 
   /// Not set up yet: the setup assistant is due (unless [configError] says the settings file
@@ -78,6 +83,16 @@ class EngineStatus {
   /// `configured: false`.
   final String? configError;
 
+  /// The configured cloud's id (`gdrive`, `onedrive`, …); null before setup or from an engine
+  /// that predates the field (Google Drive, then).
+  final String? provider;
+
+  /// Its display name ("OneDrive").
+  final String? providerName;
+
+  /// Who is signed in, where the engine can say ("me@example.com").
+  final String? account;
+
   bool get ready => configured && signedIn;
 
   factory EngineStatus.fromJson(Map<String, dynamic> j) {
@@ -112,6 +127,11 @@ class EngineStatus {
       cloudBytes: (j['cloud_bytes'] as num?)?.toInt() ?? 0,
       cloudOnlyBytes: (j['cloud_only_bytes'] as num?)?.toInt() ?? 0,
       errors: errors,
+      provider: j['provider'] as String?,
+      providerName: j['provider_name'] as String?,
+      account: j['account'] is String && (j['account'] as String).isNotEmpty
+          ? j['account'] as String
+          : null,
     );
   }
 }
@@ -129,6 +149,9 @@ class AppConfig {
     this.ignore = const [],
     this.autoFreeDays,
     this.keepLocal = const [],
+    this.sections = const {},
+    this.theme = 'system',
+    this.accent = 'default',
   });
 
   final String syncDir;
@@ -144,6 +167,16 @@ class AppConfig {
   final int? autoFreeDays;
   final List<String> keepLocal;
 
+  /// Providers' own settings by provider id (`[webdav] url = …`), to prefill the setup
+  /// assistant; secrets are never among them.
+  final Map<String, Map<String, String>> sections;
+
+  /// The app's look: `system`, `light` or `dark`.
+  final String theme;
+
+  /// The accent colour's name (`default` = CloudDrop blue).
+  final String accent;
+
   /// A client is configured (a built-in one is written to the config by setup).
   bool get hasClient => clientId.isNotEmpty && hasClientSecret;
 
@@ -158,6 +191,16 @@ class AppConfig {
     ignore: [for (final x in (j['ignore'] as List? ?? const [])) '$x'],
     autoFreeDays: (j['auto_free_days'] as num?)?.toInt(),
     keepLocal: [for (final x in (j['keep_local'] as List? ?? const [])) '$x'],
+    theme: j['theme'] as String? ?? 'system',
+    accent: j['accent'] as String? ?? 'default',
+    sections: {
+      for (final e in j.entries)
+        if (e.value is Map && e.key != 'endpoints')
+          e.key: {
+            for (final f in (e.value as Map).entries)
+              if (f.value is String || f.value is num || f.value is bool) '${f.key}': '${f.value}',
+          },
+    },
   );
 
   AppConfig copyWith({
@@ -167,6 +210,8 @@ class AppConfig {
     List<String>? ignore,
     Object? autoFreeDays = _keep,
     List<String>? keepLocal,
+    String? theme,
+    String? accent,
   }) => AppConfig(
     syncDir: syncDir,
     driveFolder: driveFolder,
@@ -178,6 +223,9 @@ class AppConfig {
     ignore: ignore ?? this.ignore,
     autoFreeDays: identical(autoFreeDays, _keep) ? this.autoFreeDays : autoFreeDays as int?,
     keepLocal: keepLocal ?? this.keepLocal,
+    sections: sections,
+    theme: theme ?? this.theme,
+    accent: accent ?? this.accent,
   );
 
   @override
@@ -192,7 +240,9 @@ class AppConfig {
       other.notifications == notifications &&
       _listEq(other.ignore, ignore) &&
       other.autoFreeDays == autoFreeDays &&
-      _listEq(other.keepLocal, keepLocal);
+      _listEq(other.keepLocal, keepLocal) &&
+      other.theme == theme &&
+      other.accent == accent;
 
   @override
   int get hashCode => Object.hash(
@@ -205,6 +255,8 @@ class AppConfig {
     Object.hashAll(ignore),
     autoFreeDays,
     Object.hashAll(keepLocal),
+    theme,
+    accent,
   );
 }
 
@@ -237,7 +289,7 @@ class ServiceStatus {
 
 /// A browser sign-in in progress (`clouddrop login --no-browser`).
 abstract class LoginSession {
-  /// The Google consent link; fails if the process ends before printing it.
+  /// The consent link; fails if the process ends before printing it.
   Future<String> get url;
 
   /// Completes when the process exits: ok = signed in.
@@ -248,7 +300,40 @@ abstract class LoginSession {
 }
 
 /// What the UI needs from the engine. [CliEngineApi] is the real one; tests inject fakes.
+///
+/// Each instance works on one connection ([connection], passed as `--connection` to every
+/// command that concerns one); [forConnection] gives the same engine for another. The
+/// installation-wide commands (`connections`, `providers`, `service`) ignore it.
 abstract class EngineApi {
+  /// The connection the commands work on; null for an engine from before connections (it has
+  /// just the one and takes no `--connection`).
+  String? get connection;
+
+  /// The same engine, working on the connection [name].
+  EngineApi forConnection(String name);
+
+  /// Every connection (`connections --json`): the default one first, then by name; empty before
+  /// the first setup. null when the engine predates connections or can't be asked.
+  Future<List<Connection>?> connections();
+
+  /// `connections add NAME`: sets up a new connection uploading [folder] (no sign-in yet: that
+  /// is [forConnection]`(name).login()` or `.check()`). The arguments are [setup]'s.
+  Future<ActionResult> addConnection(
+    String name, {
+    required String folder,
+    required String driveFolder,
+    String? clientJsonPath,
+    String? clientId,
+    String? clientSecret,
+    String? provider,
+    Map<String, String> settings = const {},
+    Map<String, String> secrets = const {},
+  });
+
+  /// `connections remove NAME`: stops uploading it and forgets its settings and state. Nothing
+  /// in its folder or in the cloud is deleted.
+  Future<ActionResult> removeConnection(String name);
+
   /// Overall state (`status --json`, which also works before setup). Throws [CliUnavailable]
   /// when the CLI can't be run, [StateError] when it ran and complained.
   Future<EngineStatus> status();
@@ -259,20 +344,37 @@ abstract class EngineApi {
   /// `config set KEY VALUE`, applied live by the engine.
   Future<ActionResult> configSet(String key, String value);
 
+  /// Every cloud CloudDrop can upload to (`providers --json`); just Google Drive from an
+  /// engine that can't list them.
+  Future<List<CloudProvider>> providers();
+
   /// `setup --no-login`: writes the config and creates the folder. A key given as
-  /// [clientId]/[clientSecret] reaches the CLI through a temporary JSON file.
+  /// [clientId]/[clientSecret] reaches the CLI through a temporary JSON file. [provider] picks
+  /// another cloud than the configured one (`--provider`), with its settings (`--set`) and
+  /// secrets (`--secret`).
   Future<ActionResult> setup({
     required String folder,
     required String driveFolder,
     String? clientJsonPath,
     String? clientId,
     String? clientSecret,
+    String? provider,
+    Map<String, String> settings = const {},
+    Map<String, String> secrets = const {},
   });
 
+  /// The provider's browser sign-in (`login --no-browser`).
   LoginSession login();
 
-  /// `clouddrop logout`: stops the service and forgets the Google sign-in.
+  /// `clouddrop check`: connects with the saved settings; ok = it works.
+  Future<ActionResult> check();
+
+  /// `clouddrop logout`: stops the service and forgets the sign-in.
   Future<ActionResult> logout();
+
+  /// `reset-cloud --yes`: forgets every cloud copy and uploads everything again (after
+  /// switching providers).
+  Future<ActionResult> resetCloud();
 
   Future<ActionResult> free(List<String> paths);
   Future<ActionResult> restore(List<String> paths);
@@ -286,20 +388,36 @@ abstract class EngineApi {
 
   Future<ServiceStatus> serviceStatus();
   Future<ActionResult> serviceStart();
+  Future<ActionResult> serviceStop();
   Future<ActionResult> serviceEnable();
   Future<ActionResult> serviceDisable();
 
-  /// The Google Drive link of [path] (an absolute path inside the sync folder).
+  /// The web link of [path] in the cloud (an absolute path inside the sync folder).
   Future<ActionResult> driveUrl(String path);
 }
 
 /// Talks to the engine by running `clouddrop`.
 class CliEngineApi implements EngineApi {
-  CliEngineApi(this.runner);
+  CliEngineApi(this.runner, {this.connection});
 
   final CliRunner runner;
 
-  Future<ActionResult> _do(List<String> args) async {
+  @override
+  final String? connection;
+
+  @override
+  EngineApi forConnection(String name) =>
+      name == connection ? this : CliEngineApi(runner, connection: name);
+
+  /// [args] for this connection: `--connection NAME` first, so the CLI never picks one from the
+  /// working directory or a path.
+  List<String> _on(List<String> args) {
+    final c = connection;
+    return c == null ? args : ['--connection', c, ...args];
+  }
+
+  /// Runs an installation-wide command as is.
+  Future<ActionResult> _doAll(List<String> args) async {
     try {
       final r = await runner.run(args);
       return ActionResult(r.ok, r.message);
@@ -308,9 +426,51 @@ class CliEngineApi implements EngineApi {
     }
   }
 
+  /// Runs a command on this connection.
+  Future<ActionResult> _do(List<String> args) => _doAll(_on(args));
+
+  @override
+  Future<List<Connection>?> connections() async {
+    try {
+      final r = await runner.run(['connections', '--json'], timeout: const Duration(seconds: 30));
+      if (!r.ok) return null;
+      return parseConnections(r.stdout);
+    } on CliUnavailable {
+      return null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  @override
+  Future<ActionResult> addConnection(
+    String name, {
+    required String folder,
+    required String driveFolder,
+    String? clientJsonPath,
+    String? clientId,
+    String? clientSecret,
+    String? provider,
+    Map<String, String> settings = const {},
+    Map<String, String> secrets = const {},
+  }) => _withClientJson(
+    clientJsonPath,
+    clientId,
+    clientSecret,
+    (json) => _doAll([
+      'connections',
+      'add',
+      name,
+      ..._setupArgs(folder, driveFolder, json, provider, settings, secrets),
+    ]),
+  );
+
+  @override
+  Future<ActionResult> removeConnection(String name) => _doAll(['connections', 'remove', name]);
+
   @override
   Future<EngineStatus> status() async {
-    final r = await runner.run(['status', '--json'], timeout: const Duration(seconds: 30));
+    final r = await runner.run(_on(['status', '--json']), timeout: const Duration(seconds: 30));
     if (!r.ok) throw StateError(r.errorMessage);
     try {
       final j = jsonDecode(r.stdout);
@@ -323,7 +483,10 @@ class CliEngineApi implements EngineApi {
 
   @override
   Future<AppConfig?> configGet() async {
-    final r = await runner.run(['config', 'get', '--json'], timeout: const Duration(seconds: 30));
+    final r = await runner.run(
+      _on(['config', 'get', '--json']),
+      timeout: const Duration(seconds: 30),
+    );
     if (!r.ok) return null;
     try {
       final j = jsonDecode(r.stdout);
@@ -337,13 +500,67 @@ class CliEngineApi implements EngineApi {
   Future<ActionResult> configSet(String key, String value) => _do(['config', 'set', key, value]);
 
   @override
+  Future<List<CloudProvider>> providers() async {
+    try {
+      final r = await runner.run(['providers', '--json'], timeout: const Duration(seconds: 30));
+      if (r.ok) {
+        final list = parseProviders(r.stdout);
+        if (list.isNotEmpty) return list;
+      }
+    } on CliUnavailable {
+      // Fall through.
+    } on FormatException {
+      // Fall through.
+    }
+    return const [CloudProvider.google];
+  }
+
+  @override
   Future<ActionResult> setup({
     required String folder,
     required String driveFolder,
     String? clientJsonPath,
     String? clientId,
     String? clientSecret,
-  }) async {
+    String? provider,
+    Map<String, String> settings = const {},
+    Map<String, String> secrets = const {},
+  }) => _withClientJson(
+    clientJsonPath,
+    clientId,
+    clientSecret,
+    (json) => _do([
+      'setup',
+      '--no-login',
+      ..._setupArgs(folder, driveFolder, json, provider, settings, secrets),
+    ]),
+  );
+
+  /// What `setup` and `connections add` take.
+  List<String> _setupArgs(
+    String folder,
+    String driveFolder,
+    String? clientJsonPath,
+    String? provider,
+    Map<String, String> settings,
+    Map<String, String> secrets,
+  ) => [
+    '--folder=$folder',
+    '--drive-folder=$driveFolder',
+    if (clientJsonPath != null) '--client-json=$clientJsonPath',
+    if (provider != null) '--provider=$provider',
+    for (final e in settings.entries) ...['--set', '${e.key}=${e.value}'],
+    for (final e in secrets.entries) ...['--secret', '${e.key}=${e.value}'],
+  ];
+
+  /// Runs [body] with the Google key as a client JSON file: [clientJsonPath] as is, or a key
+  /// given as [clientId]/[clientSecret] written to a temporary file (never on the command line).
+  Future<ActionResult> _withClientJson(
+    String? clientJsonPath,
+    String? clientId,
+    String? clientSecret,
+    Future<ActionResult> Function(String? jsonPath) body,
+  ) async {
     Directory? tmp;
     try {
       var jsonPath = clientJsonPath;
@@ -357,13 +574,7 @@ class CliEngineApi implements EngineApi {
         );
         jsonPath = f.path;
       }
-      return await _do([
-        'setup',
-        '--no-login',
-        '--folder=$folder',
-        '--drive-folder=$driveFolder',
-        if (jsonPath != null) '--client-json=$jsonPath',
-      ]);
+      return await body(jsonPath);
     } finally {
       if (tmp != null) {
         try {
@@ -374,10 +585,16 @@ class CliEngineApi implements EngineApi {
   }
 
   @override
-  LoginSession login() => _CliLogin(runner);
+  LoginSession login() => _CliLogin(runner, _on(['login', '--no-browser']));
+
+  @override
+  Future<ActionResult> check() => _do(['check']);
 
   @override
   Future<ActionResult> logout() => _do(['logout']);
+
+  @override
+  Future<ActionResult> resetCloud() => _do(['reset-cloud', '--yes']);
 
   @override
   Future<ActionResult> free(List<String> paths) => _do(['free', ...paths]);
@@ -416,13 +633,16 @@ class CliEngineApi implements EngineApi {
   }
 
   @override
-  Future<ActionResult> serviceStart() => _do(['service', 'start']);
+  Future<ActionResult> serviceStart() => _doAll(['service', 'start']);
 
   @override
-  Future<ActionResult> serviceEnable() => _do(['service', 'enable']);
+  Future<ActionResult> serviceStop() => _doAll(['service', 'stop']);
 
   @override
-  Future<ActionResult> serviceDisable() => _do(['service', 'disable']);
+  Future<ActionResult> serviceEnable() => _doAll(['service', 'enable']);
+
+  @override
+  Future<ActionResult> serviceDisable() => _doAll(['service', 'disable']);
 
   @override
   Future<ActionResult> driveUrl(String path) => _do(['url', path]);
@@ -434,13 +654,14 @@ final RegExp _urlPattern = RegExp(r'https?://\S+');
 String? extractUrl(String line) => _urlPattern.firstMatch(line)?.group(0);
 
 class _CliLogin implements LoginSession {
-  _CliLogin(this._runner) {
+  _CliLogin(this._runner, this._args) {
     // Nobody may ask for the link (a cancelled sign-in); that is not an error.
     _url.future.ignore();
     _start();
   }
 
   final CliRunner _runner;
+  final List<String> _args;
   final _url = Completer<String>();
   final _done = Completer<ActionResult>();
   CliProcess? _proc;
@@ -449,7 +670,7 @@ class _CliLogin implements LoginSession {
   Future<void> _start() async {
     final CliProcess proc;
     try {
-      proc = await _runner.start(['login', '--no-browser']);
+      proc = await _runner.start(_args);
     } on CliUnavailable catch (e) {
       _fail(e.toString());
       return;

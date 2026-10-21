@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use clouddrop_tray::{Tray, TrayCommand, TrayIcon, TrayState};
+use clouddrop_tray::{Tray, TrayCommand, TrayConnection, TrayIcon, TrayState};
 use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::time::timeout;
@@ -170,6 +170,9 @@ fn idle() -> TrayState {
         paused: false,
         can_pause: true,
         has_drive_folder: false,
+        provider_name: "Google Drive".into(),
+        web_links: true,
+        connections: Vec::new(),
     }
 }
 
@@ -268,6 +271,33 @@ async fn menu_rows(menu: &Proxy<'_>) -> Vec<Row> {
             Row { id, text, enabled }
         })
         .collect()
+}
+
+/// The rows of the submenu whose label is `label` (a connection's, with several).
+async fn submenu_rows(menu: &Proxy<'_>, label: &str) -> Vec<Row> {
+    let (_revision, root): (u32, LayoutTuple) = menu
+        .call("GetLayout", &(0i32, -1i32, Vec::<String>::new()))
+        .await
+        .unwrap();
+    for child in root.2 {
+        let (_id, props, children): LayoutTuple = child.try_into().unwrap();
+        let text = props.get("label").and_then(|v| String::try_from(v.try_clone().unwrap()).ok());
+        if text.as_deref() != Some(label) {
+            continue;
+        }
+        return children
+            .into_iter()
+            .map(|c| {
+                let (id, props, _): LayoutTuple = c.try_into().unwrap();
+                let text = props
+                    .get("label")
+                    .map(|v| String::try_from(v.try_clone().unwrap()).unwrap())
+                    .unwrap_or_else(|| "---".into());
+                Row { id, text, enabled: true }
+            })
+            .collect();
+    }
+    panic!("no submenu {label:?}");
 }
 
 fn texts(rows: &[Row]) -> Vec<&str> {
@@ -387,6 +417,9 @@ async fn registers_and_follows_state_updates() {
         paused: true,
         can_pause: true,
         has_drive_folder: true,
+        provider_name: "Google Drive".into(),
+        web_links: true,
+        connections: Vec::new(),
     })
     .await;
     timeout(WAIT, new_icon.next())
@@ -428,6 +461,9 @@ async fn registers_and_follows_state_updates() {
         paused: false,
         can_pause: false,
         has_drive_folder: false,
+        provider_name: "Google Drive".into(),
+        web_links: true,
+        connections: Vec::new(),
     })
     .await;
     assert_eq!(
@@ -492,6 +528,8 @@ async fn menu_clicks_and_icon_activation_reach_the_callback() {
     let (tray, mut commands) = spawn_tray(
         TrayState {
             has_drive_folder: true,
+            provider_name: "Google Drive".into(),
+            web_links: true,
             ..idle()
         },
         None,
@@ -527,6 +565,52 @@ async fn menu_clicks_and_icon_activation_reach_the_callback() {
     click(&menu, &rows, "Resume Uploads").await;
     assert_eq!(next_command(&mut commands).await, TrayCommand::TogglePause);
 
+    assert!(commands.try_recv().is_err(), "no stray commands");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn several_connections_are_submenus_on_the_bus() {
+    let bus = Bus::start();
+    let (_watcher, items) = bus.start_watcher().await;
+    let client = bus.connect().await;
+    let conn = |name: &str, label: &str, provider: &str, line: &str, paused: bool| TrayConnection {
+        name: name.into(),
+        label: label.into(),
+        status_line: line.into(),
+        paused,
+        can_pause: true,
+        has_drive_folder: true,
+        provider_name: provider.into(),
+        web_links: provider != "WebDAV",
+    };
+    let (_tray, mut commands) = spawn_tray(
+        TrayState {
+            status_line: "Work: Paused".into(),
+            connections: vec![
+                conn("default", "CloudDrop", "Google Drive", "Up to date", false),
+                conn("work", "Work", "WebDAV", "Paused", true),
+            ],
+            ..idle()
+        },
+        None,
+    )
+    .await;
+    let item = items.lock().unwrap()[0].clone();
+    let menu = dbusmenu(&client, &item).await;
+    assert_eq!(
+        texts(&menu_rows(&menu).await),
+        ["Work: Paused", "---", "CloudDrop — Up to date", "Work — Paused", "---", "Show CloudDrop", "---", "Quit"]
+    );
+    let work = submenu_rows(&menu, "Work — Paused").await;
+    assert_eq!(texts(&work), ["Open Folder", "Resume Uploads"], "WebDAV has no web pages");
+    click(&menu, &work, "Resume Uploads").await;
+    assert_eq!(next_command(&mut commands).await, TrayCommand::TogglePauseOf("work".into()));
+    let home = submenu_rows(&menu, "CloudDrop — Up to date").await;
+    assert_eq!(texts(&home), ["Open Folder", "Open in Google Drive", "Pause Uploads"]);
+    click(&menu, &home, "Open in Google Drive").await;
+    assert_eq!(next_command(&mut commands).await, TrayCommand::OpenInDriveOf("default".into()));
+    click(&menu, &home, "Open Folder").await;
+    assert_eq!(next_command(&mut commands).await, TrayCommand::OpenFolderOf("default".into()));
     assert!(commands.try_recv().is_err(), "no stray commands");
 }
 

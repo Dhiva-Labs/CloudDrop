@@ -76,7 +76,13 @@ const _months = [
   'September', 'October', 'November', 'December', //
 ];
 const _weekdays = [
-  'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday', //
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday', //
 ];
 
 /// Tests pin the clock and the time zone so dates on screen (and in goldens) are stable.
@@ -143,6 +149,20 @@ String groupDigits(int n) {
     out.write(digits[i]);
   }
   return out.toString();
+}
+
+/// Upload speed: "850 KB/s", "2.4 MB/s".
+String speed(double bytesPerSecond) => '${humanBytes(bytesPerSecond.round())}/s';
+
+/// Time left at the current speed: "less than a minute left", "about 5 minutes left",
+/// "about 2 hours left", "more than a day left".
+String timeLeft(int seconds) {
+  if (seconds < 60) return 'less than a minute left';
+  final minutes = (seconds / 60).round();
+  if (minutes < 60) return minutes == 1 ? 'about a minute left' : 'about $minutes minutes left';
+  final hours = (seconds / 3600).round();
+  if (hours < 24) return hours == 1 ? 'about an hour left' : 'about $hours hours left';
+  return 'more than a day left';
 }
 
 String files(int n) => n == 1 ? '1 file' : '${groupDigits(n)} files';

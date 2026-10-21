@@ -9,6 +9,7 @@ import 'package:fluent_ui/fluent_ui.dart';
 import '../state/activity_controller.dart';
 import '../state/app_controller.dart';
 import '../state/files_controller.dart';
+import '../logic/snapshot.dart';
 import '../state/setup_controller.dart';
 import 'pages/activity_page.dart';
 import 'pages/files_page.dart';
@@ -17,17 +18,23 @@ import 'pages/settings_page.dart';
 import 'scope.dart';
 import 'setup/setup_page.dart';
 import 'theme.dart';
+import 'widgets/connection_switcher.dart';
 
-class CloudDropApp extends StatelessWidget {
+/// The window's title: "CloudDrop", or with several folders the one shown ("Work - CloudDrop").
+String windowTitle(AppController app) =>
+    app.several && app.label != 'CloudDrop' ? '${app.label} - CloudDrop' : 'CloudDrop';
+
+class CloudDropApp extends StatefulWidget {
   const CloudDropApp({
     super.key,
     required this.app,
     this.mica = false,
     this.fontFamily,
     this.fontFamilyFallback,
-    this.themeMode = ThemeMode.system,
+    this.themeMode,
     this.enableDrop = true,
     this.onBrightness,
+    this.onTitle,
   });
 
   final AppController app;
@@ -36,7 +43,9 @@ class CloudDropApp extends StatelessWidget {
   final bool mica;
   final String? fontFamily;
   final List<String>? fontFamilyFallback;
-  final ThemeMode themeMode;
+
+  /// Light or dark; null follows the `theme` setting (tests pin one).
+  final ThemeMode? themeMode;
 
   /// Off in tests: the native drop plugin isn't there.
   final bool enableDrop;
@@ -44,35 +53,93 @@ class CloudDropApp extends StatelessWidget {
   /// Called when the effective brightness changes (the window effect follows it).
   final void Function(Brightness brightness)? onBrightness;
 
+  /// Called when the window's title changes ([windowTitle]).
+  final void Function(String title)? onTitle;
+
+  @override
+  State<CloudDropApp> createState() => _CloudDropAppState();
+}
+
+/// Rebuilds the themes only when the `theme` or `accent` setting changes.
+class _CloudDropAppState extends State<CloudDropApp> {
+  late (String, String) _look = _current();
+
+  (String, String) _current() =>
+      (widget.app.config?.theme ?? 'system', widget.app.config?.accent ?? 'default');
+
+  void _changed() {
+    final look = _current();
+    if (look != _look) setState(() => _look = look);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.app.addListener(_changed);
+  }
+
+  @override
+  void didUpdateWidget(CloudDropApp old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.app, widget.app)) {
+      old.app.removeListener(_changed);
+      widget.app.addListener(_changed);
+      _look = _current();
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.app.removeListener(_changed);
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final w = widget;
+    final (theme, accentName) = _look;
+    final accent = accentFor(accentName);
     return FluentApp(
       title: 'CloudDrop',
       debugShowCheckedModeBanner: false,
-      themeMode: themeMode,
+      themeMode:
+          w.themeMode ??
+          switch (theme) {
+            'light' => ThemeMode.light,
+            'dark' => ThemeMode.dark,
+            _ => ThemeMode.system,
+          },
       theme: buildTheme(
         Brightness.light,
-        mica: mica,
-        fontFamily: fontFamily,
-        fontFamilyFallback: fontFamilyFallback,
+        mica: w.mica,
+        fontFamily: w.fontFamily,
+        fontFamilyFallback: w.fontFamilyFallback,
+        accent: accent,
       ),
       darkTheme: buildTheme(
         Brightness.dark,
-        mica: mica,
-        fontFamily: fontFamily,
-        fontFamilyFallback: fontFamilyFallback,
+        mica: w.mica,
+        fontFamily: w.fontFamily,
+        fontFamilyFallback: w.fontFamilyFallback,
+        accent: accent,
       ),
-      home: _Root(app: app, enableDrop: enableDrop, onBrightness: onBrightness),
+      home: _Root(
+        app: w.app,
+        enableDrop: w.enableDrop,
+        onBrightness: w.onBrightness,
+        onTitle: w.onTitle,
+      ),
     );
   }
 }
 
 class _Root extends StatefulWidget {
-  const _Root({required this.app, required this.enableDrop, this.onBrightness});
+  const _Root({required this.app, required this.enableDrop, this.onBrightness, this.onTitle});
 
   final AppController app;
   final bool enableDrop;
   final void Function(Brightness brightness)? onBrightness;
+  final void Function(String title)? onTitle;
 
   @override
   State<_Root> createState() => _RootState();
@@ -83,15 +150,25 @@ class _RootState extends State<_Root> {
   late final ActivityController _activity = ActivityController(widget.app);
   StreamSubscription<AppMessage>? _messages;
   Brightness? _reported;
+  String _title = 'CloudDrop';
 
   @override
   void initState() {
     super.initState();
     _messages = widget.app.messages.listen(_toast);
+    widget.app.addListener(_retitle);
+  }
+
+  void _retitle() {
+    final t = windowTitle(widget.app);
+    if (t == _title) return;
+    _title = t;
+    widget.onTitle?.call(t);
   }
 
   @override
   void dispose() {
+    widget.app.removeListener(_retitle);
     _messages?.cancel();
     _files.dispose();
     _activity.dispose();
@@ -166,12 +243,24 @@ class _GateState extends State<_Gate> {
     if (_setup != null || _making) return;
     _making = true;
     final app = widget.app;
-    final locked = await app.services.db.meta('sync_root');
+    final adding = app.setupAdding;
+    // A new folder has no database yet; the one shown now keeps its folder.
+    // (Always asynchronous: this runs from build.)
+    final locked = await (adding ? Future<String?>.value() : app.db.meta('sync_root'));
     if (!mounted) return;
     final atSignIn = app.setupAtSignIn;
+    final switching = app.setupSwitching;
     app.setupAtSignIn = false;
+    app.setupSwitching = false;
+    app.setupAdding = false;
     setState(() {
-      _setup = SetupController(app, lockedRoot: locked, startAtSignIn: atSignIn);
+      _setup = SetupController(
+        app,
+        lockedRoot: locked,
+        startAtSignIn: atSignIn,
+        switching: switching,
+        adding: adding,
+      );
       _making = false;
     });
   }
@@ -279,7 +368,7 @@ class _ConfigProblem extends StatelessWidget {
     final theme = FluentTheme.of(context);
     final error = app.configError ?? '';
     final firstLine = error.trim().split(RegExp(r'\r?\n')).first;
-    final path = app.paths.configPath;
+    final path = app.configPath;
     return ScaffoldPage(
       content: Center(
         child: ConstrainedBox(
@@ -290,6 +379,14 @@ class _ConfigProblem extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // With several folders the others stay a click away.
+                if (app.several) ...[
+                  Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: ConnectionMenu(app: app),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 Text("CloudDrop's settings can't be read", style: theme.typography.subtitle),
                 const SizedBox(height: 12),
                 InfoBar(
@@ -370,7 +467,12 @@ class MainView extends StatelessWidget {
                       ],
                     ),
                   ),
+            // The status, on every screen (the pane's search slot, when the pane is open).
+            autoSuggestBox: mode == PaneDisplayMode.expanded ? _StatusChip(app: app) : null,
             items: [
+              // Several folders: each one with its status, above the screens.
+              if (mode != PaneDisplayMode.top)
+                ...connectionPaneItems(context, app, compact: mode == PaneDisplayMode.compact),
               PaneItem(
                 icon: const Icon(FluentIcons.home),
                 title: const Text('Home'),
@@ -398,17 +500,83 @@ class MainView extends StatelessWidget {
               ),
             ],
           ),
-          paneBodyBuilder: (item, body) => IndexedStack(
-            index: selected,
-            children: [
-              const HomePage(),
-              FilesPage(enableDrop: enableDrop),
-              const ActivityPage(),
-              const SettingsPage(),
-            ],
-          ),
+          paneBodyBuilder: (item, body) {
+            final pages = IndexedStack(
+              index: selected,
+              children: [
+                const HomePage(),
+                FilesPage(enableDrop: enableDrop),
+                const ActivityPage(),
+                const SettingsPage(),
+              ],
+            );
+            if (mode != PaneDisplayMode.top || !app.several) return pages;
+            // Narrow, several folders: the switcher above the screen (the tabs keep the top).
+            final gutter = pageGutter(width);
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: EdgeInsets.fromLTRB(gutter, 12, gutter, 0),
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: ConnectionMenu(app: app),
+                  ),
+                ),
+                Expanded(child: pages),
+              ],
+            );
+          },
         );
       },
+    );
+  }
+}
+
+/// "● Up to date" under the pane header; opens Home.
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({required this.app});
+
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FluentTheme.of(context);
+    final sum = summarize(app.snapshot);
+    final dot = statusDotColor(theme, sum.icon);
+    return Tooltip(
+      message: sum.title,
+      child: HoverButton(
+        onPressed: () => app.pane.value = AppPane.home,
+        builder: (context, states) => Container(
+          height: 30,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: states.isHovered
+                ? theme.resources.subtleFillColorTertiary
+                : theme.resources.subtleFillColorSecondary,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  sum.line,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.typography.caption,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

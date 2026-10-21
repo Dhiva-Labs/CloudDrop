@@ -62,16 +62,16 @@ int _compareNullable(int? a, int? b) {
   return a.compareTo(b);
 }
 
-/// Title and text of the empty list for a filter.
-(String, String) emptyText(Filter f) => switch (f) {
+/// Title and text of the empty list for a filter; [cloud] names where CloudDrop uploads.
+(String, String) emptyText(Filter f, {String cloud = 'Google Drive'}) => switch (f) {
   Filter.all => ('Nothing here yet', ''),
   Filter.onComputer => (
     'No files on this computer',
-    'Everything in this folder is kept only in Google Drive.',
+    'Everything in this folder is kept only in $cloud.',
   ),
   Filter.cloudOnly => (
     'No cloud-only files',
-    'Files you free up or remove from this computer stay in Google Drive and show up here.',
+    'Files you free up or remove from this computer stay in $cloud and show up here.',
   ),
   Filter.uploading => ('Nothing is uploading', 'Everything here has been uploaded.'),
   Filter.failed => ('No failed uploads', 'Every file here was uploaded successfully.'),

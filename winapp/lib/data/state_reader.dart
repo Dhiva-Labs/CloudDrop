@@ -44,6 +44,10 @@ abstract class StateReader {
   /// connection (the engine, the CLI) commits. null = the database can't be read.
   Future<int?> dataVersion();
 
+  /// Lets go of the database file, so it can be deleted (Windows refuses to delete an open
+  /// file); the next read opens it again.
+  void release();
+
   void close();
 }
 
@@ -168,7 +172,8 @@ class StateDb {
       "count(*) FILTER (WHERE state = 'cloud_only') AS cloud_only, "
       "count(*) FILTER (WHERE state IN ('pending', 'uploading')) AS waiting, "
       "count(*) FILTER (WHERE state = 'error') AS failed, "
-      "coalesce(sum(cloud_size) FILTER (WHERE state = 'cloud_only'), 0) AS cloud_only_bytes "
+      "coalesce(sum(cloud_size) FILTER (WHERE state = 'cloud_only'), 0) AS cloud_only_bytes, "
+      "coalesce(sum(local_size) FILTER (WHERE state IN ('pending', 'uploading')), 0) AS waiting_bytes "
       "FROM entries WHERE kind = 'file' AND path >= ?1 AND path < ?2",
       [lo, hi],
     ).first;
@@ -180,6 +185,7 @@ class StateDb {
       waiting: r['waiting'] as int,
       failed: r['failed'] as int,
       cloudOnlyBytes: r['cloud_only_bytes'] as int,
+      waitingBytes: r['waiting_bytes'] as int,
     );
   }
 
@@ -464,6 +470,9 @@ class SqliteStateReader implements StateReader {
 
   @override
   Future<int?> dataVersion() async => _cheap((db) => db.dataVersion(), null);
+
+  @override
+  void release() => _drop();
 
   @override
   void close() {

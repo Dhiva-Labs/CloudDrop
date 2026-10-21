@@ -56,4 +56,17 @@ void main() {
       'a · boom · 12:09',
     );
   });
+
+  test('filters', () {
+    expect(ActivityFilter.uploads.matches(ActivityKind.moved), isTrue);
+    expect(ActivityFilter.uploads.matches(ActivityKind.restored), isFalse);
+    expect(ActivityFilter.freed.matches(ActivityKind.autoFreed), isTrue);
+    expect(ActivityFilter.freed.matches(ActivityKind.keptInCloud), isTrue);
+    expect(ActivityFilter.downloads.matches(ActivityKind.restored), isTrue);
+    expect(ActivityFilter.problems.matches(ActivityKind.failed), isTrue);
+    expect(ActivityFilter.problems.matches(ActivityKind.uploaded), isFalse);
+    for (final k in ActivityKind.values) {
+      expect(ActivityFilter.all.matches(k), isTrue);
+    }
+  });
 }

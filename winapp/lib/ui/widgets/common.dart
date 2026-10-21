@@ -3,8 +3,10 @@ library;
 
 import 'package:fluent_ui/fluent_ui.dart';
 
+import '../../data/models.dart';
 import '../../logic/activity_text.dart';
 import '../../logic/fmt.dart';
+import '../scope.dart';
 import '../theme.dart';
 
 /// A Windows 11 card: rounded, thin border, card fill.
@@ -183,12 +185,21 @@ class FileTypeIcon extends StatelessWidget {
   }
 }
 
+/// A provider's picture: a generic icon by the kind of storage (no brand logos).
+IconData providerIcon(String id) => switch (id) {
+  'nextcloud' || 'webdav' => FluentIcons.fabric_network_folder,
+  's3' => FluentIcons.blob_storage,
+  'sftp' => FluentIcons.command_prompt,
+  'mega' || 'proton' => FluentIcons.lock,
+  _ => FluentIcons.cloud,
+};
+
 IconData activityIcon(ActivityIcon i) => switch (i) {
   ActivityIcon.uploaded => FluentIcons.cloud_upload,
   ActivityIcon.updated => FluentIcons.refresh,
   ActivityIcon.moved => FluentIcons.forward,
   ActivityIcon.keptInCloud => FluentIcons.cloud,
-  ActivityIcon.freed => FluentIcons.hard_drive,
+  ActivityIcon.freed => FluentIcons.broom,
   ActivityIcon.restored => FluentIcons.cloud_download,
   ActivityIcon.failed => FluentIcons.warning,
 };
@@ -240,22 +251,81 @@ class WideProgressBar extends StatelessWidget {
   }
 }
 
-/// The heading above a group of cards.
+/// The heading above a group of cards, with an optional link at the end ("See All").
 class SectionTitle extends StatelessWidget {
   const SectionTitle(
     this.text, {
     super.key,
     this.padding = const EdgeInsets.only(top: 20, bottom: 8),
+    this.trailing,
   });
 
   final String text;
   final EdgeInsets padding;
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
+    final title = Text(text, style: FluentTheme.of(context).typography.bodyStrong);
+    if (trailing == null) return Padding(padding: padding, child: title);
+    // The link's own padding would push the title down; centre both on one line instead.
     return Padding(
-      padding: padding,
-      child: Text(text, style: FluentTheme.of(context).typography.bodyStrong),
+      padding: padding.copyWith(top: padding.top - 6, bottom: padding.bottom - 6),
+      child: Row(
+        children: [
+          Expanded(child: title),
+          trailing!,
+        ],
+      ),
+    );
+  }
+}
+
+/// One row of the Activity list: icon, what happened, where and when. Opens the file in Files.
+class ActivityRow extends StatelessWidget {
+  const ActivityRow({super.key, required this.activity, required this.onOpen});
+
+  final Activity activity;
+  final void Function(Activity a) onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FluentTheme.of(context);
+    final app = AppScope.of(context).app;
+    final d = describe(activity, cloud: app.provider.name);
+    final sub = subtitle(activity, civilFromMs(activity.atMs), root: app.rootName);
+    return Tooltip(
+      message: activity.path,
+      child: HoverButton(
+        onPressed: () => onOpen(activity),
+        builder: (context, states) => Container(
+          color: states.isHovered ? theme.resources.subtleFillColorSecondary : Colors.transparent,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
+            children: [
+              IconBadge(icon: activityIcon(d.icon), tint: tintFor(theme, d.tone), size: 34),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(d.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: 2),
+                    Text(
+                      sub,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.typography.caption?.copyWith(color: theme.secondaryText),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(FluentIcons.chevron_right, size: 11, color: theme.secondaryText),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

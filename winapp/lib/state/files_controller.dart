@@ -18,6 +18,7 @@ class FilesController extends ChangeNotifier {
     app.addListener(_onAppChanged);
     app.filesNav.addListener(_onNav);
     app.pane.addListener(_onPane);
+    app.connectionVersion.addListener(_onConnection);
     // The screen may already be showing (a restored session, tests).
     visible = app.pane.value == AppPane.files;
   }
@@ -257,6 +258,28 @@ class FilesController extends ChangeNotifier {
 
   void _onPane() => visible = app.pane.value == AppPane.files;
 
+  /// Another folder is shown: start over at its top.
+  void _onConnection() {
+    _debounce?.cancel();
+    _dir = '';
+    _search = '';
+    searchText = '';
+    _filter = Filter.all;
+    _pendingSelect = null;
+    _raw = const [];
+    items = const [];
+    stats = null;
+    loaded = false;
+    _onDisk.clear();
+    _resetView();
+    _stale = true;
+    if (_visible) {
+      reload();
+    } else {
+      notifyListeners();
+    }
+  }
+
   /// Loads the rows for the current request. Calls that arrive while a load is running
   /// share it: it runs once more afterwards, so the last request always wins.
   Future<void> reload() {
@@ -277,10 +300,11 @@ class FilesController extends ChangeNotifier {
         _dirty = false;
         _stale = false;
         final req = request;
+        final version = app.connectionVersion.value;
         try {
-          final listing = await app.services.db.browse(req);
+          final listing = await app.db.browse(req);
           if (_disposed) return;
-          if (req == request) {
+          if (req == request && version == app.connectionVersion.value) {
             _apply(req, listing);
           } else {
             _dirty = true;
@@ -337,12 +361,15 @@ class FilesController extends ChangeNotifier {
       return s;
     }
     final st = stats;
+    final cloud = app.provider.name;
+    var s = '';
     if (st != null && st.files > 0) {
-      var s = '${fmt.files(st.files)} · ${fmt.humanBytes(st.bytes < 0 ? 0 : st.bytes)}';
-      if (st.cloudOnly > 0) s += ' · ${fmt.groupDigits(st.cloudOnly)} only in Google Drive';
-      return s;
+      s = '${fmt.files(st.files)} · ${fmt.humanBytes(st.bytes < 0 ? 0 : st.bytes)}';
+      if (st.cloudOnly > 0) s += ' · ${fmt.groupDigits(st.cloudOnly)} only in $cloud';
     }
-    return '';
+    // Providers without a content hash download cloud copies once to prove them.
+    if (app.snapshot.verifying) s = s.isEmpty ? 'Verifying…' : '$s · Verifying…';
+    return s;
   }
 
   /// Icon-less title/description for the empty list.
@@ -350,18 +377,18 @@ class FilesController extends ChangeNotifier {
     if (_search.isNotEmpty) {
       return (
         title: 'No Results',
-        text: 'Nothing in CloudDrop is named like “$_search”.',
+        text: 'Nothing in ${app.rootName} is named like “$_search”.',
         canAdd: false,
       );
     }
     if (_filter != Filter.all) {
-      final (t, d) = emptyText(_filter);
+      final (t, d) = emptyText(_filter, cloud: app.provider.name);
       return (title: t, text: d, canAdd: false);
     }
     if (_dir.isEmpty) {
       return (
-        title: 'CloudDrop Is Empty',
-        text: 'Drop files here or click Add Files to start uploading to Google Drive.',
+        title: '${app.rootName} Is Empty',
+        text: 'Drop files here or click Add Files to start uploading to ${app.provider.name}.',
         canAdd: true,
       );
     }
@@ -430,7 +457,7 @@ class FilesController extends ChangeNotifier {
       app.openLocal(it.path);
     } else {
       final path = it.path;
-      app.sayWithAction('“${it.name}” is only in Google Drive', 'Download', () {
+      app.sayWithAction('“${it.name}” is only in ${app.provider.name}', 'Download', () {
         app.restore([path], '“${it.name}”').then((_) => reload());
       });
     }
@@ -448,6 +475,7 @@ class FilesController extends ChangeNotifier {
     app.removeListener(_onAppChanged);
     app.filesNav.removeListener(_onNav);
     app.pane.removeListener(_onPane);
+    app.connectionVersion.removeListener(_onConnection);
     super.dispose();
   }
 }

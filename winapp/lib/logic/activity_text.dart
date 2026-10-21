@@ -4,6 +4,37 @@ library;
 import '../data/models.dart';
 import 'fmt.dart';
 
+/// Which rows the Activity screen lists.
+enum ActivityFilter {
+  all('All activity'),
+  uploads('Uploads'),
+  freed('Space freed'),
+  downloads('Downloads'),
+  problems('Problems');
+
+  const ActivityFilter(this.label);
+  final String label;
+
+  bool matches(ActivityKind k) => switch (this) {
+    ActivityFilter.all => true,
+    ActivityFilter.uploads =>
+      k == ActivityKind.uploaded || k == ActivityKind.updated || k == ActivityKind.moved,
+    ActivityFilter.freed =>
+      k == ActivityKind.freed || k == ActivityKind.autoFreed || k == ActivityKind.keptInCloud,
+    ActivityFilter.downloads => k == ActivityKind.restored,
+    ActivityFilter.problems => k == ActivityKind.failed,
+  };
+
+  /// What the list says when nothing matches.
+  String get emptyText => switch (this) {
+    ActivityFilter.all => 'Uploads, downloads and other changes will be listed here.',
+    ActivityFilter.uploads => 'Nothing has been uploaded recently.',
+    ActivityFilter.freed => 'No space has been freed recently.',
+    ActivityFilter.downloads => 'Nothing has been downloaded back recently.',
+    ActivityFilter.problems => 'No uploads have failed recently.',
+  };
+}
+
 /// Colour family of an activity icon.
 enum Tone { ok, info, warn }
 
@@ -20,7 +51,8 @@ class Described {
   final String? detail;
 }
 
-Described describe(Activity a) {
+/// What a row says; [cloud] names where CloudDrop uploads ("Google Drive").
+Described describe(Activity a, {String cloud = 'Google Drive'}) {
   final name = nameOf(a.path);
   switch (a.kind) {
     case ActivityKind.uploaded:
@@ -37,7 +69,7 @@ Described describe(Activity a) {
       return Described(
         ActivityIcon.keptInCloud,
         Tone.info,
-        'Kept $name in Google Drive',
+        'Kept $name in $cloud',
         'Removed from this computer',
       );
     case ActivityKind.freed:
@@ -56,11 +88,11 @@ Described describe(Activity a) {
   }
 }
 
-/// "Photos · from Trips/a.jpg · 1.2 MB · 12:09"
-String subtitle(Activity a, Civil time) {
+/// "Photos · from Trips/a.jpg · 1.2 MB · 12:09"; [root] names the top of the folder.
+String subtitle(Activity a, Civil time, {String root = 'CloudDrop'}) {
   final d = describe(a);
   final parent = parentOf(a.path);
-  final parts = <String>[parent.isEmpty ? 'CloudDrop' : parent];
+  final parts = <String>[parent.isEmpty ? root : parent];
   if (d.detail != null) parts.add(d.detail!);
   final b = a.bytes;
   if (b != null && b > 0 && a.kind != ActivityKind.failed) parts.add(humanBytes(b));

@@ -1,4 +1,4 @@
-/// Files: a browser for everything in CloudDrop, on this computer or only in Drive
+/// Files: a browser for everything in CloudDrop, on this computer or only in the cloud
 /// (`gui/src/files.rs`).
 library;
 
@@ -240,7 +240,17 @@ class _FilesPageState extends State<FilesPage> {
                   ),
                 ),
                 alignment: Alignment.center,
-                child: Text('Drop to add to CloudDrop', style: theme.typography.subtitle),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconBadge(icon: FluentIcons.cloud_upload, tint: theme.accent, size: 64),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Drop to add to ${AppScope.of(context).app.rootName}',
+                      style: theme.typography.subtitle,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -291,11 +301,13 @@ class _FilesPageState extends State<FilesPage> {
           onPressed: files.retrySelected,
         ),
       const MenuFlyoutSeparator(),
-      MenuFlyoutItem(
-        leading: const Icon(FluentIcons.open_in_new_window),
-        text: const Text('Open in Google Drive'),
-        onPressed: caps.openDrive ? files.openSelectedInDrive : null,
-      ),
+      // Providers without web pages (WebDAV, S3, SFTP) have nothing to open.
+      if (files.app.provider.webLinks)
+        MenuFlyoutItem(
+          leading: const Icon(FluentIcons.open_in_new_window),
+          text: Text('Open in ${files.app.provider.name}'),
+          onPressed: caps.openDrive ? files.openSelectedInDrive : null,
+        ),
       MenuFlyoutItem(
         leading: const Icon(FluentIcons.fabric_folder),
         text: const Text('Show in File Explorer'),
@@ -324,11 +336,12 @@ class _FilesPageState extends State<FilesPage> {
 Future<void> _free(BuildContext context, FilesController files) async {
   final sel = files.selectedItems;
   if (sel.isEmpty) return;
+  final cloud = files.app.provider.name;
   final body = sel.length == 1 && !sel.first.isDir
-      ? 'This removes the local copy of ${files.what(sel)}. It stays in Google Drive, and '
+      ? 'This removes the local copy of ${files.what(sel)}. It stays in $cloud, and '
             'you can download it again at any time.'
       : 'This removes the local copies of the uploaded files in ${files.what(sel)}. They '
-            'stay in Google Drive, and you can download them again at any time. Folders are kept.';
+            'stay in $cloud, and you can download them again at any time. Folders are kept.';
   final ok = await confirmFree(context, body: body);
   if (ok) await files.freeSelected();
 }
@@ -447,7 +460,7 @@ class _Crumbs extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = FluentTheme.of(context);
-    final segments = <(String label, String path)>[('CloudDrop', '')];
+    final segments = <(String label, String path)>[(files.app.rootName, '')];
     if (files.search.isEmpty) {
       var acc = '';
       for (final part in files.dir.split('/').where((p) => p.isNotEmpty)) {
@@ -648,10 +661,10 @@ class _SelectionBar extends StatelessWidget {
               ? () => files.setKeepSelected(caps.keep == Keep.off)
               : null,
         ),
-      if (caps.count == 1)
+      if (caps.count == 1 && files.app.provider.webLinks)
         button(
           FluentIcons.open_in_new_window,
-          'Open in Google Drive',
+          'Open in ${files.app.provider.name}',
           caps.openDrive ? files.openSelectedInDrive : null,
         ),
       if (caps.show)
@@ -857,7 +870,7 @@ class _FileRowState extends State<_FileRow> {
               ),
               if (flat)
                 Text(
-                  parent.isEmpty ? 'CloudDrop' : parent,
+                  parent.isEmpty ? AppScope.of(context).app.rootName : parent,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: theme.typography.caption?.copyWith(color: theme.secondaryText),
@@ -995,34 +1008,75 @@ class _EmptyState extends StatelessWidget {
         ? FluentIcons.search
         : files.filter != Filter.all
         ? FluentIcons.filter
+        : e.canAdd
+        ? FluentIcons.cloud_upload
         : FluentIcons.fabric_folder;
+    final content = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (e.canAdd)
+          IconBadge(icon: icon, tint: theme.accent, size: 64, iconSize: 28)
+        else
+          Icon(icon, size: 44, color: theme.secondaryText),
+        const SizedBox(height: 14),
+        Text(e.title, style: theme.typography.subtitle, textAlign: TextAlign.center),
+        if (e.text.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 380),
+            child: Text(
+              e.text,
+              textAlign: TextAlign.center,
+              style: theme.typography.body?.copyWith(color: theme.secondaryText),
+            ),
+          ),
+        ],
+        if (e.canAdd) ...[
+          const SizedBox(height: 16),
+          FilledButton(onPressed: files.addFiles, child: const Text('Add Files…')),
+        ],
+      ],
+    );
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 44, color: theme.secondaryText),
-            const SizedBox(height: 14),
-            Text(e.title, style: theme.typography.subtitle, textAlign: TextAlign.center),
-            if (e.text.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 380),
-                child: Text(
-                  e.text,
-                  textAlign: TextAlign.center,
-                  style: theme.typography.body?.copyWith(color: theme.secondaryText),
+        child: e.canAdd
+            // Where files can be added, the empty folder is a drop zone.
+            ? CustomPaint(
+                painter: _DashedOutline(color: theme.resources.controlStrokeColorSecondary),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 32),
+                  child: content,
                 ),
-              ),
-            ],
-            if (e.canAdd) ...[
-              const SizedBox(height: 16),
-              FilledButton(onPressed: files.addFiles, child: const Text('Add Files…')),
-            ],
-          ],
-        ),
+              )
+            : content,
       ),
     );
   }
+}
+
+/// A rounded, dashed outline around the empty drop zone.
+class _DashedOutline extends CustomPainter {
+  const _DashedOutline({required this.color});
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    final outline = Path()
+      ..addRRect(RRect.fromRectAndRadius(Offset.zero & size, const Radius.circular(12)));
+    const dash = 7.0, gap = 5.0;
+    for (final metric in outline.computeMetrics()) {
+      for (var d = 0.0; d < metric.length; d += dash + gap) {
+        canvas.drawPath(metric.extractPath(d, d + dash), paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DashedOutline old) => old.color != color;
 }

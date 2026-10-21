@@ -119,6 +119,7 @@ class FolderStats {
     this.waiting = 0,
     this.failed = 0,
     this.cloudOnlyBytes = 0,
+    this.waitingBytes = 0,
   });
 
   final int files;
@@ -135,6 +136,9 @@ class FolderStats {
   /// Bytes kept only in Drive.
   final int cloudOnlyBytes;
 
+  /// Size of the files waiting to upload or uploading now.
+  final int waitingBytes;
+
   @override
   bool operator ==(Object other) =>
       other is FolderStats &&
@@ -144,15 +148,18 @@ class FolderStats {
       other.cloudOnly == cloudOnly &&
       other.waiting == waiting &&
       other.failed == failed &&
-      other.cloudOnlyBytes == cloudOnlyBytes;
+      other.cloudOnlyBytes == cloudOnlyBytes &&
+      other.waitingBytes == waitingBytes;
 
   @override
-  int get hashCode => Object.hash(files, bytes, local, cloudOnly, waiting, failed, cloudOnlyBytes);
+  int get hashCode =>
+      Object.hash(files, bytes, local, cloudOnly, waiting, failed, cloudOnlyBytes, waitingBytes);
 
   @override
   String toString() =>
       'FolderStats(files: $files, bytes: $bytes, local: $local, cloudOnly: $cloudOnly, '
-      'waiting: $waiting, failed: $failed, cloudOnlyBytes: $cloudOnlyBytes)';
+      'waiting: $waiting, failed: $failed, cloudOnlyBytes: $cloudOnlyBytes, '
+      'waitingBytes: $waitingBytes)';
 }
 
 /// A row for the file browser.
@@ -336,6 +343,8 @@ enum Phase {
   final String wire;
 
   static Phase? parse(String? s) {
+    // The provider-neutral name the engine may use for a missing top folder.
+    if (s == 'remote_folder_missing') return driveFolderMissing;
     for (final v in values) {
       if (v.wire == s) return v;
     }
@@ -366,7 +375,7 @@ class Upload {
   int get hashCode => Object.hash(path, sent, total);
 }
 
-/// Google Drive storage of the signed-in account, in bytes.
+/// Cloud storage of the signed-in account, in bytes.
 @immutable
 class Quota {
   const Quota({this.limit, required this.usage, required this.usageInDrive});
@@ -374,7 +383,7 @@ class Quota {
   /// null = unlimited.
   final int? limit;
 
-  /// Everything counted against the limit (Drive, Gmail, Photos).
+  /// Everything counted against the limit (for Google: Drive, Gmail, Photos).
   final int usage;
   final int usageInDrive;
 

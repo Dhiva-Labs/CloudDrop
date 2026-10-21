@@ -2,7 +2,9 @@
 
 use crate::config::Config;
 use crate::db::{ActivityKind, Db, Entry, Kind, State};
-use crate::drive::{Drive, DriveError};
+use crate::engine::{describe, short_name};
+use crate::jobs::{hash_file, local_kind, proven};
+use crate::remote::{Capabilities, Provider, Remote, RemoteError};
 use crate::util::{self, LocalMeta};
 use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Component, Path, PathBuf};
@@ -15,8 +17,11 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn load() -> Result<Self> {
-        let cfg = Config::load()?;
-        let db = Db::open_default()?;
+        Self::load_for(Config::load()?, Db::open_default()?)
+    }
+
+    /// A connection's config and database (checked to belong to its folder).
+    pub fn load_for(cfg: Config, db: Db) -> Result<Self> {
         db.bind_root(&cfg.sync_dir)?;
         Ok(Self { cfg, db })
     }
@@ -64,21 +69,13 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-pub fn drive_url(kind: Kind, id: &str) -> String {
-    match kind {
-        Kind::Dir => format!("https://drive.google.com/drive/folders/{id}"),
-        Kind::File => format!("https://drive.google.com/file/d/{id}/view"),
-    }
-}
-
-/// Drive URL for an entry path ("" = the top CloudDrop folder).
+/// Web page of an entry path in the cloud ("" = the top CloudDrop folder).
 pub fn url_for(ctx: &Ctx, rel: &str) -> Result<String> {
     if rel.is_empty() {
-        let id = ctx
-            .db
-            .meta_get("root_id")?
-            .ok_or_else(|| anyhow!("the CloudDrop folder has not been created in Drive yet"))?;
-        return Ok(drive_url(Kind::Dir, &id));
+        let id = ctx.db.meta_get("root_id")?.ok_or_else(|| {
+            anyhow!("the CloudDrop folder has not been created in {} yet", short_name(ctx.cfg.provider))
+        })?;
+        return web_url(ctx, Kind::Dir, &id);
     }
     let e = ctx
         .db
@@ -87,7 +84,13 @@ pub fn url_for(ctx: &Ctx, rel: &str) -> Result<String> {
     let id = e
         .drive_id
         .ok_or_else(|| anyhow!("{rel} has not been uploaded yet"))?;
-    Ok(drive_url(e.kind, &id))
+    web_url(ctx, e.kind, &id)
+}
+
+fn web_url(ctx: &Ctx, kind: Kind, id: &str) -> Result<String> {
+    let p = ctx.cfg.provider;
+    p.web_url(kind, id)
+        .ok_or_else(|| anyhow!("{} has no web page for files", p.display_name()))
 }
 
 fn tracked_subtree(ctx: &Ctx, rel: &str) -> Result<Vec<Entry>> {
@@ -100,6 +103,8 @@ fn tracked_subtree(ctx: &Ctx, rel: &str) -> Result<Vec<Entry>> {
 
 #[derive(Default, Debug)]
 pub struct FreeReport {
+    /// Where the files stay.
+    pub provider: Provider,
     pub freed_files: u64,
     pub freed_bytes: u64,
     /// Handed to the running service (Windows: only it may free files).
@@ -112,9 +117,10 @@ pub struct FreeReport {
 
 impl FreeReport {
     pub fn summary(&self) -> String {
+        let name = self.provider.display_name();
         let mut s = if self.handed_files > 0 {
             format!(
-                "Freeing {} ({} file{}) — CloudDrop does it in a moment. The files stay in Google Drive.",
+                "Freeing {} ({} file{}) — CloudDrop does it in a moment. The files stay in {name}.",
                 util::human_bytes(self.freed_bytes + self.handed_bytes),
                 self.freed_files + self.handed_files,
                 if self.freed_files + self.handed_files == 1 { "" } else { "s" }
@@ -123,7 +129,7 @@ impl FreeReport {
             "Nothing to free.".to_string()
         } else {
             format!(
-                "Freed {} ({} file{}). The files stay in Google Drive.",
+                "Freed {} ({} file{}). The files stay in {name}.",
                 util::human_bytes(self.freed_bytes),
                 self.freed_files,
                 if self.freed_files == 1 { "" } else { "s" }
@@ -137,7 +143,11 @@ impl FreeReport {
             skipped.push(format!("{} changed since upload", self.changed));
         }
         if self.cloud_mismatch > 0 {
-            skipped.push(format!("{} missing or different in Drive (queued for upload)", self.cloud_mismatch));
+            skipped.push(format!(
+                "{} missing or different in {} (queued for upload)",
+                self.cloud_mismatch,
+                short_name(self.provider)
+            ));
         }
         if !skipped.is_empty() {
             s.push_str(&format!(" Kept: {}.", skipped.join(", ")));
@@ -146,9 +156,17 @@ impl FreeReport {
     }
 }
 
-/// Deletes local copies that are verifiably identical to their Drive copy.
-pub async fn free(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<FreeReport> {
-    let mut report = FreeReport::default();
+/// Deletes local copies that are verifiably identical to their cloud copy: the provider's
+/// hash matches, or for providers without one, a download of the cloud copy does.
+pub async fn free(ctx: &Ctx, remote: &Remote, rels: &[String]) -> Result<FreeReport> {
+    free_with(ctx, remote, remote.caps(), rels).await
+}
+
+/// [`free`] as if the provider had `caps` (tests apply other providers' rules to the Drive mock).
+pub async fn free_with(ctx: &Ctx, remote: &Remote, caps: &Capabilities, rels: &[String]) -> Result<FreeReport> {
+    let provider = remote.provider();
+    let kind = local_kind(caps);
+    let mut report = FreeReport { provider, ..Default::default() };
     let mut files = Vec::new();
     for rel in rels {
         files.extend(
@@ -167,31 +185,41 @@ pub async fn free(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<FreeRepor
         }
         let abs = ctx.abs(&e.path);
         let path = abs.clone();
-        let hashed = tokio::task::spawn_blocking(move || util::md5_file(&path)).await?;
-        let Ok((md5, meta)) = hashed else {
+        let hashed = tokio::task::spawn_blocking(move || hash_file(&path, kind)).await?;
+        let Ok((hash, meta)) = hashed else {
             continue; // already gone
         };
-        if Some(meta) != e.local() || Some(&md5) != e.md5.as_ref() {
+        if Some(meta) != e.local() || Some(&hash) != e.content_hash().as_ref() {
             report.changed += 1;
             continue;
         }
         let id = e.drive_id.clone().expect("synced files have a Drive id");
-        let cloud = match drive.get(&id).await {
-            Ok(m) if !m.trashed => Some(m),
-            Ok(_) | Err(DriveError::NotFound) => None,
-            Err(err) => return Err(anyhow!("cannot check {} in Drive: {err}", e.path)),
+        let checked = match remote.get(&id).await {
+            Ok(m) if !m.trashed => {
+                // Verify by download, where needed, next to the file (an ignored temp name).
+                let tmp_dir = abs.parent().unwrap_or(ctx.root()).to_path_buf();
+                match proven(remote, caps, &m, &hash, meta.size as u64, &tmp_dir).await {
+                    Ok(same) => Some(same),
+                    Err(RemoteError::NotFound) => None,
+                    Err(err) => return Err(anyhow!("cannot check {}: {}", e.path, describe(&err, provider))),
+                }
+            }
+            Ok(_) | Err(RemoteError::NotFound) => None,
+            Err(err) => return Err(anyhow!("cannot check {}: {}", e.path, describe(&err, provider))),
         };
-        let cloud_ok = cloud.as_ref().is_some_and(|m| {
-            m.md5_checksum.as_deref() == Some(md5.as_str()) && m.size_bytes() == Some(meta.size as u64)
-        });
-        if !cloud_ok {
-            // Drive lost or changed it: upload the local copy again rather than free it.
+        if checked.is_none() && !caps.stable_ids && ctx.db.get(&e.path)?.and_then(|now| now.drive_id) != Some(id.clone()) {
+            // Its folder was just renamed (ids are paths): check it again later.
+            report.changed += 1;
+            continue;
+        }
+        if checked != Some(true) {
+            // The cloud lost or changed it: upload the local copy again rather than free it.
             report.cloud_mismatch += 1;
-            crate::engine::mark_for_reupload(&mut e, cloud.is_some());
+            crate::engine::mark_for_reupload(&mut e, checked.is_some());
             ctx.db.put(&e)?;
             continue;
         }
-        // Re-check right before deleting, in case it was edited during the Drive call.
+        // Re-check right before deleting, in case it was edited during the cloud check.
         if LocalMeta::read(&abs).ok() != Some(meta) {
             report.changed += 1;
             continue;
@@ -263,7 +291,12 @@ fn reactivate_ancestors(ctx: &Ctx, rel: &str) -> Result<()> {
 }
 
 /// Downloads cloud-only files (and recreates cloud-only folders) under each path.
-pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<RestoreReport> {
+pub async fn restore(ctx: &Ctx, remote: &Remote, rels: &[String]) -> Result<RestoreReport> {
+    restore_with(ctx, remote, remote.caps(), rels).await
+}
+
+/// [`restore`] as if the provider had `caps`.
+pub async fn restore_with(ctx: &Ctx, remote: &Remote, caps: &Capabilities, rels: &[String]) -> Result<RestoreReport> {
     let mut report = RestoreReport::default();
     let store = crate::store::platform();
     // Placeholders (Windows) the service is downloading: (path, entry path, size).
@@ -296,7 +329,7 @@ pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<Restor
                         report.blocked.push(e.path.clone());
                         continue;
                     }
-                    let n = restore_file(ctx, drive, e).await?;
+                    let n = restore_file(ctx, remote, caps, e).await?;
                     report.files += 1;
                     report.bytes += n;
                 }
@@ -327,15 +360,16 @@ pub async fn restore(ctx: &Ctx, drive: &Drive, rels: &[String]) -> Result<Restor
     Ok(report)
 }
 
-async fn restore_file(ctx: &Ctx, drive: &Drive, mut e: Entry) -> Result<u64> {
+async fn restore_file(ctx: &Ctx, remote: &Remote, caps: &Capabilities, mut e: Entry) -> Result<u64> {
+    let provider = remote.provider();
     let id = e
         .drive_id
         .clone()
-        .ok_or_else(|| anyhow!("{} has no Drive copy", e.path))?;
-    let cloud = drive
+        .ok_or_else(|| anyhow!("{} has no copy in {}", e.path, short_name(provider)))?;
+    let cloud = remote
         .get(&id)
         .await
-        .map_err(|err| anyhow!("cannot find {} in Drive: {err}", e.path))?;
+        .map_err(|err| anyhow!("cannot find {}: {}", e.path, describe(&err, provider)))?;
     let dest = ctx.abs(&e.path);
     let dir = dest.parent().expect("inside root").to_path_buf();
     std::fs::create_dir_all(&dir)?;
@@ -344,13 +378,21 @@ async fn restore_file(ctx: &Ctx, drive: &Drive, mut e: Entry) -> Result<u64> {
     let tmp = dir.join(format!(".clouddrop-restore-{:016x}.part", rand::random::<u64>()));
     let result: Result<u64> = async {
         let mut out = tokio::fs::File::create(&tmp).await?;
-        let (md5, n) = drive
+        let (hash, n) = remote
             .download(&id, &mut out)
             .await
-            .map_err(|err| anyhow!("download of {} failed: {err}", e.path))?;
-        if cloud.md5_checksum.as_deref().is_some_and(|c| c != md5) {
+            .map_err(|err| anyhow!("download of {} failed: {}", e.path, describe(&err, provider)))?;
+        if cloud.hash.as_ref().is_some_and(|c| c.kind == hash.kind && *c != hash) {
             bail!("download of {} was corrupted (checksum mismatch)", e.path);
         }
+        // Recorded in the kind local files are hashed in for this provider.
+        let kind = local_kind(caps);
+        let hash = if hash.kind == kind {
+            hash
+        } else {
+            let path = tmp.clone();
+            tokio::task::spawn_blocking(move || hash_file(&path, kind)).await??.0
+        };
         let out = out.into_std().await;
         if let Some(ns) = e.local_mtime_ns.filter(|ns| *ns > 0) {
             let when = SystemTime::UNIX_EPOCH + Duration::from_nanos(ns as u64);
@@ -360,7 +402,7 @@ async fn restore_file(ctx: &Ctx, drive: &Drive, mut e: Entry) -> Result<u64> {
         drop(out);
 
         // Record first, then move into place: the daemon then sees a known, synced file.
-        e.md5 = Some(md5);
+        e.set_content_hash(Some(hash));
         e.cloud_size = Some(n as i64);
         e.set_local(Some(LocalMeta::read(&tmp)?));
         e.state = if e.move_pending { State::Pending } else { State::Synced };
@@ -402,8 +444,9 @@ pub fn cloud_only_children(ctx: &Ctx, rel: &str) -> Result<Vec<Entry>> {
     Ok(v)
 }
 
-/// Forgets every Drive id so everything is uploaded again into a fresh top folder.
-/// Used when the CloudDrop folder was permanently deleted from Drive.
+/// Forgets every cloud id so everything is uploaded again into a fresh top folder, and binds the
+/// database to the configured provider. Used when the CloudDrop folder was permanently deleted
+/// from the cloud, and to switch to another provider (nothing is deleted in the old one).
 pub fn reset_cloud(ctx: &Ctx) -> Result<(usize, usize)> {
     let mut requeued = 0;
     let mut dropped = 0;
@@ -414,7 +457,7 @@ pub fn reset_cloud(ctx: &Ctx) -> Result<(usize, usize)> {
             continue;
         }
         e.drive_id = None;
-        e.md5 = None;
+        e.set_content_hash(None);
         e.cloud_size = None;
         e.cloud_name = None;
         e.cloud_parent = None;
@@ -427,6 +470,7 @@ pub fn reset_cloud(ctx: &Ctx) -> Result<(usize, usize)> {
         requeued += 1;
     }
     ctx.db.meta_delete("root_id")?;
+    ctx.db.meta_set("provider", ctx.cfg.provider.as_str())?;
     Ok((requeued, dropped))
 }
 
@@ -469,7 +513,8 @@ mod tests {
 
     #[test]
     fn urls() {
-        assert_eq!(drive_url(Kind::Dir, "X"), "https://drive.google.com/drive/folders/X");
-        assert_eq!(drive_url(Kind::File, "Y"), "https://drive.google.com/file/d/Y/view");
+        let p = crate::remote::Provider::GoogleDrive;
+        assert_eq!(p.web_url(Kind::Dir, "X").as_deref(), Some("https://drive.google.com/drive/folders/X"));
+        assert_eq!(p.web_url(Kind::File, "Y").as_deref(), Some("https://drive.google.com/file/d/Y/view"));
     }
 }

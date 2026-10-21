@@ -8,7 +8,8 @@ use crate::model::{
     plan_update, run_query, sort_items,
 };
 use crate::ops::Ops;
-use crate::snapshot::Snapshot;
+use crate::providers::Choice;
+use crate::snapshot::{Snapshot, is_verifying};
 use crate::{fsops, rt, ui};
 use adw::prelude::*;
 use clouddrop::db::{Db, DirItem, Kind, State};
@@ -74,6 +75,9 @@ pub struct FilesPage {
     search: gtk::SearchEntry,
     filter: gtk::DropDown,
     summary: gtk::Label,
+    /// The summary line without " · Verifying…".
+    summary_text: RefCell<String>,
+    verifying: Cell<bool>,
     retry_all: gtk::Button,
     stack: gtk::Stack,
     empty: adw::StatusPage,
@@ -85,6 +89,10 @@ pub struct FilesPage {
     bar: Bar,
     acts: Acts,
     popover: gtk::PopoverMenu,
+    /// The context menu's "Open in …" / "Show in Files" section, redone when the provider
+    /// changes (`menu_for` is the provider it names).
+    menu_cloud: gio::Menu,
+    menu_for: RefCell<Option<String>>,
     ctx: Rc<ViewCtx>,
     state: RefCell<ViewState>,
     /// What the last query returned, before sorting.
@@ -252,7 +260,7 @@ impl FilesPage {
             .css_classes(["heading"])
             .build();
         let (download, download_text) = label_button("folder-download-symbolic", "Download", "Download to this computer");
-        let (free, free_text) = label_button("drive-harddisk-symbolic", "Free Up Space", "Remove the local copy; it stays in Google Drive");
+        let (free, free_text) = label_button("clouddrop-free-up-space-symbolic", "Free Up Space", "Remove the local copy; it stays in Google Drive");
         let (retry, retry_text) = label_button("view-refresh-symbolic", "Retry", "Try the upload again");
         let keep = gtk::ToggleButton::builder()
             .icon_name("view-pin-symbolic")
@@ -305,8 +313,6 @@ impl FilesPage {
         s1.append_item(&hide_if_disabled("Free Up Space", "files.free"));
         s1.append_item(&hide_if_disabled("Retry Upload", "files.retry"));
         let s2 = gio::Menu::new();
-        s2.append(Some("Open in Google Drive"), Some("files.open-drive"));
-        s2.append(Some("Show in Files"), Some("files.show"));
         let s3 = gio::Menu::new();
         s3.append_item(&hide_if_disabled("Always Keep on This Computer", "files.keep"));
         for s in [&s1, &s2, &s3] {
@@ -333,6 +339,8 @@ impl FilesPage {
             search,
             filter,
             summary,
+            summary_text: RefCell::default(),
+            verifying: Cell::new(false),
             retry_all,
             stack,
             empty,
@@ -344,6 +352,8 @@ impl FilesPage {
             bar,
             acts,
             popover,
+            menu_cloud: s2,
+            menu_for: RefCell::default(),
             ctx,
             state: RefCell::new(ViewState { dir: String::new(), search: String::new(), filter: Filter::All, sort: Sort::default() }),
             raw: RefCell::default(),
@@ -591,6 +601,14 @@ impl FilesPage {
         self.show(dir, Filter::All, None);
     }
 
+    /// The window shows another connection: back to its top folder, from its own database.
+    pub fn reset(self: &Rc<Self>) {
+        self.browse_db.borrow_mut().take();
+        self.raw.borrow_mut().clear();
+        self.set_items(Vec::new());
+        self.show("", Filter::All, None);
+    }
+
     fn go_back(self: &Rc<Self>) {
         let (dir, search, filter) = {
             let st = self.state.borrow();
@@ -618,7 +636,7 @@ impl FilesPage {
         while let Some(c) = self.crumbs.first_child() {
             self.crumbs.remove(&c);
         }
-        let mut segments: Vec<(String, String)> = vec![("CloudDrop".into(), String::new())];
+        let mut segments: Vec<(String, String)> = vec![(ui::root_name(), String::new())];
         let mut acc = String::new();
         if search.is_empty() {
             for part in dir.split('/').filter(|p| !p.is_empty()) {
@@ -829,13 +847,14 @@ impl FilesPage {
         } else if let Some(st) = stats.filter(|s| s.files > 0) {
             let mut s = format!("{} · {}", fmt::files(st.files), human_bytes(st.bytes.max(0) as u64));
             if st.cloud_only > 0 {
-                s.push_str(&format!(" · {} only in Google Drive", st.cloud_only));
+                s.push_str(&format!(" · {} only in {}", st.cloud_only, self.ops.provider().name));
             }
             s
         } else {
             String::new()
         };
-        self.summary.set_label(&summary);
+        *self.summary_text.borrow_mut() = summary;
+        self.show_summary();
 
         // empty states
         if n > 0 {
@@ -845,18 +864,24 @@ impl FilesPage {
         let (icon, title, text, add) = if !search.is_empty() {
             ("edit-find-symbolic", "No Results".to_string(), format!("Nothing in CloudDrop is named like “{search}”."), false)
         } else if filter != Filter::All {
-            let (t, d) = filter.empty_text();
-            ("folder-symbolic", t.to_string(), d.to_string(), false)
+            let (t, d) = filter.empty_text(&self.ops.provider().name);
+            ("folder-symbolic", t.to_string(), d, false)
         } else if dir.is_empty() {
             (
-                "folder-symbolic",
+                "clouddrop-syncing-symbolic",
                 "CloudDrop Is Empty".to_string(),
-                "Drop files here or click Add Files to start uploading to Google Drive.".to_string(),
+                format!("Drop files here or click Add Files to start uploading to {}.", self.ops.provider().name),
                 true,
             )
         } else {
-            ("folder-symbolic", "This Folder Is Empty".to_string(), "Drop files here to add them to this folder.".to_string(), true)
+            ("clouddrop-syncing-symbolic", "This Folder Is Empty".to_string(), "Drop files here to add them to this folder.".to_string(), true)
         };
+        // Where files can be added, the empty folder is drawn as a drop zone.
+        if add {
+            self.empty.add_css_class("drop-zone");
+        } else {
+            self.empty.remove_css_class("drop-zone");
+        }
         self.empty.set_icon_name(Some(icon));
         self.empty.set_title(&title);
         self.empty.set_description(Some(&text));
@@ -864,8 +889,43 @@ impl FilesPage {
         self.stack.set_visible_child_name("empty");
     }
 
+    /// The summary line, with " · Verifying…" while cloud copies are proved by downloading.
+    fn show_summary(&self) {
+        let text = self.summary_text.borrow();
+        self.summary.set_label(&match (self.verifying.get(), text.is_empty()) {
+            (false, _) => text.clone(),
+            (true, true) => "Verifying…".into(),
+            (true, false) => format!("{text} · Verifying…"),
+        });
+    }
+
+    /// Names the provider in the context menu; providers without web pages get no "Open in".
+    fn update_menu(&self, p: &Choice) {
+        let key = format!("{}|{}", p.name, p.can_open_web());
+        if self.menu_for.borrow().as_deref() == Some(key.as_str()) {
+            return;
+        }
+        self.menu_cloud.remove_all();
+        if p.can_open_web() {
+            self.menu_cloud.append(Some(&format!("Open in {}", p.name)), Some("files.open-drive"));
+        }
+        self.menu_cloud.append(Some("Show in Files"), Some("files.show"));
+        *self.menu_for.borrow_mut() = Some(key);
+    }
+
     /// Called once per second with the latest snapshot.
     pub fn refresh(self: &Rc<Self>, s: &Snapshot, visible: bool) {
+        self.update_menu(&s.provider);
+        let verifying = s.daemon.as_ref().is_some_and(is_verifying);
+        if self.verifying.replace(verifying) != verifying {
+            self.show_summary();
+        }
+        let tips = (
+            format!("Remove the local copy; it stays in {}", s.provider.name),
+            format!("Open in {}", s.provider.name),
+        );
+        self.bar.free.set_tooltip_text(Some(&tips.0));
+        self.bar.drive.set_tooltip_text(Some(&tips.1));
         let keep = s.cfg.as_ref().map(|c| c.keep_local.clone()).unwrap_or_default();
         if *self.ctx.keep.borrow() != keep {
             *self.ctx.keep.borrow_mut() = keep;
@@ -928,7 +988,7 @@ impl FilesPage {
         } else {
             "Always keep this folder on this computer"
         }));
-        b.drive.set_visible(caps.count == 1);
+        b.drive.set_visible(caps.count == 1 && self.ops.provider().can_open_web());
         b.drive.set_sensitive(caps.open_drive);
         b.show.set_visible(caps.show);
         b.label.set_label(&match items.as_slice() {
@@ -950,7 +1010,8 @@ impl FilesPage {
             Kind::File => {
                 let me = Rc::downgrade(self);
                 let name = item_name(&it).to_string();
-                self.ops.toast_with_button(&format!("“{name}” is only in Google Drive"), "Download", move || {
+                let cloud = self.ops.provider().name;
+                self.ops.toast_with_button(&format!("“{name}” is only in {cloud}"), "Download", move || {
                     if let Some(p) = me.upgrade() {
                         let rel = vec![path.clone()];
                         let me2 = p.clone();
@@ -978,13 +1039,14 @@ impl FilesPage {
     fn free_selected(self: &Rc<Self>) {
         let items = self.selected();
         let rels: Vec<String> = items.iter().map(|i| i.entry.path.clone()).collect();
+        let cloud = self.ops.provider().name;
         let body = match items.as_slice() {
             [one] if one.entry.kind == Kind::File => format!(
-                "This removes the local copy of {}. It stays in Google Drive, and you can download it again at any time.",
+                "This removes the local copy of {}. It stays in {cloud}, and you can download it again at any time.",
                 Self::what(&items)
             ),
             _ => format!(
-                "This removes the local copies of the uploaded files in {}. They stay in Google Drive, \
+                "This removes the local copies of the uploaded files in {}. They stay in {cloud}, \
                  and you can download them again at any time. Folders are kept.",
                 Self::what(&items)
             ),

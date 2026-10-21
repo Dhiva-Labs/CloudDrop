@@ -11,6 +11,7 @@ import 'package:clouddrop_app/state/app_controller.dart';
 import 'package:clouddrop_app/state/files_controller.dart';
 import 'package:clouddrop_app/ui/app.dart';
 import 'package:clouddrop_app/ui/pages/files_page.dart';
+import 'package:clouddrop_app/ui/pages/settings_page.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/gestures.dart';
@@ -63,6 +64,8 @@ void main() {
     await loadTestFonts();
   });
   tearDownAll(unpinTime);
+
+  otherProviders();
 
   group('shell', () {
     uiTest('a first start shows the setup assistant, not the main window', (tester) async {
@@ -936,7 +939,8 @@ void main() {
     Future<TestApp> settings(WidgetTester tester, {Size size = wide, TestApp? app}) async {
       final t = app ?? busyApp();
       t.controller.pane.value = AppPane.settings;
-      await pumpApp(tester, t, size: Size(size.width, 1300));
+      // The whole page on screen (Appearance first, the folders' Add and Remove cards too).
+      await pumpApp(tester, t, size: Size(size.width, 1600));
       return t;
     }
 
@@ -1045,6 +1049,36 @@ void main() {
       expect(t.engine.calls, contains('config set parallel_uploads 4'));
     });
 
+    uiTest('appearance: theme and accent are written and shown at once', (tester) async {
+      final t = busyApp();
+      t.controller.pane.value = AppPane.settings;
+      await pumpApp(tester, t, size: const Size(1100, 1450), brightness: null);
+      FluentThemeData look() => FluentTheme.of(tester.element(find.text('Theme')));
+      expect(find.text('Same as Windows'), findsOneWidget);
+      expect(look().brightness, Brightness.light);
+      expect(look().accentColor.normal, const Color(0xFF2F7CF0));
+
+      await tester.tap(find.byType(ComboBox<String>));
+      await tester.settle();
+      await tester.tap(find.text('Dark').last);
+      await tester.settle();
+      expect(t.engine.calls.last, 'config set theme dark');
+      expect(look().brightness, Brightness.dark);
+
+      await tester.tap(find.byTooltip('Purple'));
+      await tester.settle();
+      expect(t.engine.calls.last, 'config set accent purple');
+      expect(look().accentColor.normal, const Color(0xFF7C4DD6));
+      expect(look().brightness, Brightness.dark, reason: 'still dark');
+
+      // The chosen one again: nothing to save.
+      final before = t.engine.calls.length;
+      await tester.tap(find.byTooltip('Purple'));
+      await tester.settle();
+      expect(t.engine.calls.length, before);
+      await tester.pump(const Duration(seconds: 6));
+    });
+
     uiTest('ignored patterns: Apply sends the list', (tester) async {
       final t = await settings(tester);
       final box = find.byType(TextBox).last;
@@ -1079,7 +1113,10 @@ void main() {
       final t2 = calmApp();
       t2.statusSource.value = null;
       await settings(tester, app: t2);
-      expect(find.text('Not running'), findsOneWidget);
+      expect(
+        find.descendant(of: find.byType(SettingsPage), matching: find.text('Not running')),
+        findsOneWidget,
+      );
       await tester.tap(find.text('Start'));
       await tester.settle();
       expect(t2.engine.calls.last, 'service start');
@@ -1134,7 +1171,7 @@ void main() {
       expect(find.text('Sign in to Google'), findsOneWidget);
       expect(find.text('Sign In with Google'), findsOneWidget);
       expect(find.text('Welcome to CloudDrop'), findsNothing);
-      expect(find.text('Step 4 of 5'), findsOneWidget);
+      expect(find.text('Step 5 of 6 · Sign in'), findsOneWidget);
       expect(find.text('Keep Current Sign-in'), findsNothing);
 
       // Signing in again goes through setup (no key re-sent) and the browser, then Done.
@@ -1194,6 +1231,142 @@ void main() {
       await pumpApp(tester, t);
       // Not signed in: the setup assistant takes over (the sign-in page lets you keep going).
       expect(find.text('Welcome to CloudDrop'), findsOneWidget);
+    });
+  });
+}
+
+void otherProviders() {
+  group('Other providers', () {
+    uiTest('Settings › Switch Provider… asks first; the assistant can be left with Cancel', (
+      tester,
+    ) async {
+      final t = busyApp(daemon: idleDaemon());
+      t.engine.providerList = allProviders;
+      t.controller.pane.value = AppPane.settings;
+      await pumpApp(tester, t, size: const Size(1100, 1300));
+      expect(find.text('Upload somewhere else'), findsOneWidget);
+      await tapText(tester, 'Switch Provider…');
+      expect(inDialog('Switch to another cloud?'), findsOneWidget);
+      expect(
+        find.textContaining('Nothing is deleted from Google Drive. Files that are only in'),
+        findsOneWidget,
+      );
+      await tapText(tester, 'Cancel');
+      expect(t.controller.setupActive, isFalse);
+
+      await tapText(tester, 'Switch Provider…');
+      await tapText(tester, 'Choose Cloud…');
+      expect(find.text('Choose where to upload'), findsOneWidget);
+      expect(find.text('Welcome to CloudDrop'), findsNothing, reason: 'no welcome when switching');
+      expect(find.textContaining('Nothing is deleted from Google Drive.'), findsOneWidget);
+      await tapText(tester, 'Cancel');
+      expect(t.controller.setupActive, isFalse);
+      expect(find.text('Upload somewhere else'), findsOneWidget, reason: 'back on Settings');
+      expect(t.engine.calls, isEmpty, reason: 'nothing changed');
+    });
+
+    uiTest('switching to WebDAV: stop, setup, check, reset-cloud, then the service starts', (
+      tester,
+    ) async {
+      final t = busyApp(daemon: idleDaemon());
+      t.engine.providerList = allProviders;
+      t.engine.result = (c) => c == 'check'
+          ? const ActionResult(true, 'Connected to nas as me.')
+          : const ActionResult(true, 'ok');
+      await pumpApp(tester, t, size: const Size(1100, 1300));
+      t.controller.beginSetup(switching: true);
+      await tester.settle();
+      await tapText(tester, 'WebDAV');
+      await tapText(tester, 'Continue');
+      expect(find.text('In WebDAV'), findsOneWidget);
+      await tapText(tester, 'Continue');
+      expect(find.text('Connect to WebDAV'), findsOneWidget);
+      final boxes = find.byType(TextBox);
+      await tester.enterText(boxes.at(0), 'https://nas/dav');
+      await tester.enterText(boxes.at(1), 'me');
+      await tester.enterText(find.byType(PasswordBox), 'pw');
+      await tester.settle();
+      await tapText(tester, 'Test Connection');
+      expect(find.text('Connected to nas as me.'), findsOneWidget);
+      await tapText(tester, 'Continue');
+      expect(find.text("You're all set"), findsOneWidget);
+      expect(find.textContaining('WebDAV → CloudDrop'), findsOneWidget);
+      expect(t.engine.calls, [
+        'service stop',
+        r'setup folder=C:\Users\Dhiva\CloudDrop drive=CloudDrop json=null id=null secret=null '
+            'provider=webdav --set url=https://nas/dav --set user=me --secret password=pw',
+        'check',
+        'reset-cloud',
+        'service enable',
+      ]);
+    });
+
+    uiTest('a provider without web pages: no Open in, CloudDrop holds …', (tester) async {
+      final t = busyApp(
+        provider: webdav,
+        daemon: DaemonStatus(pid: 1, updatedMs: nowMs, phase: Phase.idle),
+      );
+      await pumpApp(tester, t);
+      expect(find.text('WebDAV'), findsWidgets);
+      expect(find.byTooltip('Open in WebDAV'), findsNothing);
+      expect(find.textContaining('CloudDrop holds'), findsWidgets);
+      expect(find.text('Google Drive'), findsNothing);
+      expect(find.textContaining('safe in Google Drive'), findsNothing);
+
+      t.controller.showFiles(dir: 'Videos', select: 'Videos/Family reunion.mp4');
+      await tester.settle();
+      expect(find.byTooltip('Open in WebDAV'), findsNothing);
+      await tester.tap(inList('Family reunion.mp4'), buttons: kSecondaryButton);
+      await tester.settle();
+      expect(inMenu('Open in WebDAV'), findsNothing);
+      expect(inMenu('Show in File Explorer'), findsOneWidget);
+    });
+
+    uiTest('OneDrive: Open in OneDrive asks the engine for the link', (tester) async {
+      final t = busyApp(provider: oneDrive, daemon: idleDaemon());
+      t.engine.result = (c) => c.startsWith('url ')
+          ? const ActionResult(true, 'https://onedrive.live.com/?id=ROOT')
+          : const ActionResult(true, 'ok');
+      await pumpApp(tester, t);
+      expect(find.text('OneDrive'), findsWidgets);
+      await tester.tap(find.byTooltip('Open in OneDrive'));
+      await tester.pump();
+      expect(t.system.urls, ['https://onedrive.live.com/?id=ROOT']);
+
+      t.controller.showFiles(dir: 'Videos', select: 'Videos/Family reunion.mp4');
+      await tester.settle();
+      await tester.tap(find.byTooltip('Open in OneDrive'));
+      await tester.pump();
+      expect(t.engine.calls.last, r'url C:\Users\Dhiva\CloudDrop\Videos\Family reunion.mp4');
+      expect(t.system.urls.last, 'https://onedrive.live.com/?id=ROOT');
+    });
+
+    uiTest('signed out of a form provider: Connect opens the assistant on its page', (
+      tester,
+    ) async {
+      final t = busyApp(daemon: idleDaemon());
+      t.engine.providerList = allProviders;
+      t.engine.statusValue = EngineStatus(
+        configured: true,
+        signedIn: true,
+        folder: t.syncDir,
+        provider: 'webdav',
+        providerName: 'WebDAV',
+      );
+      await pumpApp(tester, t);
+      t.engine.statusValue = EngineStatus(
+        configured: true,
+        signedIn: false,
+        folder: t.syncDir,
+        provider: 'webdav',
+        providerName: 'WebDAV',
+      );
+      await t.controller.poll(forceEngine: true);
+      await tester.settle();
+      expect(find.text('Connect to WebDAV'), findsOneWidget);
+      await tapText(tester, 'Connect');
+      expect(find.text('Test Connection'), findsOneWidget);
+      expect(t.engine.logins, isEmpty, reason: 'no browser sign-in for a form');
     });
   });
 }

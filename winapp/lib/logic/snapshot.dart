@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../data/engine_api.dart';
 import '../data/models.dart';
+import '../data/providers.dart';
 import 'fmt.dart';
 
 @immutable
@@ -60,6 +61,8 @@ class Snapshot {
     this.cloudOnlyBytes = 0,
     this.root = const FolderStats(),
     this.rootId,
+    this.rate,
+    this.provider = CloudProvider.google,
   });
 
   /// null until the app is set up.
@@ -77,8 +80,23 @@ class Snapshot {
   final FolderStats root;
   final String? rootId;
 
-  /// Google Drive storage of the account; null until the engine has asked.
+  /// Upload speed in bytes per second, once it has been measured.
+  final double? rate;
+
+  /// The cloud it uploads to.
+  final CloudProvider provider;
+
+  /// Storage of the cloud account; null until the engine has asked.
   Quota? get quota => daemon?.quota;
+
+  /// The engine is proving cloud copies by downloading them (providers without a hash): its
+  /// message is "Verifying…" (`control::VERIFYING`) while idle, waiting or uploading.
+  bool get verifying {
+    final d = daemon;
+    if (d == null) return false;
+    return (d.phase == Phase.idle || d.phase == Phase.waiting || d.phase == Phase.uploading) &&
+        (d.message ?? '').toLowerCase().startsWith('verifying');
+  }
 
   bool get ready => cfg != null && signedIn;
 
@@ -94,6 +112,13 @@ class Snapshot {
     return (sent, total);
   }
 
+  /// Bytes still to send: the rest of the uploads running now and every file waiting.
+  int get remaining {
+    final (sent, _) = progress;
+    final left = root.waitingBytes - sent;
+    return left < 0 ? 0 : left;
+  }
+
   @override
   bool operator ==(Object other) =>
       other is Snapshot &&
@@ -105,11 +130,24 @@ class Snapshot {
       other.cloudBytes == cloudBytes &&
       other.cloudOnlyBytes == cloudOnlyBytes &&
       other.root == root &&
-      other.rootId == rootId;
+      other.rootId == rootId &&
+      other.rate == rate &&
+      other.provider == provider;
 
   @override
-  int get hashCode =>
-      Object.hash(cfg, signedIn, daemon, paused, counts, cloudBytes, cloudOnlyBytes, root, rootId);
+  int get hashCode => Object.hash(
+    cfg,
+    signedIn,
+    daemon,
+    paused,
+    counts,
+    cloudBytes,
+    cloudOnlyBytes,
+    root,
+    rootId,
+    rate,
+    provider,
+  );
 }
 
 enum SummaryAction { setup, signIn, startService, resume }
@@ -125,11 +163,19 @@ class Summary {
     required this.detail,
     required this.line,
     this.action,
+    this.fraction,
+    this.speed,
   });
 
   final SummaryIcon icon;
   final String title;
   final String detail;
+
+  /// How far the uploads running now are (0..1), while uploading.
+  final double? fraction;
+
+  /// "2.4 MB/s · about 3 minutes left", once the speed is known.
+  final String? speed;
 
   /// Short line for the window title area / tooltips.
   final String line;
@@ -142,27 +188,38 @@ class Summary {
       other.title == title &&
       other.detail == detail &&
       other.line == line &&
-      other.action == action;
+      other.action == action &&
+      other.fraction == fraction &&
+      other.speed == speed;
 
   @override
-  int get hashCode => Object.hash(icon, title, detail, line, action);
+  int get hashCode => Object.hash(icon, title, detail, line, action, fraction, speed);
 }
 
 Summary summarize(Snapshot s) {
+  final p = s.provider;
+  final cloud = p.name;
   if (s.cfg == null) {
     return const Summary(
       icon: SummaryIcon.attention,
       title: "CloudDrop isn't set up yet",
-      detail: 'Set it up to start uploading to Google Drive.',
+      detail: 'Set it up to start uploading to the cloud.',
       line: 'Not set up',
       action: SummaryAction.setup,
     );
   }
   if (!s.signedIn) {
-    return const Summary(
+    final form = p.signIn == SignInKind.form;
+    return Summary(
       icon: SummaryIcon.attention,
-      title: 'Sign in to Google',
-      detail: 'CloudDrop needs your permission to upload to Google Drive.',
+      title: p.isGoogle
+          ? 'Sign in to Google'
+          : form
+          ? 'Connect to $cloud'
+          : 'Sign in to $cloud',
+      detail: form
+          ? 'CloudDrop needs your $cloud details to upload.'
+          : 'CloudDrop needs your permission to upload to $cloud.',
       line: 'Sign-in needed',
       action: SummaryAction.signIn,
     );
@@ -178,6 +235,7 @@ Summary summarize(Snapshot s) {
     );
   }
   final message = d.message ?? '';
+  if (s.verifying) return _verifying(s, message);
   switch (d.phase) {
     case Phase.paused:
       return Summary(
@@ -190,32 +248,34 @@ Summary summarize(Snapshot s) {
         action: SummaryAction.resume,
       );
     case Phase.needsSignIn:
-      return const Summary(
+      return Summary(
         icon: SummaryIcon.attention,
         title: 'Sign in again',
-        detail: "Google no longer accepts CloudDrop's sign-in, so uploads are on hold.",
+        detail:
+            "${p.isGoogle ? 'Google' : cloud} no longer accepts CloudDrop's sign-in, "
+            'so uploads are on hold.',
         line: 'Sign-in needed',
         action: SummaryAction.signIn,
       );
     case Phase.driveFolderMissing:
       return Summary(
         icon: SummaryIcon.attention,
-        title: 'The CloudDrop folder is missing in Google Drive',
+        title: 'The CloudDrop folder is missing in $cloud',
         detail: _capitalize(message),
-        line: 'Drive folder missing',
+        line: p.isGoogle ? 'Drive folder missing' : 'Cloud folder missing',
       );
     case Phase.offline:
       return Summary(
         icon: SummaryIcon.attention,
-        title: "Can't reach Google Drive",
+        title: "Can't reach $cloud",
         detail: '${files(d.waiting)} waiting. CloudDrop keeps retrying on its own.',
         line: 'Offline — retrying',
       );
     case Phase.starting:
-      return const Summary(
+      return Summary(
         icon: SummaryIcon.syncing,
         title: 'Starting…',
-        detail: 'Connecting to Google Drive.',
+        detail: 'Connecting to $cloud.',
         line: 'Starting',
       );
     case Phase.uploading || Phase.waiting:
@@ -229,13 +289,15 @@ Summary summarize(Snapshot s) {
             ? '${humanBytes(sent)} of ${humanBytes(total)} sent for the current files.'
             : 'Waiting for a moment to upload.',
         line: total > 0 ? 'Uploading ${files(n)} — $pct%' : '${files(d.waiting)} waiting',
+        fraction: total > 0 ? sent / total : null,
+        speed: _speed(s),
       );
     case Phase.idle:
       if (s.counts.failed > 0) {
         return Summary(
           icon: SummaryIcon.attention,
           title: 'Some files need attention',
-          detail: 'Everything else is safe in Google Drive.',
+          detail: 'Everything else is safe in $cloud.',
           line: '${files(s.counts.failed)} failed',
         );
       }
@@ -245,10 +307,75 @@ Summary summarize(Snapshot s) {
         title: 'Everything is uploaded',
         detail: n == 0
             ? 'Put files in your CloudDrop folder to back them up.'
-            : '${files(n)} · ${humanBytes(s.cloudBytes)} safe in Google Drive',
+            : '${files(n)} · ${humanBytes(s.cloudBytes)} safe in $cloud',
         line: 'Up to date',
       );
   }
+}
+
+/// "Verifying…": the engine downloads cloud copies once to prove them before freeing space.
+/// The engine's bare "Verifying…" gets a sentence of its own; anything longer is shown as is.
+Summary _verifying(Snapshot s, String message) {
+  final bare = RegExp(r'^verifying(…|\.\.\.)?$', caseSensitive: false).hasMatch(message.trim());
+  return Summary(
+    icon: SummaryIcon.syncing,
+    title: 'Verifying…',
+    detail: bare || message.trim().isEmpty
+        ? 'Making sure ${s.provider.name} holds identical copies before freeing up space.'
+        : _capitalize(message.trim()),
+    line: 'Verifying…',
+  );
+}
+
+/// What Home's cloud storage card says.
+typedef StorageText = ({String headline, String note, double? fraction, bool muted});
+
+StorageText cloudStorage(Snapshot s) {
+  final holds = 'CloudDrop holds ${humanBytes(s.cloudBytes)}';
+  final q = s.quota;
+  final limit = q?.limit;
+  if (q != null && limit != null && limit > 0) {
+    return (
+      headline: '${humanBytes(q.usage)} of ${humanBytes(limit)} used',
+      note: holds,
+      fraction: q.usage / limit,
+      muted: false,
+    );
+  }
+  // Providers without a quota (S3) report none at all, or nothing used of no limit.
+  final p = s.provider;
+  final noQuota = p.hasQuota == false || (!p.isGoogle && q != null && q.usage == 0);
+  if (noQuota) {
+    return (
+      headline: holds,
+      note: "${p.name} doesn't report free space",
+      fraction: null,
+      muted: false,
+    );
+  }
+  if (q != null) {
+    return (
+      headline: '${humanBytes(q.usage)} used',
+      note: '$holds · unlimited storage',
+      fraction: null,
+      muted: false,
+    );
+  }
+  return (
+    headline: s.daemon != null ? 'Checking…' : 'Not connected',
+    note: holds,
+    fraction: null,
+    muted: true,
+  );
+}
+
+/// "2.4 MB/s · about 3 minutes left"; just the speed when nothing is known to be waiting.
+String? _speed(Snapshot s) {
+  final rate = s.rate;
+  if (rate == null || rate < 1) return null;
+  final left = s.remaining;
+  if (left == 0) return speed(rate);
+  return '${speed(rate)} · ${timeLeft((left / rate).ceil())}';
 }
 
 String _capitalize(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);

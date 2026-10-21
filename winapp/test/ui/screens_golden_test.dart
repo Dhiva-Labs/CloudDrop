@@ -65,7 +65,7 @@ void main() {
   });
 
   // ---------- Home ----------
-  screen('home_busy', busyApp);
+  screen('home_busy', busyApp, act: (tester, t) => t.measureSpeed(3 * mb));
   screen('home_idle', calmApp);
   screen('home_paused', () {
     final t = busyApp(
@@ -186,12 +186,14 @@ void main() {
   );
 
   // ---------- Settings ----------
-  screen('settings', busyApp, pane: AppPane.settings, tall: 1250);
+  screen('settings', busyApp, pane: AppPane.settings, tall: 1600);
+  // The accent setting colours the whole app.
+  screen('home_purple', () => busyApp(config: busyConfig.copyWith(accent: 'purple')));
   screen(
     'settings_sign_out_dialog',
     busyApp,
     pane: AppPane.settings,
-    tall: 1250,
+    tall: 1600,
     act: (tester, t) async {
       await tester.tap(find.text('Sign out'));
     },
@@ -207,6 +209,41 @@ void main() {
       return t;
     },
     pane: AppPane.settings,
-    tall: 1100,
+    tall: 1500,
+  );
+
+  // ---------- another provider: WebDAV (no web links, proves copies by downloading) ----------
+  DaemonStatus verifyingDaemon() => DaemonStatus(
+    pid: 1,
+    updatedMs: nowMs,
+    phase: Phase.idle,
+    message: 'Verifying…',
+    quota: const Quota(usage: 0, usageInDrive: 0),
+  );
+  screen('home_webdav_verifying', () => calmApp(provider: webdav, daemon: verifyingDaemon()));
+  screen(
+    'home_s3',
+    () => calmApp(
+      provider: s3,
+      daemon: DaemonStatus(pid: 1, updatedMs: nowMs, phase: Phase.idle),
+    ),
+  );
+  screen(
+    'files_webdav_selection',
+    () => busyApp(provider: webdav, daemon: verifyingDaemon()),
+    pane: AppPane.files,
+    act: (tester, t) async {
+      scopeOf(tester).files.selectOnly('setup-guide.md');
+    },
+  );
+  screen('settings_webdav', () => busyApp(provider: webdav), pane: AppPane.settings, tall: 1600);
+  screen(
+    'settings_switch_dialog',
+    () => busyApp(provider: oneDrive),
+    pane: AppPane.settings,
+    tall: 1600,
+    act: (tester, t) async {
+      await tester.tap(find.text('Switch Provider…'));
+    },
   );
 }

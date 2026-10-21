@@ -1,12 +1,14 @@
-/// Home: one calm summary, the uploads running now, the everyday actions and two storage
-/// cards (`gui/src/home.rs`).
+/// Home: one calm summary (with speed and time left while uploading), the uploads running
+/// now, the everyday actions, two storage cards and the latest activity (`gui/src/home.rs`).
 library;
 
 import 'package:fluent_ui/fluent_ui.dart';
 
 import '../../data/models.dart';
+import '../../data/providers.dart';
 import '../../logic/fmt.dart' as fmt;
 import '../../logic/snapshot.dart';
+import '../../state/activity_controller.dart';
 import '../../state/app_controller.dart';
 import '../scope.dart';
 import '../theme.dart';
@@ -20,22 +22,24 @@ class HomePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final app = AppScope.of(context).app;
+    final scope = AppScope.of(context);
+    final app = scope.app;
     return ScaffoldPage(
       padding: const EdgeInsets.only(top: 14),
       header: const AppPageHeader('Home'),
       content: ListenableBuilder(
-        listenable: Listenable.merge([app, app.busyCount]),
-        builder: (context, _) => _HomeBody(app: app),
+        listenable: Listenable.merge([app, app.busyCount, scope.activity]),
+        builder: (context, _) => _HomeBody(app: app, activity: scope.activity),
       ),
     );
   }
 }
 
 class _HomeBody extends StatelessWidget {
-  const _HomeBody({required this.app});
+  const _HomeBody({required this.app, required this.activity});
 
   final AppController app;
+  final ActivityController activity;
 
   @override
   Widget build(BuildContext context) {
@@ -65,6 +69,30 @@ class _HomeBody extends StatelessWidget {
         _Tiles(app: app),
         const SizedBox(height: 16),
         _Storage(app: app),
+        if (activity.recent.isNotEmpty) ...[
+          SectionTitle(
+            'Recent activity',
+            trailing: HyperlinkButton(
+              onPressed: () => app.pane.value = AppPane.activity,
+              child: const Text('See All'),
+            ),
+          ),
+          Surface(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Column(
+              children: [
+                for (var i = 0; i < activity.recent.length; i++) ...[
+                  if (i > 0)
+                    const Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: Divider()),
+                  ActivityRow(
+                    activity: activity.recent[i],
+                    onOpen: (a) => app.showFiles(dir: parentOf(a.path), select: a.path),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -88,52 +116,77 @@ class _Hero extends StatelessWidget {
       SummaryIcon.attention => (FluentIcons.warning, theme.caution),
     };
     final action = summary.action;
+    final fraction = summary.fraction;
     final narrow = MediaQuery.widthOf(context) < 560;
+    final align = narrow ? CrossAxisAlignment.center : CrossAxisAlignment.start;
+    final textAlign = narrow ? TextAlign.center : TextAlign.start;
     final text = Column(
-      crossAxisAlignment: narrow ? CrossAxisAlignment.center : CrossAxisAlignment.start,
+      crossAxisAlignment: align,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          summary.title,
-          style: theme.typography.subtitle,
-          textAlign: narrow ? TextAlign.center : TextAlign.start,
-        ),
+        Text(summary.title, style: theme.typography.subtitle, textAlign: textAlign),
         const SizedBox(height: 4),
         Text(
           summary.detail,
           style: theme.typography.body?.copyWith(color: theme.secondaryText),
-          textAlign: narrow ? TextAlign.center : TextAlign.start,
+          textAlign: textAlign,
         ),
+        if (fraction != null) ...[
+          const SizedBox(height: 12),
+          WideProgressBar(fraction: fraction),
+          const SizedBox(height: 6),
+          Text(
+            summary.speed ?? 'Measuring speed…',
+            style: theme.typography.caption?.copyWith(color: theme.secondaryText),
+            textAlign: textAlign,
+          ),
+        ],
         if (action != null) ...[
           const SizedBox(height: 14),
-          FilledButton(onPressed: () => _run(context, action), child: Text(_label(action))),
+          FilledButton(
+            onPressed: () => _run(context, action),
+            child: Text(_label(action, app.provider)),
+          ),
         ],
       ],
     );
     final badge = Container(
       width: 72,
       height: 72,
-      decoration: BoxDecoration(color: tint.bg, shape: BoxShape.circle),
+      decoration: BoxDecoration(
+        color: theme.isDark ? const Color(0x1FFFFFFF) : const Color(0xE6FFFFFF),
+        shape: BoxShape.circle,
+        boxShadow: theme.isDark
+            ? null
+            : const [BoxShadow(color: Color(0x1A1F3A8A), blurRadius: 12, offset: Offset(0, 3))],
+      ),
       alignment: Alignment.center,
       child: Icon(icon, size: 34, color: tint.fg),
     );
-    return Surface(
-      padding: EdgeInsets.all(narrow ? 20 : 24),
-      child: narrow
-          ? Column(children: [badge, const SizedBox(height: 14), text])
-          : Row(
-              children: [
-                badge,
-                const SizedBox(width: 20),
-                Expanded(child: text),
-              ],
-            ),
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: Brand.wash(theme.brightness),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: theme.cardStroke),
+      ),
+      child: Padding(
+        padding: EdgeInsets.all(narrow ? 20 : 24),
+        child: narrow
+            ? Column(children: [badge, const SizedBox(height: 14), text])
+            : Row(
+                children: [
+                  badge,
+                  const SizedBox(width: 20),
+                  Expanded(child: text),
+                ],
+              ),
+      ),
     );
   }
 
-  String _label(SummaryAction a) => switch (a) {
+  String _label(SummaryAction a, CloudProvider p) => switch (a) {
     SummaryAction.setup => 'Set Up CloudDrop',
-    SummaryAction.signIn => 'Sign In',
+    SummaryAction.signIn => p.signIn == SignInKind.form ? 'Connect' : 'Sign In',
     SummaryAction.startService => 'Start CloudDrop',
     SummaryAction.resume => 'Resume Uploads',
   };
@@ -181,7 +234,7 @@ class _UploadsCard extends StatelessWidget {
                         Text(nameOf(uploads[i].path), maxLines: 1, overflow: TextOverflow.ellipsis),
                         Text(
                           parentOf(uploads[i].path).isEmpty
-                              ? 'CloudDrop'
+                              ? AppScope.of(context).app.rootName
                               : parentOf(uploads[i].path),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -231,19 +284,21 @@ class _Tiles extends StatelessWidget {
       _Tile(
         icon: FluentIcons.open_folder_horizontal,
         label: 'Open Folder',
-        tooltip: 'Open the CloudDrop folder in File Explorer',
+        tooltip: app.several
+            ? 'Open “${app.label}” in File Explorer'
+            : 'Open the CloudDrop folder in File Explorer',
         onPressed: app.syncDir == null ? null : app.openFolder,
       ),
       _Tile(
         icon: FluentIcons.add,
         label: 'Add Files…',
-        tooltip: 'Copy files into CloudDrop to upload them',
+        tooltip: 'Copy files into ${app.rootName} to upload them',
         onPressed: s.ready ? () => app.addFiles('') : null,
       ),
       _Tile(
-        icon: FluentIcons.hard_drive,
+        icon: FluentIcons.broom,
         label: 'Free Up Space…',
-        tooltip: 'Remove local copies of uploaded files; they stay in Google Drive',
+        tooltip: 'Remove local copies of uploaded files; they stay in ${app.provider.name}',
         onPressed: s.counts.synced > 0 && !busy ? () => _free(context) : null,
       ),
       _Tile(
@@ -273,7 +328,7 @@ class _Tiles extends StatelessWidget {
       context,
       body:
           'This removes the local copies of all $synced uploaded files. They stay in '
-          'Google Drive, and you can download them again from Files at any time. '
+          '${app.provider.name}, and you can download them again from Files at any time. '
           'Folders are kept.',
     );
     if (ok) await app.free(['']);
@@ -365,31 +420,18 @@ class _Storage extends StatelessWidget {
   }
 
   Widget _driveCard(BuildContext context, Snapshot s) {
-    final holds = 'CloudDrop holds ${fmt.humanBytes(s.cloudBytes)}';
-    final q = s.quota;
-    String headline;
-    double? frac;
-    String note = holds;
-    var muted = false;
-    if (q != null && q.limit != null && q.limit! > 0) {
-      headline = '${fmt.humanBytes(q.usage)} of ${fmt.humanBytes(q.limit!)} used';
-      frac = q.usage / q.limit!;
-    } else if (q != null) {
-      headline = '${fmt.humanBytes(q.usage)} used';
-      note = '$holds · unlimited storage';
-    } else {
-      headline = s.daemon != null ? 'Checking…' : 'Not connected';
-      muted = true;
-    }
+    final text = cloudStorage(s);
+    final p = s.provider;
     return _StorageCard(
-      icon: FluentIcons.cloud,
-      title: 'Google Drive',
-      headline: headline,
-      muted: muted,
-      fraction: frac,
-      note: note,
-      actionIcon: FluentIcons.open_in_new_window,
-      actionTooltip: 'Open in Google Drive',
+      icon: providerIcon(p.id),
+      title: p.name,
+      headline: text.headline,
+      muted: text.muted,
+      fraction: text.fraction,
+      note: text.note,
+      // Providers without web pages (WebDAV, S3, SFTP) have nothing to open.
+      actionIcon: p.webLinks ? FluentIcons.open_in_new_window : null,
+      actionTooltip: 'Open in ${p.name}',
       onAction: s.ready ? app.openRootInDrive : null,
       warnWhenFull: true,
     );
@@ -405,7 +447,7 @@ class _Storage extends StatelessWidget {
         title: 'This computer',
         headline: 'Nothing yet',
         muted: true,
-        note: 'Files you add to CloudDrop show up here',
+        note: 'Files you add to ${app.rootName} show up here',
         actionIcon: FluentIcons.open_folder_horizontal,
         actionTooltip: 'Open folder',
         onAction: app.syncDir == null ? null : app.openFolder,
@@ -448,7 +490,9 @@ class _StorageCard extends StatelessWidget {
 
   /// A nearly full bar turns amber and red (storage quota); a "freed" bar never does.
   final bool warnWhenFull;
-  final IconData actionIcon;
+
+  /// null: no action (the row keeps its height).
+  final IconData? actionIcon;
   final String actionTooltip;
   final VoidCallback? onAction;
 
@@ -472,10 +516,20 @@ class _StorageCard extends StatelessWidget {
               Icon(icon, size: 16, color: theme.secondaryText),
               const SizedBox(width: 8),
               Expanded(child: Text(title, style: theme.typography.bodyStrong)),
-              Tooltip(
-                message: actionTooltip,
-                child: IconButton(icon: Icon(actionIcon, size: 14), onPressed: onAction),
-              ),
+              if (actionIcon != null)
+                Tooltip(
+                  message: actionTooltip,
+                  child: IconButton(icon: Icon(actionIcon, size: 14), onPressed: onAction),
+                )
+              else
+                // Same height as the button, so both cards line up.
+                Visibility(
+                  visible: false,
+                  maintainSize: true,
+                  maintainAnimation: true,
+                  maintainState: true,
+                  child: IconButton(icon: const Icon(FluentIcons.cloud, size: 14), onPressed: null),
+                ),
             ],
           ),
           const SizedBox(height: 8),

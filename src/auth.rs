@@ -1,7 +1,10 @@
 //! Google OAuth for an installed app: loopback redirect + PKCE, refresh-token storage.
+//! The loopback and PKCE pieces are shared with the generic sign-in (`oauth.rs`).
 
 use crate::config::Config;
-use crate::drive::{DResult, DriveError};
+use crate::oauth::TokenFile;
+use crate::remote::{RemoteResult, TokenSource};
+use futures_util::future::BoxFuture;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -10,7 +13,6 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
 
 pub const SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 
@@ -23,130 +25,55 @@ pub struct Token {
 }
 
 #[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    expires_in: Option<i64>,
-    refresh_token: Option<String>,
+pub(crate) struct TokenResponse {
+    pub access_token: String,
+    pub expires_in: Option<i64>,
+    pub refresh_token: Option<String>,
 }
 
 pub fn token_path() -> PathBuf {
     crate::config::data_dir().join("token.json")
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
 
-struct Loaded {
-    token: Token,
-    file_mtime: Option<SystemTime>,
-}
-
-pub struct Auth {
-    http: reqwest::Client,
-    token_url: String,
-    client_id: String,
-    client_secret: String,
-    path: PathBuf,
-    state: Mutex<Option<Loaded>>,
-}
+/// Google's tokens in token.json ([`TokenFile`] with Google's client secret).
+pub struct Auth(TokenFile);
 
 impl Auth {
     pub fn new(http: reqwest::Client, cfg: &Config, path: PathBuf) -> Self {
-        Self {
+        Self(TokenFile::with_secret(
             http,
-            token_url: cfg.endpoints.token_url.clone(),
-            client_id: cfg.client_id.clone(),
-            client_secret: cfg.client_secret.clone(),
+            &cfg.endpoints.token_url,
+            &cfg.client_id,
+            Some(&cfg.client_secret),
+            "Google",
             path,
-            state: Mutex::new(None),
-        }
-    }
-
-    fn file_mtime(&self) -> Option<SystemTime> {
-        std::fs::metadata(&self.path).and_then(|m| m.modified()).ok()
-    }
-
-    /// Loads the token file when first needed or when `clouddrop login` rewrote it.
-    fn reload_if_needed(&self, slot: &mut Option<Loaded>) -> DResult<()> {
-        let mtime = self.file_mtime();
-        if slot.as_ref().is_some_and(|l| l.file_mtime == mtime) {
-            return Ok(());
-        }
-        let text = std::fs::read_to_string(&self.path).map_err(|_| {
-            DriveError::Auth("not signed in — run `clouddrop login`".into())
-        })?;
-        let token: Token = serde_json::from_str(&text)
-            .map_err(|_| DriveError::Auth("token file is corrupt — run `clouddrop login`".into()))?;
-        *slot = Some(Loaded {
-            token,
-            file_mtime: mtime,
-        });
-        Ok(())
+        ))
     }
 
     /// A valid access token, refreshed when it is about to expire.
-    pub async fn token(&self) -> DResult<String> {
-        let mut slot = self.state.lock().await;
-        self.reload_if_needed(&mut slot)?;
-        let loaded = slot.as_ref().expect("loaded");
-        if loaded.token.expires_at - 60 > unix_now() {
-            return Ok(loaded.token.access_token.clone());
-        }
-        self.refresh_locked(&mut slot).await
+    pub async fn token(&self) -> RemoteResult<String> {
+        self.0.token().await
     }
 
-    pub async fn refresh(&self) -> DResult<String> {
-        let mut slot = self.state.lock().await;
-        self.reload_if_needed(&mut slot)?;
-        self.refresh_locked(&mut slot).await
+    pub async fn refresh(&self) -> RemoteResult<String> {
+        self.0.refresh().await
+    }
+}
+
+impl TokenSource for Auth {
+    fn token(&self) -> BoxFuture<'_, RemoteResult<String>> {
+        Box::pin(self.0.token())
     }
 
-    async fn refresh_locked(&self, slot: &mut Option<Loaded>) -> DResult<String> {
-        let refresh_token = slot.as_ref().expect("loaded").token.refresh_token.clone();
-        let resp = self
-            .http
-            .post(&self.token_url)
-            .form(&[
-                ("client_id", self.client_id.as_str()),
-                ("client_secret", self.client_secret.as_str()),
-                ("refresh_token", refresh_token.as_str()),
-                ("grant_type", "refresh_token"),
-            ])
-            .send()
-            .await
-            .map_err(|e| DriveError::Transient(format!("cannot reach Google sign-in: {e}")))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            if status.is_client_error() {
-                return Err(DriveError::Auth(format!(
-                    "Google rejected the saved sign-in ({}) — run `clouddrop login`",
-                    body.trim()
-                )));
-            }
-            return Err(DriveError::Transient(format!("token refresh failed: {status}")));
-        }
-        let tr: TokenResponse = resp
-            .json()
-            .await
-            .map_err(|e| DriveError::Transient(format!("bad token response: {e}")))?;
-        let token = Token {
-            access_token: tr.access_token,
-            refresh_token: tr.refresh_token.unwrap_or(refresh_token),
-            expires_at: unix_now() + tr.expires_in.unwrap_or(3600),
-        };
-        save_token(&self.path, &token)
-            .map_err(|e| DriveError::Permanent(format!("cannot save token: {e}")))?;
-        let access = token.access_token.clone();
-        *slot = Some(Loaded {
-            token,
-            file_mtime: self.file_mtime(),
-        });
-        Ok(access)
+    fn refresh(&self) -> BoxFuture<'_, RemoteResult<String>> {
+        Box::pin(self.0.refresh())
     }
 }
 
@@ -157,9 +84,16 @@ pub fn save_token(path: &Path, token: &Token) -> Result<()> {
     crate::util::write_private(path, serde_json::to_string_pretty(token)?.as_bytes())
 }
 
-fn random_b64(n: usize) -> String {
+pub(crate) fn random_b64(n: usize) -> String {
     let bytes: Vec<u8> = (0..n).map(|_| rand::random::<u8>()).collect();
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// A PKCE (verifier, S256 challenge) pair.
+pub(crate) fn pkce() -> (String, String) {
+    let verifier = random_b64(48);
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    (verifier, challenge)
 }
 
 /// Interactive sign-in. `show_url` receives the consent URL (print it / open a browser).
@@ -167,8 +101,7 @@ pub async fn login(cfg: &Config, token_file: &Path, show_url: impl FnOnce(&str))
     if cfg.client_id.is_empty() || cfg.client_secret.is_empty() {
         bail!("client_id/client_secret missing from the config — run `clouddrop setup`");
     }
-    let verifier = random_b64(48);
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let (verifier, challenge) = pkce();
     let state = random_b64(16);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -223,7 +156,7 @@ pub async fn login(cfg: &Config, token_file: &Path, show_url: impl FnOnce(&str))
 }
 
 /// Serves the loopback redirect until a request carries `code` (or an error) for our `state`.
-async fn wait_for_code(listener: &tokio::net::TcpListener, state: &str) -> Result<String> {
+pub(crate) async fn wait_for_code(listener: &tokio::net::TcpListener, state: &str) -> Result<String> {
     loop {
         let (mut sock, _) = listener.accept().await?;
         let mut buf = vec![0u8; 8192];

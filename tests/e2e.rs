@@ -214,8 +214,8 @@ async fn free_up_space_then_restore() {
     let mtime = std::fs::metadata(h.path("big/video.mp4")).unwrap().modified().unwrap();
 
     let ctx = h.ctx();
-    let drive = h.drive();
-    let report = actions::free(&ctx, &drive, &["big".into()]).await.unwrap();
+    let remote = h.remote();
+    let report = actions::free(&ctx, &remote, &["big".into()]).await.unwrap();
     assert_eq!(report.freed_files, 2, "{report:?}");
     assert!(!h.path("big/video.mp4").exists());
     assert!(h.path("big").is_dir(), "folders stay so the structure is visible");
@@ -232,7 +232,7 @@ async fn free_up_space_then_restore() {
     assert_eq!(names, ["big/clip.mp4", "big/video.mp4"]);
 
     let (sessions, _) = h.stats();
-    let report = actions::restore(&ctx, &drive, &["big/video.mp4".into()]).await.unwrap();
+    let report = actions::restore(&ctx, &remote, &["big/video.mp4".into()]).await.unwrap();
     assert_eq!(report.files, 1);
     assert_eq!(read(&h.path("big/video.mp4")), "lots of bytes");
     assert_eq!(std::fs::metadata(h.path("big/video.mp4")).unwrap().modified().unwrap(), mtime);
@@ -264,7 +264,7 @@ async fn free_refuses_unverified_copies() {
     h.mock.lock().unwrap().items.remove(&b_id);
 
     let ctx = h.ctx();
-    let report = actions::free(&ctx, &h.drive(), &["".into()]).await.unwrap();
+    let report = actions::free(&ctx, &h.remote(), &["".into()]).await.unwrap();
     assert_eq!(report.freed_files, 0, "{report:?}");
     assert_eq!(report.changed, 1);
     assert_eq!(report.cloud_mismatch, 1);
@@ -288,7 +288,7 @@ async fn restore_whole_folder_after_local_delete() {
     h.wait("cloud-only", |h| h.state("trip") == Some(State::CloudOnly)).await;
     h.settle().await;
 
-    let report = actions::restore(&h.ctx(), &h.drive(), &["trip".into()]).await.unwrap();
+    let report = actions::restore(&h.ctx(), &h.remote(), &["trip".into()]).await.unwrap();
     assert_eq!(report.files, 2);
     assert_eq!(read(&h.path("trip/day1/a.jpg")), "a");
     assert_eq!(read(&h.path("trip/day2/b.jpg")), "b");
@@ -355,10 +355,7 @@ async fn lost_database_adopts_existing_drive_items() {
     h.stop().await;
     let before = h.stats();
 
-    for f in ["state.db", "state.db-wal", "state.db-shm"] {
-        let _ = std::fs::remove_file(h.data.join(f));
-    }
-    h.reopen_db();
+    h.lose_db();
     h.start();
     h.settle().await;
     assert_eq!(h.stats(), before, "nothing uploaded or created again");
@@ -510,10 +507,7 @@ async fn odd_names_and_empty_files() {
     );
     // Restart: adoption lookups must match these names exactly (no duplicates).
     h.stop().await;
-    for f in ["state.db", "state.db-wal", "state.db-shm"] {
-        let _ = std::fs::remove_file(h.data.join(f));
-    }
-    h.reopen_db();
+    h.lose_db();
     let before = h.stats();
     h.start();
     h.settle().await;
@@ -639,8 +633,8 @@ async fn activity_history_records_what_happened() {
     std::fs::remove_file(h.path("b.txt")).unwrap();
     h.wait("b cloud-only", |h| h.state("b.txt") == Some(State::CloudOnly)).await;
     let ctx = h.ctx();
-    actions::restore(&ctx, &h.drive(), &["b.txt".into()]).await.unwrap();
-    actions::free(&ctx, &h.drive(), &["renamed.txt".into()]).await.unwrap();
+    actions::restore(&ctx, &h.remote(), &["b.txt".into()]).await.unwrap();
+    actions::free(&ctx, &h.remote(), &["renamed.txt".into()]).await.unwrap();
     h.settle().await;
 
     let got = kinds(&h);
@@ -686,7 +680,7 @@ async fn auto_free_right_after_upload_respects_keep_folders() {
     assert!(kinds(&h).contains(&(clouddrop::db::ActivityKind::AutoFreed, "loose.txt".into())));
 
     // Downloading back is respected: it stays until it changes again.
-    actions::restore(&h.ctx(), &h.drive(), &["loose.txt".into()]).await.unwrap();
+    actions::restore(&h.ctx(), &h.remote(), &["loose.txt".into()]).await.unwrap();
     h.stop().await;
     h.start();
     h.settle().await;
@@ -741,7 +735,7 @@ async fn auto_free_never_deletes_when_drive_copy_differs() {
     assert_eq!(doc.id, id, "same Drive file, no duplicate");
     assert_eq!(doc.content, b"local truth");
     assert!(doc.revisions.iter().rev().nth(1).is_some_and(|r| r.keep_forever), "the other edit is kept");
-    actions::restore(&h.ctx(), &h.drive(), &["doc.txt".into()]).await.unwrap();
+    actions::restore(&h.ctx(), &h.remote(), &["doc.txt".into()]).await.unwrap();
     assert_eq!(read(&h.path("doc.txt")), "local truth");
     h.stop().await;
 }
@@ -866,4 +860,228 @@ async fn pinned_items_are_not_freed_automatically() {
     assert_eq!(h.state("Pinned/keep.txt"), Some(State::Synced));
     assert_eq!(read(&h.path("Pinned/keep.txt")), "keep");
     h.stop().await;
+}
+
+// ---- Other providers' rules, applied to the Drive mock (common::Harness::with_caps) ----
+
+use clouddrop::remote::{Capabilities, HashKind};
+use common::drive_caps;
+
+/// A provider without content hashes whose versions can't be pinned (WebDAV, SFTP, MEGA).
+fn no_hash_caps() -> Capabilities {
+    Capabilities { hash: None, pin_versions: false, ..drive_caps() }
+}
+
+async fn no_hash_harness(tweak: impl FnOnce(&mut clouddrop::config::Config)) -> Harness {
+    let h = Harness::with_caps(no_hash_caps(), tweak).await;
+    h.mock.lock().unwrap().no_hashes = true;
+    h
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_hashes_freeing_downloads_and_compares_first() {
+    let mut h = no_hash_harness(|_| {}).await;
+    h.write("a.txt", "alpha");
+    h.write("b.txt", "bravo");
+    h.start();
+    h.settle().await;
+    let a = h.entry("a.txt").unwrap();
+    assert_eq!(a.hash_kind, Some(HashKind::Sha256), "local files hashed with SHA-256");
+    assert_eq!(a.md5.as_deref(), Some("8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"));
+    h.stop().await;
+
+    // b.txt changed in the cloud behind our back, same size: only a download can tell.
+    let b_id = h.entry("b.txt").unwrap().drive_id.unwrap();
+    h.mock.lock().unwrap().items.get_mut(&b_id).unwrap().content = b"BRAVO".to_vec();
+    let report = h.free(&[""]).await.unwrap();
+    assert_eq!((report.freed_files, report.cloud_mismatch), (1, 1), "{report:?}");
+    assert_eq!(h.mock.lock().unwrap().downloads, 2, "each cloud copy downloaded once to verify");
+    assert!(!h.path("a.txt").exists());
+    assert_eq!(read(&h.path("b.txt")), "bravo", "never deleted on a mismatch");
+    assert!(
+        std::fs::read_dir(&h.root).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(".clouddrop")),
+        "no temporary downloads left"
+    );
+
+    // The daemon uploads the local content again, keeping the other version first.
+    h.start();
+    h.settle().await;
+    let b = h.cloud("b.txt").unwrap();
+    assert_eq!(b.id, b_id);
+    assert_eq!(b.content, b"bravo");
+    assert!(b.revisions[0].keep_forever, "the cloud's version is kept before it is replaced");
+
+    // Restoring records the SHA-256 again, so the file isn't uploaded back.
+    let sessions = h.stats().0;
+    h.restore(&["a.txt"]).await.unwrap();
+    assert_eq!(read(&h.path("a.txt")), "alpha");
+    h.settle().await;
+    assert_eq!(h.entry("a.txt").unwrap().content_hash(), a.content_hash());
+    assert_eq!(h.stats().0, sessions);
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_free_without_hashes_says_verifying() {
+    use clouddrop::control::{VERIFYING, read_status};
+    let mut h = no_hash_harness(|c| c.auto_free_days = Some(0)).await;
+    h.mock.lock().unwrap().media_delay_ms = 1500;
+    h.write("movie.mp4", "frames");
+    h.start();
+    h.wait("verifying status", |h| read_status(&h.data).is_some_and(|s| s.message.as_deref() == Some(VERIFYING)))
+        .await;
+    assert!(h.path("movie.mp4").exists(), "nothing freed before the download matched");
+    h.wait("freed", |h| h.state("movie.mp4") == Some(State::CloudOnly)).await;
+    assert!(!h.path("movie.mp4").exists());
+    assert!(h.mock.lock().unwrap().downloads >= 1);
+    h.wait("verifying cleared", |h| read_status(&h.data).is_some_and(|s| s.message.is_none())).await;
+    assert!(
+        std::fs::read_dir(&h.data).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(".clouddrop-verify")),
+        "temporary download removed"
+    );
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_hashes_a_lost_database_adopts_by_download() {
+    let mut h = no_hash_harness(|_| {}).await;
+    h.write("keep/one.txt", "1");
+    h.write("two.txt", "2");
+    h.start();
+    h.settle().await;
+    h.stop().await;
+    let before = h.stats();
+    h.lose_db();
+    h.start();
+    h.settle().await;
+    assert_eq!(h.stats(), before, "nothing uploaded or created again");
+    assert!(h.mock.lock().unwrap().downloads >= 2, "adopted after comparing downloads");
+    assert_eq!(h.state("keep/one.txt"), Some(State::Synced));
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn path_ids_follow_renamed_folders() {
+    let mut h = Harness::with_caps(Capabilities { stable_ids: false, ..drive_caps() }, |_| {}).await;
+    h.mock.lock().unwrap().path_ids = true;
+    h.write("docs/report.pdf", "R");
+    h.write("docs/sub/notes.txt", "N");
+    h.write("loose.txt", "L");
+    h.start();
+    h.settle().await;
+    assert_eq!(h.entry("docs/sub/notes.txt").unwrap().drive_id.as_deref(), Some("root/CloudDrop/docs/sub/notes.txt"));
+    let sessions = h.stats().0;
+
+    std::fs::rename(h.path("docs"), h.path("papers")).unwrap();
+    std::fs::rename(h.path("loose.txt"), h.path("papers/sub/loose-moved.txt")).unwrap();
+    h.settle().await;
+    assert_eq!(
+        h.cloud_tree(),
+        tree(&[
+            ("papers/", ""),
+            ("papers/report.pdf", "R"),
+            ("papers/sub/", ""),
+            ("papers/sub/loose-moved.txt", "L"),
+            ("papers/sub/notes.txt", "N"),
+        ])
+    );
+    assert_eq!(h.stats().0, sessions, "renames must not re-upload");
+    let notes = h.entry("papers/sub/notes.txt").unwrap();
+    assert_eq!(notes.drive_id.as_deref(), Some("root/CloudDrop/papers/sub/notes.txt"), "ids beneath were rewritten");
+    assert_eq!(notes.cloud_parent.as_deref(), Some("root/CloudDrop/papers/sub"));
+    assert_eq!(h.state("papers/sub/notes.txt"), Some(State::Synced));
+
+    // The new ids work: an edit replaces the same file, and freeing finds it.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    h.write("papers/sub/notes.txt", "N2");
+    h.settle().await;
+    assert_eq!(h.cloud("papers/sub/notes.txt").unwrap().revisions.len(), 2);
+    let report = h.free(&["papers/report.pdf"]).await.unwrap();
+    assert_eq!(report.freed_files, 1, "{report:?}");
+    h.stop().await;
+}
+
+// Not on Windows: a local name can't contain `:` or `?` there, and `Report.txt` and
+// `report.txt` are the same file.
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread")]
+async fn forbidden_characters_and_case_only_clashes() {
+    let caps = Capabilities { forbidden_chars: ":?", case_insensitive: true, ..drive_caps() };
+    let mut h = Harness::with_caps(caps, |_| {}).await;
+    {
+        let mut st = h.mock.lock().unwrap();
+        st.forbidden = ":?".into();
+        st.case_insensitive = true;
+    }
+    h.write("a:b?.txt", "colon");
+    h.write("Report.txt", "upper");
+    h.write("report.txt", "lower");
+    h.start();
+    h.settle().await;
+    let mut t = h.cloud_tree();
+    t.sort();
+    assert_eq!(t, tree(&[("Report.txt", "upper"), ("a：b？.txt", "colon"), ("report (2).txt", "lower")]));
+    assert_eq!(h.entry("a:b?.txt").unwrap().cloud_name.as_deref(), Some("a：b？.txt"));
+    assert_eq!(h.entry("report.txt").unwrap().cloud_name.as_deref(), Some("report (2).txt"));
+    assert!(h.idle() && h.db.errors(10).unwrap().is_empty());
+
+    // Renames map names the same way; restarts leave the chosen names alone.
+    std::fs::rename(h.path("a:b?.txt"), h.path("c:d.txt")).unwrap();
+    h.settle().await;
+    assert!(h.cloud("c：d.txt").is_some_and(|i| i.content == b"colon"));
+    h.stop().await;
+    let before = h.stats();
+    h.lose_db();
+    h.start();
+    h.settle().await;
+    assert_eq!(h.stats(), before, "adopted by their cloud names, nothing uploaded again");
+    assert_eq!(h.cloud_tree().len(), 3);
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generic_oauth_sign_in_has_no_client_secret() {
+    use clouddrop::oauth::{OAuthClient, TokenFile, login};
+    static APP: clouddrop::remote::OAuthApp = clouddrop::remote::OAuthApp {
+        auth_url: "https://unused.example/auth",
+        token_url: "https://unused.example/token",
+        scopes: &["files", "offline_access"],
+        extra_auth_params: &[("token_access_type", "offline")],
+        redirect_port: None,
+    };
+    let h = Harness::new().await;
+    let base = h.mock.lock().unwrap().base.clone();
+    let client = OAuthClient {
+        auth_url: format!("{base}/auth"),
+        token_url: format!("{base}/token"),
+        ..OAuthClient::new(&APP, "public-client")
+    };
+    let token_file = h.data.join("token-example.json");
+    login(&client, &token_file, |url| {
+        let url = url::Url::parse(url).unwrap();
+        let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!((q["scope"].as_str(), q["token_access_type"].as_str()), ("files offline_access", "offline"));
+        let redirect = format!("{}/?code=abc&state={}", q["redirect_uri"], q["state"]);
+        tokio::spawn(async move { reqwest::get(redirect).await.unwrap() });
+    })
+    .await
+    .unwrap();
+    let tok: clouddrop::auth::Token = serde_json::from_str(&read(&token_file)).unwrap();
+    assert_eq!(tok.refresh_token, "good-refresh");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    // The token file refreshes with the refresh_token grant, still without a secret.
+    let tokens = TokenFile::new(reqwest::Client::new(), &client, token_file.clone());
+    let fresh = tokens.refresh().await.unwrap();
+    assert!(!fresh.is_empty());
+    let forms = h.mock.lock().unwrap().token_forms.clone();
+    assert_eq!(forms.len(), 2);
+    assert_eq!(forms[0]["grant_type"], "authorization_code");
+    assert!(forms[0].contains_key("code_verifier"));
+    assert_eq!(forms[1]["grant_type"], "refresh_token");
+    assert!(forms.iter().all(|f| f["client_id"] == "public-client" && !f.contains_key("client_secret")));
 }

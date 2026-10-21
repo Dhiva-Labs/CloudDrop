@@ -54,12 +54,21 @@ pub struct PlainStore;
 
 impl LocalStore for PlainStore {}
 
-/// The store for this platform.
+/// The store for this platform, for the folder of the connection being worked on.
 pub fn platform() -> Arc<dyn LocalStore> {
+    match crate::config::Config::load() {
+        Ok(cfg) => for_folder(&cfg.sync_dir),
+        Err(_) => Arc::new(PlainStore),
+    }
+}
+
+/// The store for a sync folder: placeholders where it is a File Explorer cloud folder (Windows),
+/// plain files otherwise.
+pub fn for_folder(_dir: &std::path::Path) -> Arc<dyn LocalStore> {
     #[cfg(windows)]
     {
-        if let Some(store) = crate::winstore::WinStore::new() {
-            return Arc::new(store);
+        if crate::winstore::is_sync_root(_dir) {
+            return Arc::new(crate::winstore::WinStore);
         }
     }
     Arc::new(PlainStore)

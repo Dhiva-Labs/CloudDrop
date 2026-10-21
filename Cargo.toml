@@ -1,6 +1,6 @@
 [package]
 name = "clouddrop"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Upload-only Google Drive folder for Linux: daemon and CLI"
 license = "MIT"
@@ -8,9 +8,14 @@ repository = "https://github.com/Dhiva-Labs/CloudDrop"
 homepage = "https://github.com/Dhiva-Labs/CloudDrop"
 
 [dependencies]
+# MEGA (src/mega.rs): AES for its end-to-end encryption, PBKDF2 for its sign-in, and
+# big integers for the one RSA step of a sign-in.
+aes = "0.9.3"
 anyhow = "1.0.104"
 base64 = "0.23.1"
 bytes = "1.12.1"
+# Dates in keep-aside names ("x (replaced 2026-10-21).txt"); already built for russh-sftp.
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 clap = { version = "4.6.7", features = ["derive"] }
 dirs = "7.0.0"
 futures-util = "0.3.34"
@@ -20,11 +25,17 @@ md-5 = "0.11.0"
 mime_guess = "2.0.5"
 notify = "8.2.0"
 notify-rust = "4.18.2"
+num-bigint = "0.5.1"
+pbkdf2 = "0.13.0"
 rand = "0.10.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream", "http2", "query", "form"] }
+# SFTP: pure-Rust SSH on the aws-lc-rs backend reqwest already builds (no compression, so no flate2).
+russh = { version = "0.64.1", default-features = false, features = ["aws-lc-rs", "rsa"] }
+russh-sftp = "3.0.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha1 = "0.11"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["full"] }

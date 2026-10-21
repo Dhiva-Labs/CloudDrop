@@ -1,10 +1,12 @@
-//! Settings tab: account, folders, upload behaviour, startup.
+//! Settings tab: appearance, account, folders, upload behaviour, startup.
 
 use crate::ops::Ops;
+use crate::providers::Choice;
 use crate::snapshot::Snapshot;
-use crate::{fsops, rt, ui};
+use crate::{cli, fsops, rt, ui};
 use adw::prelude::*;
-use clouddrop::actions;
+use clouddrop::connections;
+use clouddrop::config;
 use clouddrop::control;
 use clouddrop::db::Kind;
 use clouddrop::util;
@@ -42,20 +44,83 @@ pub fn keep_summary(n: usize) -> String {
     }
 }
 
+/// The theme choices, in the order of `config::THEMES`.
+pub const THEME_LABELS: [&str; 3] = ["Follow System", "Light", "Dark"];
+
+/// "teal" → "Teal"; "default" → "System Default".
+pub fn accent_label(name: &str) -> String {
+    if name == "default" {
+        return "System Default".into();
+    }
+    let mut c = name.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// The page's sentences that name the provider.
+pub struct Texts {
+    pub space: String,
+    pub auto_free: String,
+    pub account_group: &'static str,
+    pub switch: String,
+}
+
+pub fn texts(p: &Choice) -> Texts {
+    let cloud = &p.name;
+    Texts {
+        space: format!("Keep this computer light: uploaded files can be removed here and stay in {cloud}."),
+        auto_free: format!(
+            "Local copies are removed only after CloudDrop checks\n{cloud} has an identical copy{}",
+            if p.verify_by_download { ", by downloading it once" } else { "" }
+        ),
+        account_group: if p.is_google() { "Google Account" } else { "Account" },
+        switch: format!("Switch to another cloud. Everything is uploaded again; nothing is deleted from {cloud}."),
+    }
+}
+
+/// "Switch to another cloud?": what switching does to the files in `cloud`.
+pub fn switch_dialog_text(cloud: &str) -> (&'static str, String) {
+    (
+        "Switch to another cloud?",
+        format!(
+            "CloudDrop will upload everything in your CloudDrop folder again, to the cloud you choose next. \
+             Nothing is deleted from {cloud}. Files that are only in {cloud} (freed from this computer) stay \
+             there, but CloudDrop stops listing them."
+        ),
+    )
+}
+
+/// "Remove this folder?": what removing a connection does, and doesn't.
+pub fn remove_dialog_text(folder: &str, cloud: &str) -> (&'static str, String) {
+    (
+        "Remove this folder from CloudDrop?",
+        format!(
+            "CloudDrop stops uploading {folder} to {cloud} and forgets what it uploaded from it. \
+             Nothing is deleted: the folder keeps its files, and {cloud} keeps everything uploaded so far."
+        ),
+    )
+}
+
 pub struct SettingsPage {
     pub page: adw::PreferencesPage,
     ops: Rc<Ops>,
+    theme: adw::ComboRow,
+    accents: Vec<(&'static str, gtk::ToggleButton)>,
+    space: adw::PreferencesGroup,
     auto_free: adw::ComboRow,
     auto_opts: RefCell<Vec<Option<u32>>>,
     keep: adw::ExpanderRow,
     keep_rows: RefCell<Vec<adw::ActionRow>>,
     keep_add: adw::ActionRow,
     shown_keep: RefCell<Option<Vec<String>>>,
+    account_group: adw::PreferencesGroup,
     account: adw::ActionRow,
+    account_icon: gtk::Image,
     sign_in: gtk::Button,
     sign_out: gtk::Button,
+    switch: adw::ActionRow,
     folder: adw::ActionRow,
     drive: adw::ActionRow,
+    open_drive: gtk::Button,
     parallel: adw::SpinRow,
     settle: adw::SpinRow,
     notifications: adw::SwitchRow,
@@ -73,6 +138,33 @@ impl SettingsPage {
         let page = adw::PreferencesPage::new();
         let win = ops.win.clone();
         let hooks = ops.hooks().clone();
+
+        let appearance = adw::PreferencesGroup::builder().title("Appearance").build();
+        let theme = adw::ComboRow::builder()
+            .title("Style")
+            .model(&gtk::StringList::new(&THEME_LABELS))
+            .build();
+        theme.add_prefix(&gtk::Image::from_icon_name("weather-clear-night-symbolic"));
+        let accent_row = adw::ActionRow::builder().title("Accent color").build();
+        accent_row.add_prefix(&gtk::Image::from_icon_name("applications-graphics-symbolic"));
+        let swatches = gtk::Box::builder().spacing(8).valign(gtk::Align::Center).build();
+        let mut accents: Vec<(&'static str, gtk::ToggleButton)> = Vec::new();
+        for name in config::ACCENTS {
+            let b = gtk::ToggleButton::builder()
+                .tooltip_text(accent_label(name))
+                .css_classes(["accent-swatch", name])
+                .build();
+            b.update_property(&[gtk::accessible::Property::Label(&accent_label(name))]);
+            if let Some((_, first)) = accents.first() {
+                b.set_group(Some(first));
+            }
+            swatches.append(&b);
+            accents.push((name, b));
+        }
+        accent_row.add_suffix(&swatches);
+        appearance.add(&theme);
+        appearance.add(&accent_row);
+        page.add(&appearance);
 
         let space = adw::PreferencesGroup::builder()
             .title("Space Saving")
@@ -99,7 +191,8 @@ impl SettingsPage {
 
         let account_group = adw::PreferencesGroup::builder().title("Google Account").build();
         let account = adw::ActionRow::builder().title("Google Drive").build();
-        account.add_prefix(&gtk::Image::from_icon_name("avatar-default-symbolic"));
+        let account_icon = gtk::Image::from_icon_name("avatar-default-symbolic");
+        account.add_prefix(&account_icon);
         let sign_in = gtk::Button::builder().label("Sign In Again").valign(gtk::Align::Center).build();
         let sign_out = gtk::Button::builder()
             .label("Sign Out")
@@ -109,6 +202,11 @@ impl SettingsPage {
         account.add_suffix(&sign_in);
         account.add_suffix(&sign_out);
         account_group.add(&account);
+        let switch = adw::ActionRow::builder().title("Upload somewhere else").build();
+        switch.add_prefix(&gtk::Image::from_icon_name("view-refresh-symbolic"));
+        let switch_btn = gtk::Button::builder().label("Switch Provider…").valign(gtk::Align::Center).build();
+        switch.add_suffix(&switch_btn);
+        account_group.add(&switch);
         page.add(&account_group);
 
         let folders = adw::PreferencesGroup::builder().title("Folders").build();
@@ -120,6 +218,24 @@ impl SettingsPage {
         drive.add_suffix(&open_drive);
         folders.add(&folder);
         folders.add(&drive);
+        let add_folder = adw::ActionRow::builder()
+            .title("Upload another folder")
+            .subtitle("Each folder can go to a cloud of its own")
+            .build();
+        let add_btn = gtk::Button::builder().label("Add Another Folder…").valign(gtk::Align::Center).build();
+        add_folder.add_suffix(&add_btn);
+        folders.add(&add_folder);
+        let remove_folder = adw::ActionRow::builder()
+            .title("Stop uploading this folder")
+            .subtitle("Nothing is deleted here or in the cloud")
+            .build();
+        let remove_btn = gtk::Button::builder()
+            .label("Remove This Folder…")
+            .valign(gtk::Align::Center)
+            .css_classes(["destructive-action"])
+            .build();
+        remove_folder.add_suffix(&remove_btn);
+        folders.add(&remove_folder);
         page.add(&folders);
 
         let uploading = adw::PreferencesGroup::builder().title("Uploading").build();
@@ -172,17 +288,24 @@ impl SettingsPage {
         let me = Rc::new(SettingsPage {
             page,
             ops,
+            theme,
+            accents,
+            space,
             auto_free,
             auto_opts: RefCell::new(AUTO_FREE_PRESETS.to_vec()),
             keep,
             keep_rows: RefCell::default(),
             keep_add: keep_add.clone(),
             shown_keep: RefCell::default(),
+            account_group,
             account,
+            account_icon,
             sign_in: sign_in.clone(),
             sign_out: sign_out.clone(),
+            switch,
             folder,
             drive,
+            open_drive: open_drive.clone(),
             parallel,
             settle,
             notifications,
@@ -193,6 +316,26 @@ impl SettingsPage {
             filled: Cell::new(false),
             last: RefCell::default(),
         });
+        {
+            let me2 = Rc::downgrade(&me);
+            me.theme.connect_selected_notify(move |row| {
+                if let Some(me) = me2.upgrade()
+                    && let Some(name) = config::THEMES.get(row.selected() as usize)
+                {
+                    me.save_appearance("theme", name);
+                }
+            });
+        }
+        for (name, b) in &me.accents {
+            let (name, me2): (&'static str, _) = (name, Rc::downgrade(&me));
+            b.connect_toggled(move |b| {
+                if let Some(me) = me2.upgrade()
+                    && b.is_active()
+                {
+                    me.save_appearance("accent", name);
+                }
+            });
+        }
         {
             let me2 = Rc::downgrade(&me);
             me.auto_free.connect_selected_notify(move |row| {
@@ -223,21 +366,106 @@ impl SettingsPage {
         {
             let (win, hooks, me2) = (win.clone(), hooks.clone(), Rc::downgrade(&me));
             sign_out.connect_clicked(move |_| {
+                let Some(provider) = me2.upgrade().map(|m| m.ops.provider()) else {
+                    return;
+                };
                 let d = adw::AlertDialog::new(
                     Some("Sign out?"),
-                    Some("Uploads stop until you sign in again. Nothing is removed from Google Drive or this computer."),
+                    Some(&format!(
+                        "Uploads stop until you sign in again. Nothing is removed from {} or this computer.",
+                        provider.name
+                    )),
                 );
                 d.add_response("cancel", "Cancel");
                 d.add_response("out", "Sign Out");
                 d.set_response_appearance("out", adw::ResponseAppearance::Destructive);
                 let (hooks, me2) = (hooks.clone(), me2.clone());
                 d.connect_response(Some("out"), move |_, _| {
-                    if let Err(e) = control::sign_out()
-                        && let Some(me) = me2.upgrade()
-                    {
-                        me.ops.toast(&format!("{e:#}"));
+                    if provider.is_google() {
+                        // Its engine stops too; the background service starts it again after sign-in.
+                        let conn = connections::current();
+                        if conn.live_status().is_some()
+                            && let Ok(db) = conn.open_db()
+                        {
+                            let _ = control::request_stop(&db);
+                        }
+                        if let Err(e) = control::sign_out()
+                            && let Some(me) = me2.upgrade()
+                        {
+                            me.ops.toast(&format!("{e:#}"));
+                        }
+                        (hooks.refresh)();
+                        return;
                     }
-                    (hooks.refresh)();
+                    // The engine knows where each provider keeps its sign-in.
+                    let (hooks, me2) = (hooks.clone(), me2.clone());
+                    cli::run_all(vec![cli::args(&["logout"])], move |res| {
+                        if let Err(e) = res
+                            && let Some(me) = me2.upgrade()
+                        {
+                            me.ops.toast(&format!("{e:#}"));
+                        }
+                        (hooks.refresh)();
+                    });
+                });
+                d.present(Some(&win));
+            });
+        }
+        {
+            let (win, hooks, me2) = (win.clone(), hooks.clone(), Rc::downgrade(&me));
+            switch_btn.connect_clicked(move |_| {
+                let Some(provider) = me2.upgrade().map(|m| m.ops.provider()) else {
+                    return;
+                };
+                let (heading, body) = switch_dialog_text(&provider.name);
+                let d = adw::AlertDialog::new(Some(heading), Some(&body));
+                d.add_response("cancel", "Cancel");
+                d.add_response("choose", "Choose Cloud…");
+                d.set_response_appearance("choose", adw::ResponseAppearance::Suggested);
+                let hooks = hooks.clone();
+                d.connect_response(Some("choose"), move |_, _| (hooks.setup)(crate::setup::Start::Switch));
+                d.present(Some(&win));
+            });
+        }
+        {
+            let hooks = hooks.clone();
+            add_btn.connect_clicked(move |_| (hooks.setup)(crate::setup::Start::AddFolder));
+        }
+        {
+            let (win, hooks, me2) = (win.clone(), hooks.clone(), Rc::downgrade(&me));
+            remove_btn.connect_clicked(move |_| {
+                let Some(me) = me2.upgrade() else {
+                    return;
+                };
+                let Some((folder, cloud)) = me
+                    .last
+                    .borrow()
+                    .as_ref()
+                    .and_then(|s| s.cfg.as_ref().map(|c| (ui::pretty_path(&c.sync_dir), s.provider.name.clone())))
+                else {
+                    return;
+                };
+                let (heading, body) = remove_dialog_text(&folder, &cloud);
+                let d = adw::AlertDialog::new(Some(heading), Some(&body));
+                d.add_response("cancel", "Cancel");
+                d.add_response("remove", "Remove Folder");
+                d.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+                let (hooks, me2) = (hooks.clone(), me2.clone());
+                d.connect_response(Some("remove"), move |_, _| {
+                    let conn = connections::current();
+                    let (hooks, me2, folder) = (hooks.clone(), me2.clone(), folder.clone());
+                    rt::blocking(
+                        move || connections::remove(&conn, std::time::Duration::from_secs(10)),
+                        move |res| {
+                            if let Some(me) = me2.upgrade() {
+                                me.ops.toast(&match res {
+                                    Ok(()) => format!("{folder} is no longer uploaded; nothing was deleted"),
+                                    Err(e) => format!("{e:#}"),
+                                });
+                            }
+                            (hooks.refresh)();
+                        },
+                    );
                 });
                 d.present(Some(&win));
             });
@@ -253,8 +481,14 @@ impl SettingsPage {
         {
             let me2 = Rc::downgrade(&me);
             open_drive.connect_clicked(move |_| {
-                if let Some(id) = me2.upgrade().and_then(|m| m.last.borrow().as_ref().and_then(|s| s.root_id.clone())) {
-                    control::open_uri(&actions::drive_url(Kind::Dir, &id));
+                if let Some(m) = me2.upgrade()
+                    && let Some(s) = m.last.borrow().as_ref()
+                    && let Some(id) = &s.root_id
+                {
+                    let provider = s.cfg.as_ref().map(|c| c.provider).unwrap_or_default();
+                    if let Some(url) = provider.web_url(Kind::Dir, id) {
+                        control::open_uri(&url);
+                    }
                 }
             });
         }
@@ -326,6 +560,20 @@ impl SettingsPage {
         self.ops.edit_config("Settings saved", edit);
     }
 
+    /// Saves the theme or accent and shows it right away; the upload service doesn't need it.
+    /// Saves the theme or the accent and shows it right away; the upload service doesn't need it.
+    fn save_appearance(&self, key: &str, value: &str) {
+        if self.filling.get() {
+            return;
+        }
+        // Only the key that changed is written, and the look is shown from the file just saved:
+        // the window's copy of the settings is up to a second old, and may not have the other key's
+        // latest value yet.
+        if let Some(cfg) = self.ops.edit_appearance(key, value) {
+            ui::apply_appearance(cfg.theme_name(), cfg.accent_name());
+        }
+    }
+
     fn restart_now(self: &Rc<Self>) {
         self.ops.restart_now("Upload service restarted");
     }
@@ -377,7 +625,7 @@ impl SettingsPage {
             let parent = util::parent_of(rel);
             let row = adw::ActionRow::builder()
                 .title(util::name_of(rel))
-                .subtitle(if parent.is_empty() { "CloudDrop".to_string() } else { parent.to_string() })
+                .subtitle(if parent.is_empty() { ui::root_name() } else { parent.to_string() })
                 .use_markup(false)
                 .build();
             row.add_prefix(&gtk::Image::from_icon_name("folder-symbolic"));
@@ -398,17 +646,39 @@ impl SettingsPage {
         self.keep.set_subtitle(&keep_summary(list.len()));
     }
 
+    /// The window shows another connection: its settings are filled in afresh.
+    pub fn reset(&self) {
+        self.filled.set(false);
+        self.shown_keep.borrow_mut().take();
+    }
+
     pub fn refresh(self: &Rc<Self>, s: &Snapshot) {
+        let p = &s.provider;
+        let t = texts(p);
+        self.space.set_description(Some(&t.space));
+        self.auto_free.set_subtitle(&t.auto_free);
+        self.account_group.set_title(t.account_group);
+        self.account.set_title(&p.name);
+        self.account_icon.set_icon_name(Some(if p.is_google() { "avatar-default-symbolic" } else { p.icon }));
+        self.switch.set_subtitle(&t.switch);
+        self.drive.set_title(&format!("In {}", p.name));
+        self.open_drive.set_tooltip_text(Some(&format!("Open in {}", p.name)));
+        self.open_drive.set_visible(p.can_open_web());
         self.account.set_subtitle(if s.signed_in { "Signed in" } else { "Not signed in" });
         self.sign_in.set_label(if s.signed_in { "Sign In Again" } else { "Sign In" });
         self.sign_out.set_visible(s.signed_in);
         self.service.set_subtitle(if s.daemon.is_some() { "Running" } else { "Not running" });
         if let Some(cfg) = &s.cfg {
             self.folder.set_subtitle(&ui::pretty_path(&cfg.sync_dir));
-            self.drive.set_subtitle(&format!("My Drive → {}", cfg.drive_folder));
+            self.drive.set_subtitle(&format!("{} → {}", p.root_label(), cfg.drive_folder));
             self.sync_space_saving(cfg);
             if !self.filled.get() {
                 self.filling.set(true);
+                let theme = config::THEMES.iter().position(|t| *t == cfg.theme_name()).unwrap_or(0);
+                self.theme.set_selected(theme as u32);
+                for (name, b) in &self.accents {
+                    b.set_active(*name == cfg.accent_name());
+                }
                 self.parallel.set_value(cfg.parallel_uploads as f64);
                 self.settle.set_value(cfg.settle_secs as f64);
                 self.notifications.set_active(cfg.notifications);
@@ -446,7 +716,39 @@ impl SettingsPage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_texts() {
+        let g = texts(&Choice::of(clouddrop::remote::Provider::GoogleDrive));
+        assert_eq!(g.space, "Keep this computer light: uploaded files can be removed here and stay in Google Drive.");
+        assert_eq!(g.auto_free, "Local copies are removed only after CloudDrop checks\nGoogle Drive has an identical copy");
+        assert_eq!(g.account_group, "Google Account");
+        let dav = crate::providers::fakes().into_iter().find(|c| c.id == "webdav").unwrap();
+        let w = texts(&dav);
+        assert_eq!(w.auto_free, "Local copies are removed only after CloudDrop checks\nWebDAV has an identical copy, by downloading it once");
+        assert_eq!(w.account_group, "Account");
+        assert_eq!(w.switch, "Switch to another cloud. Everything is uploaded again; nothing is deleted from WebDAV.");
+        let (h, b) = switch_dialog_text("Google Drive");
+        assert_eq!(h, "Switch to another cloud?");
+        assert_eq!(
+            b,
+            "CloudDrop will upload everything in your CloudDrop folder again, to the cloud you choose next. \
+             Nothing is deleted from Google Drive. Files that are only in Google Drive (freed from this computer) \
+             stay there, but CloudDrop stops listing them."
+        );
+    }
+
     use super::*;
+
+    #[test]
+    fn removing_a_folder_says_nothing_is_deleted() {
+        let (h, b) = remove_dialog_text("~/Work", "Nextcloud");
+        assert_eq!(h, "Remove this folder from CloudDrop?");
+        assert_eq!(
+            b,
+            "CloudDrop stops uploading ~/Work to Nextcloud and forgets what it uploaded from it. Nothing is \
+             deleted: the folder keeps its files, and Nextcloud keeps everything uploaded so far."
+        );
+    }
 
     #[test]
     fn auto_free_labels() {

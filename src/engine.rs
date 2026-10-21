@@ -5,11 +5,15 @@
 //! `free`/`restore` edit rows of idle entries only). Jobs report back through a
 //! channel; an entry renamed or deleted while its job runs is tracked in
 //! `inflight`, so results always land on the entry's current path.
+//!
+//! Provider differences come from [`Capabilities`]: the hash kind (or verify by download),
+//! ids that are paths (a moved folder moves the ids beneath it), and name rules (forbidden
+//! characters, names that differ only in case).
 
 use crate::config::Config;
 use crate::control::{self, DaemonStatus, Phase, Upload};
 use crate::db::{ActivityKind, Db, Entry, Kind, State};
-use crate::drive::{Drive, DriveError};
+use crate::remote::{Capabilities, Provider, Remote, RemoteError, SignIn};
 use crate::jobs::{self, FreeSkip, JobEvent, JobOutcome, JobSpec};
 use crate::notifier::Notifier;
 use crate::store::LocalStore;
@@ -40,6 +44,10 @@ struct Inflight {
     placement_only: bool,
     /// Checking a synced file before freeing its local copy (not an upload).
     free: bool,
+    /// A free check that downloads the cloud copy to prove it (no hash from the provider).
+    verifying: bool,
+    /// (cloud parent id, name) the job gives the item, so others there don't take the name.
+    target: Option<(String, String)>,
     is_file: bool,
     /// Cancelled by a pause; its entry is re-queued once the task has stopped.
     aborted: bool,
@@ -61,7 +69,9 @@ pub struct Engine {
     cfg: Config,
     root: PathBuf,
     db: Arc<Db>,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
+    provider: Provider,
+    caps: Capabilities,
     ignore: GlobSet,
     root_id: String,
     /// Paths with recent filesystem events, processed once quiet for `settle_secs`.
@@ -72,6 +82,8 @@ pub struct Engine {
     data_dir: PathBuf,
     token_path: PathBuf,
     notifier: Notifier,
+    /// The connection's name in notifications (None: the default connection).
+    label: Option<String>,
     /// Sign-in problem: (message, token file mtime then, when).
     paused: Option<(String, Option<SystemTime>, Instant)>,
     /// Paused from the app/CLI (meta "paused").
@@ -106,6 +118,105 @@ fn backoff_ms(attempts: i64) -> i64 {
     secs.min(900) * 1000
 }
 
+/// How long to wait before retrying after `err`: the backoff, or longer if the provider
+/// asked for that (`Retry-After`).
+fn retry_delay_ms(err: &RemoteError, attempts: i64) -> i64 {
+    let asked = match err {
+        RemoteError::RateLimited { retry_after: Some(secs), .. } => (*secs).min(24 * 3600) as i64 * 1000,
+        _ => 0,
+    };
+    backoff_ms(attempts).max(asked)
+}
+
+/// What to tell people about a cloud error, naming the provider (Google Drive's wording is
+/// as it always was).
+pub fn describe(err: &RemoteError, provider: Provider) -> String {
+    let name = provider.display_name();
+    match err {
+        RemoteError::Auth(m) => {
+            let who = match provider.info().sign_in {
+                SignIn::Google => "Google",
+                _ => name,
+            };
+            format!("{who} sign-in needed: {m}")
+        }
+        RemoteError::NotFound => format!("not found in {name}"),
+        RemoteError::Quota(m) if m.trim().is_empty() => format!("{name} storage is full"),
+        RemoteError::Quota(m) => format!("{name} storage is full: {m}"),
+        other => other.to_string(),
+    }
+}
+
+/// The provider's name in short phrases ("in Drive"): Drive for Google Drive, as before.
+pub fn short_name(provider: Provider) -> &'static str {
+    if provider == Provider::GoogleDrive { "Drive" } else { provider.display_name() }
+}
+
+/// `name` without the characters a provider forbids: each becomes its full-width look-alike
+/// (`:` → `：`, `?` → `？`), a control character its symbol (`\n` → `␊`), anything else `_`.
+/// Look-alikes keep names readable and tell the originals apart.
+/// The upload chunk for a provider: the configured size rounded down to a multiple of what the
+/// provider requires (OneDrive 320 KiB, Dropbox 4 MiB…), and at least one unit.
+pub fn upload_chunk(configured: usize, unit: usize) -> usize {
+    let unit = unit.max(1);
+    (configured - configured % unit).max(unit)
+}
+
+pub fn cloud_safe_name(name: &str, forbidden: &str) -> String {
+    if !name.contains(|c| forbidden.contains(c)) {
+        return name.to_string();
+    }
+    name.chars()
+        .map(|c| {
+            if !forbidden.contains(c) {
+                return c;
+            }
+            let alike = match c {
+                '!'..='~' => char::from_u32(c as u32 - 0x21 + 0xFF01),
+                '\0'..='\x1f' => char::from_u32(c as u32 + 0x2400),
+                '\x7f' => Some('\u{2421}'),
+                _ => None,
+            };
+            alike.filter(|a| !forbidden.contains(*a)).unwrap_or('_')
+        })
+        .collect()
+}
+
+/// `name` is `base` or `base` numbered by the "name (2).ext" rule.
+fn is_numbered_of(name: &str, base: &str) -> bool {
+    if name == base {
+        return true;
+    }
+    let (stem, ext) = match base.rfind('.') {
+        Some(i) if i > 0 => (&base[..i], &base[i..]),
+        _ => (base, ""),
+    };
+    name.strip_prefix(stem)
+        .and_then(|r| r.strip_suffix(ext))
+        .and_then(|r| r.strip_prefix(" ("))
+        .and_then(|r| r.strip_suffix(')'))
+        .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()) && n.parse::<u32>().is_ok_and(|n| n >= 2))
+}
+
+/// The cloud name for an item whose safe name is `base`, among the names `taken` in the same
+/// cloud folder: `current` while it is still `base` or a numbered `base` and free, otherwise
+/// the first free one of `base`, "base (2)", "base (3)", … Names that differ only in case
+/// clash where the provider ignores case.
+pub fn choose_cloud_name(base: &str, current: Option<&str>, taken: &[String], case_insensitive: bool) -> String {
+    let key = |s: &str| if case_insensitive { s.to_lowercase() } else { s.to_string() };
+    let taken: HashSet<String> = taken.iter().map(|t| key(t)).collect();
+    if let Some(c) = current
+        && is_numbered_of(c, base)
+        && !taken.contains(&key(c))
+    {
+        return c.to_string();
+    }
+    std::iter::once(base.to_string())
+        .chain((2..).map(|n| util::numbered_name(base, n)))
+        .find(|n| !taken.contains(&key(n)))
+        .expect("unbounded")
+}
+
 fn build_ignore(patterns: &[String]) -> Result<GlobSet> {
     let mut b = GlobSetBuilder::new();
     for p in patterns {
@@ -116,9 +227,9 @@ fn build_ignore(patterns: &[String]) -> Result<GlobSet> {
     Ok(b.build()?)
 }
 
-/// The Drive copy can't be trusted: upload the local file again. If Drive still has
+/// The cloud copy can't be trusted: upload the local file again. If the cloud still has
 /// a (different) file, the local content becomes its new version and the other
-/// version is pinned so it is never purged; otherwise a new Drive file is made.
+/// version is kept (pinned, or copied aside) so it is never lost; otherwise a new file is made.
 pub fn mark_for_reupload(e: &mut Entry, drive_file_exists: bool) {
     if drive_file_exists {
         e.pin_prev = true;
@@ -127,7 +238,7 @@ pub fn mark_for_reupload(e: &mut Entry, drive_file_exists: bool) {
         e.cloud_name = None;
         e.cloud_parent = None;
     }
-    e.md5 = None;
+    e.set_content_hash(None);
     e.uploaded_at = None;
     e.requeue();
 }
@@ -143,6 +254,8 @@ pub struct RunOptions {
     pub config_file: Option<PathBuf>,
     /// How local copies are represented (plain files, or Windows placeholders).
     pub store: Arc<dyn LocalStore>,
+    /// The connection's name for notification titles (None: the default connection).
+    pub label: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -150,54 +263,77 @@ impl Default for RunOptions {
         Self {
             config_file: None,
             store: crate::store::platform(),
+            label: None,
         }
     }
 }
 
-/// Runs the daemon until `shutdown` flips to true. `data_dir` holds token.json and status.json.
+/// Runs the daemon until `shutdown` flips to true. `data_dir` holds the sign-in, status.json
+/// and temporary verify downloads.
 pub async fn run(
     cfg: Config,
     db: Arc<Db>,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
     data_dir: PathBuf,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    run_with_options(cfg, RunOptions::default(), db, drive, data_dir, shutdown).await
+    run_with_options(cfg, RunOptions::default(), db, remote, data_dir, shutdown).await
 }
 
 pub async fn run_with_options(
     cfg: Config,
     opts: RunOptions,
     db: Arc<Db>,
-    drive: Arc<Drive>,
+    remote: Arc<Remote>,
+    data_dir: PathBuf,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let caps = remote.caps().clone();
+    run_with_caps(cfg, opts, caps, db, remote, data_dir, shutdown).await
+}
+
+/// [`run_with_options`] as if the provider had `caps`, so tests can apply another provider's
+/// rules (no hash, ids that are paths, name rules) to the Google Drive mock.
+pub async fn run_with_caps(
+    cfg: Config,
+    opts: RunOptions,
+    caps: Capabilities,
+    db: Arc<Db>,
+    remote: Arc<Remote>,
     data_dir: PathBuf,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let RunOptions { config_file, store } = opts;
+    let RunOptions { config_file, store, label } = opts;
     let root = cfg.sync_dir.clone();
     std::fs::create_dir_all(&root)
         .with_context(|| format!("cannot create {}", root.display()))?;
     db.bind_root(&root)?;
+    db.bind_provider(cfg.provider)?;
     let _ = control::clear_stop(&db); // a stale request must not stop this run
     let reset = db.reset_uploading()?;
     if reset > 0 {
         tracing::info!("resuming {reset} interrupted uploads");
     }
+    jobs::remove_stale_downloads(&data_dir);
 
     let (job_tx, mut job_rx) = mpsc::unbounded_channel();
+    let remote_provider = remote.provider();
     let mut eng = Engine {
         ignore: build_ignore(&cfg.ignore)?,
-        notifier: Notifier::new(cfg.notifications),
+        notifier: Notifier::for_connection(cfg.notifications, label.clone()),
+        label,
         root,
         cfg,
         db,
-        drive,
+        provider: remote.provider(),
+        caps,
+        remote,
         root_id: String::new(),
         dirty: HashMap::new(),
         inflight: HashMap::new(),
         next_id: 1,
         job_tx,
-        token_path: data_dir.join("token.json"),
+        token_path: control::sign_in_file(remote_provider, &data_dir),
         data_dir,
         paused: None,
         user_paused: false,
@@ -280,19 +416,20 @@ impl Engine {
             match self.try_root().await {
                 Ok(id) => return Some(id),
                 Err(e) => {
-                    let msg = e.to_string();
-                    tracing::warn!("Drive folder unavailable: {msg}");
-                    if msg != last_msg && !matches!(e, DriveError::Transient(_)) {
+                    let msg = describe(&e, self.provider);
+                    tracing::warn!("cloud folder unavailable: {msg}");
+                    if msg != last_msg && !e.is_transient() {
                         self.notifier.send("CloudDrop is paused", &msg);
                     }
                     let phase = match e {
-                        DriveError::Auth(_) => Phase::NeedsSignIn,
-                        DriveError::Transient(_) => Phase::Offline,
+                        RemoteError::Auth(_) => Phase::NeedsSignIn,
+                        _ if e.is_transient() => Phase::Offline,
                         _ => Phase::DriveFolderMissing,
                     };
                     last_msg = msg.clone();
                     let wait = match e {
-                        DriveError::Transient(_) | DriveError::Auth(_) => 30,
+                        RemoteError::Auth(_) => 30,
+                        _ if e.is_transient() => (retry_delay_ms(&e, 1) / 1000).max(30),
                         _ => 120,
                     };
                     // Retry early when `clouddrop login` writes a new token.
@@ -312,29 +449,31 @@ impl Engine {
         }
     }
 
-    async fn try_root(&self) -> Result<String, DriveError> {
+    async fn try_root(&self) -> Result<String, RemoteError> {
+        let provider = self.provider.display_name();
         if let Ok(Some(id)) = self.db.meta_get("root_id") {
-            return match self.drive.get(&id).await {
+            return match self.remote.get(&id).await {
                 Ok(m) if !m.trashed => Ok(id),
-                Ok(_) => Err(DriveError::Permanent(format!(
-                    "the \"{}\" folder is in your Google Drive trash — restore it to resume uploads",
+                Ok(_) => Err(RemoteError::Permanent(format!(
+                    "the \"{}\" folder is in your {provider} trash — restore it to resume uploads",
                     self.cfg.drive_folder
                 ))),
-                Err(DriveError::NotFound) => Err(DriveError::Permanent(format!(
-                    "the \"{}\" folder was deleted from Google Drive — run `clouddrop reset-cloud` to upload everything again",
+                Err(RemoteError::NotFound) => Err(RemoteError::Permanent(format!(
+                    "the \"{}\" folder was deleted from {provider} — run `clouddrop reset-cloud` to upload everything again",
                     self.cfg.drive_folder
                 ))),
                 Err(e) => Err(e),
             };
         }
-        let name = &self.cfg.drive_folder;
-        let id = match self.drive.find_child(name, "root", true).await?.into_iter().next() {
+        let name = cloud_safe_name(&self.cfg.drive_folder, self.caps.forbidden_chars);
+        let top = self.remote.top_parent().await?;
+        let id = match self.remote.find_child(&name, &top, true).await?.into_iter().next() {
             Some(existing) => existing.id,
-            None => self.drive.create_folder(name, "root").await?.id,
+            None => self.remote.create_folder(&name, &top).await?.id,
         };
         self.db
             .meta_set("root_id", &id)
-            .map_err(|e| DriveError::Permanent(e.to_string()))?;
+            .map_err(|e| RemoteError::Permanent(e.to_string()))?;
         Ok(id)
     }
 
@@ -381,9 +520,57 @@ impl Engine {
     }
 
     fn placed(&self, e: &Entry) -> bool {
-        e.cloud_name.as_deref() == Some(util::name_of(&e.path))
-            && e.cloud_parent.is_some()
-            && e.cloud_parent == self.parent_drive_id(&e.path)
+        let Some(parent) = self.parent_drive_id(&e.path) else {
+            return false;
+        };
+        e.cloud_parent.as_deref() == Some(parent.as_str())
+            && e.cloud_name.as_deref() == Some(self.cloud_name_for(e, &parent).as_str())
+    }
+
+    /// The name `e` gets in the cloud folder `parent_id`: its local name, with the provider's
+    /// forbidden characters replaced and numbered "name (2).ext" where it would clash with
+    /// another item placed there (or being placed there now).
+    fn cloud_name_for(&self, e: &Entry, parent_id: &str) -> String {
+        let local = util::name_of(&e.path);
+        let caps = &self.caps;
+        if caps.forbidden_chars.is_empty() && !caps.case_insensitive {
+            return local.to_string();
+        }
+        let base = cloud_safe_name(local, caps.forbidden_chars);
+        let mut taken: Vec<String> = self
+            .db
+            .cloud_names_in(parent_id)
+            .unwrap_or_else(|err| {
+                tracing::error!("database read failed for names in {parent_id}: {err}");
+                Vec::new()
+            })
+            .into_iter()
+            .filter(|(p, _)| *p != e.path)
+            .map(|(_, n)| n)
+            .collect();
+        taken.extend(self.inflight.iter().filter(|(p, _)| **p != e.path).filter_map(|(_, j)| {
+            j.target.as_ref().filter(|(pid, _)| pid == parent_id).map(|(_, n)| n.clone())
+        }));
+        let current = e.cloud_name.as_deref().filter(|_| e.cloud_parent.as_deref() == Some(parent_id));
+        choose_cloud_name(&base, current, &taken, caps.case_insensitive)
+    }
+
+    /// Where ids are paths, renaming or moving a folder changes the ids beneath it: nothing
+    /// beneath a folder starts while the folder's job runs, and a folder waits for the jobs
+    /// beneath it.
+    fn waits_for_move(&self, e: &Entry) -> bool {
+        if self.caps.stable_ids {
+            return false;
+        }
+        let mut p = util::parent_of(&e.path);
+        while !p.is_empty() {
+            if self.inflight.contains_key(p) {
+                return true;
+            }
+            p = util::parent_of(p);
+        }
+        let inside = format!("{}/", e.path);
+        e.kind == Kind::Dir && self.inflight.keys().any(|k| k.starts_with(&inside))
     }
 
     /// A path not used by any entry or local file: "x (2).pdf", "x (3).pdf", …
@@ -761,8 +948,12 @@ impl Engine {
                     self.put(&e);
                     self.store.pending(&self.abs(rel));
                 } else if e.state == State::Synced && self.store.free_requested(&self.abs(rel)) {
-                    // "Free up space" in the file manager: same Drive check as always.
-                    self.dispatch(e, String::new(), String::new(), false, true);
+                    // "Free up space" in the file manager: same check as always.
+                    if self.waits_for_move(&e) {
+                        self.dirty.insert(rel.to_string(), Instant::now());
+                    } else {
+                        self.dispatch(e, String::new(), String::new(), false, true);
+                    }
                 }
             }
         }
@@ -892,11 +1083,12 @@ impl Engine {
             }
         };
         if new.sync_dir != self.cfg.sync_dir
+            || new.provider != self.cfg.provider
             || new.drive_folder != self.cfg.drive_folder
             || new.client_id != self.cfg.client_id
             || new.endpoints != self.cfg.endpoints
         {
-            tracing::warn!("folder, Drive folder or Google client changed; restart CloudDrop to apply");
+            tracing::warn!("folder, provider, cloud folder or Google client changed; restart CloudDrop to apply");
         }
         if new.ignore != self.cfg.ignore {
             match build_ignore(&new.ignore) {
@@ -907,7 +1099,7 @@ impl Engine {
                 Err(e) => tracing::warn!("ignore patterns not applied: {e:#}"),
             }
         }
-        self.notifier = Notifier::new(new.notifications);
+        self.notifier = Notifier::for_connection(new.notifications, self.label.clone());
         if new.auto_free_days != self.cfg.auto_free_days || new.keep_local != self.cfg.keep_local {
             self.last_auto_free = None;
         }
@@ -950,9 +1142,9 @@ impl Engine {
             return;
         }
         self.last_quota = Some(Instant::now());
-        let (drive, tx) = (self.drive.clone(), self.job_tx.clone());
+        let (remote, tx) = (self.remote.clone(), self.job_tx.clone());
         tokio::spawn(async move {
-            match drive.storage_quota().await {
+            match remote.storage_quota().await {
                 Ok((limit, usage, in_drive)) => {
                     let _ = tx.send(JobEvent::Quota(limit, usage, in_drive));
                 }
@@ -991,6 +1183,7 @@ impl Engine {
                 || self.inflight.contains_key(&e.path)
                 || self.dirty.contains_key(&e.path)
                 || self.store.is_pinned(&self.abs(&e.path))
+                || self.waits_for_move(&e)
             {
                 continue;
             }
@@ -1055,10 +1248,17 @@ impl Engine {
         (Phase::Idle, None)
     }
 
-    /// Publishes status.json for the desktop app: on change, and as a heartbeat.
+    /// Publishes status.json for the desktop app: on change, and as a heartbeat. While free
+    /// checks download files to prove them, `message` says so ([`control::VERIFYING`]).
     fn write_status(&mut self, phase: Option<(Phase, Option<String>)>) {
         let waiting = self.db.count_waiting().unwrap_or(0);
-        let (phase, message) = phase.unwrap_or_else(|| self.current_phase(waiting));
+        let (phase, mut message) = phase.unwrap_or_else(|| self.current_phase(waiting));
+        if message.is_none()
+            && matches!(phase, Phase::Idle | Phase::Waiting | Phase::Uploading)
+            && self.inflight.values().any(|j| j.verifying && !j.aborted)
+        {
+            message = Some(control::VERIFYING.to_string());
+        }
         let mut uploads: Vec<Upload> = self
             .inflight
             .iter()
@@ -1126,14 +1326,19 @@ impl Engine {
             if !parent.is_empty() && self.inflight.contains_key(parent) {
                 continue;
             }
+            if self.waits_for_move(&e) {
+                continue;
+            }
             let Some(parent_id) = self.parent_drive_id(&e.path) else {
                 continue; // parent folder not in Drive yet
             };
             let placement_only = e.state == State::CloudOnly;
-            let name = util::name_of(&e.path).to_string();
+            let name = self.cloud_name_for(&e, &parent_id);
+            let placed = e.cloud_name.as_deref() == Some(name.as_str())
+                && e.cloud_parent.as_deref() == Some(parent_id.as_str());
 
             // Nothing to send: already named and placed right.
-            if (e.kind == Kind::Dir || placement_only) && e.drive_id.is_some() && self.placed(&e) {
+            if (e.kind == Kind::Dir || placement_only) && e.drive_id.is_some() && placed {
                 if placement_only {
                     e.move_pending = false;
                 } else {
@@ -1167,6 +1372,7 @@ impl Engine {
         let path = e.path.clone();
         let is_file = e.kind == Kind::File;
         let total = e.local_size.unwrap_or(0) as u64;
+        let target = (!free).then(|| (parent_id.clone(), name.clone()));
         let spec = JobSpec {
             id,
             abs: self.abs(&path),
@@ -1174,11 +1380,13 @@ impl Engine {
             parent_id,
             placement_only,
             free,
-            chunk: self.cfg.chunk_size,
+            chunk: upload_chunk(self.cfg.chunk_size, self.caps.chunk_unit),
             entry: e,
+            caps: self.caps.clone(),
+            tmp_dir: self.data_dir.clone(),
         };
         tracing::debug!("job {id}: {path}{}", if free { " (free)" } else { "" });
-        let handle = tokio::spawn(jobs::run(spec, self.drive.clone(), self.job_tx.clone()));
+        let handle = tokio::spawn(jobs::run(spec, self.remote.clone(), self.job_tx.clone()));
         self.inflight.insert(
             path,
             Inflight {
@@ -1186,6 +1394,8 @@ impl Engine {
                 deleted: false,
                 placement_only,
                 free,
+                verifying: free && self.caps.hash.is_none(),
+                target,
                 is_file,
                 aborted: false,
                 progress: (0, total),
@@ -1245,15 +1455,21 @@ impl Engine {
         match outcome {
             JobOutcome::FreeReady(_) | JobOutcome::FreeSkip(_) => {}
             JobOutcome::Done(d) => {
-                let content_changed = e.kind == Kind::File && e.md5 != d.md5;
+                let content_changed = e.kind == Kind::File && d.hash.is_some() && e.content_hash() != d.hash;
                 let had_cloud_copy = e.md5.is_some();
                 let came_back_from_cloud = e.pin_prev;
                 e.drive_id = Some(d.drive_id);
                 e.cloud_name = Some(d.cloud_name);
                 e.cloud_parent = Some(d.cloud_parent);
-                if e.kind == Kind::File {
-                    e.md5 = d.md5;
+                if e.kind == Kind::File && d.hash.is_some() {
+                    e.set_content_hash(d.hash);
                     e.cloud_size = d.size;
+                }
+                if let Some(old) = &d.old_id
+                    && let Err(err) = self.db.put_with_new_id(&e, old)
+                {
+                    tracing::error!("cannot record the new id of {path}: {err}");
+                    self.needs_rescan = true;
                 }
                 e.upload_url = None;
                 e.upload_md5 = None;
@@ -1332,21 +1548,23 @@ impl Engine {
             }
             JobOutcome::Failed(err) => {
                 let base = if job.placement_only { State::CloudOnly } else { State::Pending };
-                match err {
-                    DriveError::Auth(msg) => {
+                match &err {
+                    RemoteError::Auth(msg) => {
                         e.state = base;
-                        self.pause(msg);
+                        self.pause(msg.clone());
                     }
-                    DriveError::Transient(msg) => {
+                    RemoteError::Transient(_) | RemoteError::RateLimited { .. } => {
+                        let msg = err.to_string();
                         e.attempts += 1;
-                        e.retry_at = Some(now_ms() + backoff_ms(e.attempts));
+                        e.retry_at = Some(now_ms() + retry_delay_ms(&err, e.attempts));
                         e.state = base;
                         tracing::warn!("{path}: {msg} (retry #{})", e.attempts);
                         self.last_transient = Some((Instant::now(), msg.clone()));
                         e.error = Some(msg);
                     }
-                    DriveError::NotFound | DriveError::Permanent(_) => {
-                        let msg = err.to_string();
+                    // Storage full is shown like any upload that can't succeed by itself.
+                    RemoteError::NotFound | RemoteError::Quota(_) | RemoteError::Permanent(_) => {
+                        let msg = describe(&err, self.provider);
                         tracing::error!("{path}: {msg}");
                         if job.placement_only {
                             e.move_pending = false;
@@ -1399,12 +1617,12 @@ impl Engine {
                 self.activity(kind, &path, Some(checked.size), None);
             }
             JobOutcome::FreeSkip(skip @ (FreeSkip::CloudDiffers | FreeSkip::CloudGone)) => {
-                tracing::warn!("{path}: Drive copy is not identical ({skip:?}); uploading the local copy again");
+                tracing::warn!("{path}: cloud copy is not identical ({skip:?}); uploading the local copy again");
                 mark_for_reupload(&mut e, skip == FreeSkip::CloudDiffers);
                 self.put(&e);
             }
             JobOutcome::FreeSkip(FreeSkip::LocalChanged) | JobOutcome::Vanished => self.mark_dirty(path),
-            JobOutcome::Failed(DriveError::Auth(msg)) => self.pause(msg),
+            JobOutcome::Failed(RemoteError::Auth(msg)) => self.pause(msg),
             JobOutcome::Failed(err) => tracing::debug!("{path}: free check failed: {err}"),
             JobOutcome::Done(_) => {}
         }
@@ -1452,9 +1670,10 @@ impl Engine {
         }
         let b = std::mem::take(&mut self.batch);
         let count = |n: u64| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
+        let provider = self.provider.display_name();
         if b.files > 0 {
             self.notifier.send(
-                "Uploaded to Google Drive",
+                &format!("Uploaded to {provider}"),
                 &format!("{} ({})", count(b.files), util::human_bytes(b.bytes)),
             );
         }
@@ -1462,12 +1681,91 @@ impl Engine {
             self.notifier.send(
                 "Freed up space",
                 &format!(
-                    "{} freed on this computer ({}); they stay in Google Drive",
+                    "{} freed on this computer ({}); they stay in {provider}",
                     util::human_bytes(b.freed_bytes),
                     count(b.freed_files)
                 ),
             );
         }
         self.idle_since = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_chunks_fit_each_provider() {
+        let mib = 1024 * 1024;
+        assert_eq!(upload_chunk(8 * mib, 256 * 1024), 8 * mib);
+        assert_eq!(upload_chunk(8 * mib, 320 * 1024), 25 * 320 * 1024, "OneDrive: a multiple of 320 KiB");
+        assert_eq!(upload_chunk(8 * mib, 4 * mib), 8 * mib);
+        assert_eq!(upload_chunk(mib, 4 * mib), 4 * mib, "at least one unit");
+        assert_eq!(upload_chunk(8 * mib, 0), 8 * mib);
+    }
+
+    #[test]
+    fn forbidden_characters_become_look_alikes() {
+        let windows = "\"*:<>?\\|";
+        assert_eq!(cloud_safe_name("plain name.txt", windows), "plain name.txt");
+        assert_eq!(cloud_safe_name("a:b?.txt", windows), "a：b？.txt");
+        assert_eq!(cloud_safe_name("<\"x\"|*\\>", windows), "＜＂x＂｜＊＼＞");
+        assert_eq!(cloud_safe_name("tab\there", "\t"), "tab␉here");
+        assert_eq!(cloud_safe_name("x\u{7f}", "\u{7f}"), "x\u{2421}");
+        assert_eq!(cloud_safe_name("café", "é"), "caf_", "no look-alike: underscore");
+        assert_eq!(cloud_safe_name("a:b", ":："), "a_b", "never a look-alike that is forbidden too");
+        // Different originals stay different.
+        assert_ne!(cloud_safe_name("a:b", windows), cloud_safe_name("a?b", windows));
+    }
+
+    #[test]
+    fn numbered_names_are_recognised() {
+        assert!(is_numbered_of("report.pdf", "report.pdf"));
+        assert!(is_numbered_of("report (2).pdf", "report.pdf"));
+        assert!(is_numbered_of("report (13).pdf", "report.pdf"));
+        assert!(is_numbered_of("Makefile (3)", "Makefile"));
+        assert!(is_numbered_of(".bashrc (2)", ".bashrc"));
+        assert!(!is_numbered_of("report (1).pdf", "report.pdf"));
+        assert!(!is_numbered_of("report (x).pdf", "report.pdf"));
+        assert!(!is_numbered_of("report ().pdf", "report.pdf"));
+        assert!(!is_numbered_of("Report.pdf", "report.pdf"));
+        assert!(!is_numbered_of("report (2).txt", "report.pdf"));
+    }
+
+    #[test]
+    fn cloud_names_avoid_clashes_and_stay_put() {
+        let taken = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(choose_cloud_name("a.txt", None, &taken(&[]), true), "a.txt");
+        assert_eq!(choose_cloud_name("a.txt", None, &taken(&["A.TXT"]), true), "a (2).txt");
+        assert_eq!(choose_cloud_name("a.txt", None, &taken(&["A.TXT"]), false), "a.txt");
+        assert_eq!(choose_cloud_name("a.txt", None, &taken(&["a.txt", "A (2).txt"]), true), "a (3).txt");
+        // An item keeps its numbered name even after the clash is gone...
+        assert_eq!(choose_cloud_name("a.txt", Some("a (2).txt"), &taken(&[]), true), "a (2).txt");
+        // ...but not one that is no longer its name, or that someone else holds now.
+        assert_eq!(choose_cloud_name("b.txt", Some("a (2).txt"), &taken(&[]), true), "b.txt");
+        assert_eq!(choose_cloud_name("a.txt", Some("a (2).txt"), &taken(&["A (2).TXT"]), true), "a.txt");
+        // A case-only rename is a rename.
+        assert_eq!(choose_cloud_name("report.pdf", Some("Report.pdf"), &taken(&[]), true), "report.pdf");
+    }
+
+    #[test]
+    fn errors_name_the_provider_and_keep_google_wording() {
+        let p = Provider::GoogleDrive;
+        assert_eq!(describe(&RemoteError::Auth("x".into()), p), "Google sign-in needed: x");
+        assert_eq!(describe(&RemoteError::NotFound, p), "not found in Google Drive");
+        assert_eq!(describe(&RemoteError::Quota(String::new()), p), "Google Drive storage is full");
+        assert_eq!(describe(&RemoteError::Quota("403 quota".into()), p), "Google Drive storage is full: 403 quota");
+        assert_eq!(describe(&RemoteError::Permanent("400 bad".into()), p), "400 bad");
+        assert_eq!(short_name(p), "Drive");
+    }
+
+    #[test]
+    fn retry_after_sets_the_minimum_wait() {
+        let limited = |s| RemoteError::RateLimited { message: "slow down".into(), retry_after: s };
+        assert_eq!(retry_delay_ms(&RemoteError::Transient("x".into()), 1), 5_000);
+        assert_eq!(retry_delay_ms(&limited(None), 2), 10_000);
+        assert_eq!(retry_delay_ms(&limited(Some(120)), 1), 120_000);
+        assert_eq!(retry_delay_ms(&limited(Some(1)), 3), 20_000, "never less than the backoff");
     }
 }

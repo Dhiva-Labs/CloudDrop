@@ -77,13 +77,21 @@ void main() {
 
     // 1. Welcome
     expect(find.text('Welcome to CloudDrop'), findsOneWidget);
-    expect(find.text('Step 1 of 5'), findsOneWidget);
+    expect(find.text('Step 1 of 6 · Welcome'), findsOneWidget);
     expect(find.text('Keeps your folders'), findsOneWidget);
+    expect(find.textContaining('Google'), findsNothing, reason: 'the welcome names no cloud');
     await tap(tester, 'Get Started');
 
-    // 2. Google key: the six guided steps, each with an Open button
+    // 2. Where to upload: Google Drive (the only one this engine lists) is chosen
+    expect(find.text('Choose where to upload'), findsOneWidget);
+    expect(find.text('Step 2 of 6 · Upload to'), findsOneWidget);
+    expect(find.text('Google Drive'), findsOneWidget);
+    expect(find.text('CloudDrop only sees its own folder'), findsOneWidget);
+    await tap(tester, 'Continue');
+
+    // 3. Google key: the six guided steps, each with an Open button
     expect(find.text('Connect a Google key'), findsOneWidget);
-    expect(find.text('Step 2 of 5'), findsOneWidget);
+    expect(find.text('Step 3 of 6 · Google key'), findsOneWidget);
     for (final title in [
       '1. Create a project',
       '2. Turn on the Google Drive API',
@@ -114,7 +122,7 @@ void main() {
     expect(enabled(tester, filled('Continue')), isTrue);
     await tap(tester, 'Continue');
 
-    // 3. Folders: the default, and a Drive folder name
+    // 4. Folders: the default, and a Drive folder name
     expect(find.text('Choose your folders'), findsOneWidget);
     expect(find.text(r'C:\Users\Dhiva\CloudDrop'), findsOneWidget);
     t.system.directory = r'D:\Backups\CloudDrop';
@@ -124,7 +132,7 @@ void main() {
     await tester.settle();
     await tap(tester, 'Continue');
 
-    // 4. Sign in
+    // 5. Sign in
     expect(find.text('Sign in to Google'), findsOneWidget);
     expect(
       find.textContaining("isn't verified"),
@@ -149,7 +157,7 @@ void main() {
     t.engine.logins.single.doneC.complete(const ActionResult(true, 'Signed in.'));
     await tester.settle();
 
-    // 5. Done: the service is enabled, Explorer is explained
+    // 6. Done: the service is enabled, Explorer is explained
     expect(find.text("You're all set"), findsOneWidget);
     expect(t.engine.calls.last, 'service enable');
     expect(find.text('CloudDrop is running'), findsOneWidget);
@@ -167,11 +175,12 @@ void main() {
   uiTest('with a built-in client there is no key page', (tester) async {
     final t = fresh(builtin: true);
     await pumpApp(tester, t);
-    expect(find.text('Step 1 of 4'), findsOneWidget);
+    expect(find.text('Step 1 of 5 · Welcome'), findsOneWidget);
     await tap(tester, 'Get Started');
+    await tap(tester, 'Continue'); // Google Drive
     expect(find.text('Choose your folders'), findsOneWidget);
     expect(find.text('Connect a Google key'), findsNothing);
-    expect(find.text('Step 2 of 4'), findsOneWidget);
+    expect(find.text('Step 3 of 5 · Folders'), findsOneWidget);
     await tap(tester, 'Continue');
     expect(find.textContaining("isn't verified"), findsNothing);
     await tap(tester, 'Sign In with Google');
@@ -185,6 +194,7 @@ void main() {
     final t = fresh();
     await pumpApp(tester, t, size: const Size(1000, 1300));
     await tap(tester, 'Get Started');
+    await tap(tester, 'Continue'); // Google Drive
     await tester.enterText(
       find.byType(TextBox).first,
       '{"installed":{"client_id":"9-z.apps.googleusercontent.com","client_secret":"SEC"}}',
@@ -201,7 +211,11 @@ void main() {
     final t = fresh(builtin: true);
     await pumpApp(tester, t);
     await tap(tester, 'Get Started');
+    await tap(tester, 'Continue'); // Google Drive
     expect(find.text('Choose your folders'), findsOneWidget);
+    await tester.tap(find.byTooltip('Back'));
+    await tester.settle();
+    expect(find.text('Choose where to upload'), findsOneWidget);
     await tester.tap(find.byTooltip('Back'));
     await tester.settle();
     expect(find.text('Welcome to CloudDrop'), findsOneWidget);
@@ -212,6 +226,7 @@ void main() {
     final t = fresh(builtin: true, db: db);
     await pumpApp(tester, t);
     await tap(tester, 'Get Started');
+    await tap(tester, 'Continue'); // Google Drive
     expect(find.text(r'E:\Old\CloudDrop'), findsOneWidget);
     expect(enabled(tester, button('Change…')), isFalse);
   });
@@ -220,6 +235,7 @@ void main() {
     final t = fresh(builtin: true);
     await pumpApp(tester, t);
     await tap(tester, 'Get Started');
+    await tap(tester, 'Continue'); // Google Drive
     await tester.enterText(find.byType(TextBox).last, '   ');
     await tester.settle();
     expect(enabled(tester, filled('Continue')), isFalse);
@@ -229,6 +245,7 @@ void main() {
     final t = fresh(builtin: true);
     await pumpApp(tester, t);
     await tap(tester, 'Get Started');
+    await tap(tester, 'Continue'); // Google Drive
     await tap(tester, 'Continue');
     await tap(tester, 'Sign In with Google');
     t.engine.logins.last.urlC.complete('https://accounts.example/auth');
@@ -255,6 +272,7 @@ void main() {
         : const ActionResult(true, '');
     await pumpApp(tester, t);
     await tap(tester, 'Get Started');
+    await tap(tester, 'Continue'); // Google Drive
     await tap(tester, 'Continue');
     await tap(tester, 'Sign In with Google');
     expect(find.textContaining("can't be changed after setup"), findsOneWidget);
@@ -265,6 +283,7 @@ void main() {
     final t = fresh(builtin: true, signedIn: true);
     await pumpApp(tester, t);
     await tap(tester, 'Get Started');
+    await tap(tester, 'Continue'); // Google Drive
     await tap(tester, 'Continue');
     expect(find.text('Keep Current Sign-in'), findsOneWidget);
     await tap(tester, 'Keep Current Sign-in');
@@ -280,6 +299,7 @@ void main() {
     t.engine.service = const ServiceStatus(running: false, startsAtSignIn: false);
     await pumpApp(tester, t);
     await tap(tester, 'Get Started');
+    await tap(tester, 'Continue'); // Google Drive
     await tap(tester, 'Continue');
     await tap(tester, 'Sign In with Google');
     t.engine.logins.single.urlC.complete('https://a.example/auth');

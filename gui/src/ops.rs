@@ -1,7 +1,8 @@
-//! Things every tab can do: run Drive actions, copy files in, edit the config, show toasts,
+//! Things every tab can do: run cloud actions, copy files in, edit the config, show toasts,
 //! jump to another tab.
 
 use crate::model::Filter;
+use crate::providers::Choice;
 use crate::snapshot::Snapshot;
 use crate::window::Hooks;
 use crate::{fsops, rt, ui};
@@ -21,6 +22,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub enum Nav {
     Files { dir: String, filter: Filter, select: Option<String> },
+    Activity,
 }
 
 type NavHandler = Rc<dyn Fn(Nav)>;
@@ -30,6 +32,7 @@ pub struct Ops {
     toasts: adw::ToastOverlay,
     hooks: Rc<Hooks>,
     cfg: RefCell<Option<Config>>,
+    provider: RefCell<Choice>,
     paused: Cell<bool>,
     busy: Cell<u32>,
     nav: RefCell<Option<NavHandler>>,
@@ -44,6 +47,7 @@ impl Ops {
             toasts: toasts.clone(),
             hooks,
             cfg: RefCell::default(),
+            provider: RefCell::new(Choice::current(None)),
             paused: Cell::new(false),
             busy: Cell::new(0),
             nav: RefCell::default(),
@@ -65,7 +69,13 @@ impl Ops {
 
     pub fn set_snapshot(&self, s: &Snapshot) {
         *self.cfg.borrow_mut() = s.cfg.clone();
+        *self.provider.borrow_mut() = s.provider.clone();
         self.paused.set(s.paused);
+    }
+
+    /// The cloud CloudDrop uploads to, for names and "Open in …".
+    pub fn provider(&self) -> Choice {
+        self.provider.borrow().clone()
     }
 
     pub fn cfg(&self) -> Option<Config> {
@@ -80,7 +90,7 @@ impl Ops {
         self.paused.get()
     }
 
-    /// A Drive action (free up space, download) is running.
+    /// A cloud action (free up space, download) is running.
     pub fn busy(&self) -> bool {
         self.busy.get() > 0
     }
@@ -154,7 +164,10 @@ impl Ops {
     }
 
     pub fn open_in_drive(&self, kind: Kind, id: &str) {
-        control::open_uri(&actions::drive_url(kind, id));
+        let provider = self.cfg.borrow().as_ref().map(|c| c.provider).unwrap_or_default();
+        if let Some(url) = provider.web_url(kind, id) {
+            control::open_uri(&url);
+        }
     }
 
     /// Opens a file with its default app, or a folder in Files.
@@ -193,7 +206,7 @@ impl Ops {
         );
     }
 
-    // ---------- Drive actions ----------
+    // ---------- cloud actions ----------
 
     /// Removes verified local copies under each path.
     pub fn free(self: &Rc<Self>, rels: Vec<String>, done: impl FnOnce() + 'static) {
@@ -202,8 +215,8 @@ impl Ops {
         rt::run(
             async move {
                 let ctx = Ctx::load()?;
-                let drive = clouddrop::drive_for(&ctx.cfg, clouddrop::auth::token_path());
-                anyhow::Ok(actions::free(&ctx, &drive, &rels).await?.summary())
+                let remote = clouddrop::remote_for(&ctx.cfg, clouddrop::auth::token_path());
+                anyhow::Ok(actions::free(&ctx, &remote, &rels).await?.summary())
             },
             move |res| {
                 me.busy.set(me.busy.get() - 1);
@@ -222,8 +235,8 @@ impl Ops {
         rt::run(
             async move {
                 let ctx = Ctx::load()?;
-                let drive = clouddrop::drive_for(&ctx.cfg, clouddrop::auth::token_path());
-                anyhow::Ok(actions::restore(&ctx, &drive, &rels).await?.summary())
+                let remote = clouddrop::remote_for(&ctx.cfg, clouddrop::auth::token_path());
+                anyhow::Ok(actions::restore(&ctx, &remote, &rels).await?.summary())
             },
             move |res| {
                 me.busy.set(me.busy.get() - 1);
@@ -279,7 +292,7 @@ impl Ops {
         if sources.is_empty() {
             return;
         }
-        let dest_name = if dest_rel.is_empty() { "CloudDrop".to_string() } else { util::name_of(&dest_rel).to_string() };
+        let dest_name = if dest_rel.is_empty() { ui::root_name() } else { util::name_of(&dest_rel).to_string() };
         let dest_dir = root.join(&dest_rel);
         let me = self.clone();
         rt::blocking(
@@ -301,8 +314,8 @@ impl Ops {
 
     // ---------- configuration ----------
 
-    /// Edits the config file now and restarts the upload service shortly after
-    /// (several quick edits share one restart). `message` is shown once the service is back.
+    /// Edits the config file now and restarts this connection's engine shortly after (several
+    /// quick edits share one restart; the others carry on). `message` is shown once it's back.
     pub fn edit_config(self: &Rc<Self>, message: &str, edit: impl FnOnce(&mut Config)) -> bool {
         let path = config::config_path();
         let result = Config::load_from(&path).and_then(|mut c| {
@@ -322,7 +335,7 @@ impl Ops {
         let id = glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
             if let Some(me) = me.upgrade() {
                 me.restart.borrow_mut().take();
-                me.restart_service();
+                me.restart_engine();
             }
         });
         *self.restart.borrow_mut() = Some(id);
@@ -332,9 +345,30 @@ impl Ops {
         true
     }
 
+    /// Saves a setting only the apps read (theme, accent): no service restart. The look is the
+    /// installation's, so every connection's config gets it.
+    /// Returns the shown connection's config as saved.
+    pub fn edit_appearance(&self, key: &str, value: &str) -> Option<Config> {
+        let result = clouddrop::connections::set_appearance(key, value).and_then(|()| Config::load());
+        result.map_err(|e| self.toast(&format!("Couldn't save: {e:#}"))).ok()
+    }
+
     pub fn restart_now(self: &Rc<Self>, message: &str) {
         *self.restart_msg.borrow_mut() = message.to_string();
         self.restart_service();
+    }
+
+    /// Restarts the shown connection's engine (the background service starts it again at once).
+    fn restart_engine(self: &Rc<Self>) {
+        let Some(db) = self.db() else {
+            return;
+        };
+        let msg = std::mem::take(&mut *self.restart_msg.borrow_mut());
+        self.toast(&match control::restart_engine(&db, &config::data_dir()) {
+            Ok(()) if msg.is_empty() => "Settings saved".to_string(),
+            Ok(()) => msg,
+            Err(e) => format!("{e:#}"),
+        });
     }
 
     fn restart_service(self: &Rc<Self>) {

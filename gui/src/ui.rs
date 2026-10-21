@@ -61,8 +61,18 @@ pub fn body(content: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 
 /// A navigation page with a header bar, scrolling body and an optional bottom button.
 pub fn nav_page(title: &str, content: &impl IsA<gtk::Widget>, bottom: Option<&gtk::Button>) -> adw::NavigationPage {
+    nav_page_with_header(title, content, bottom).0
+}
+
+/// [`nav_page`], with its header bar for extra buttons.
+pub fn nav_page_with_header(
+    title: &str,
+    content: &impl IsA<gtk::Widget>,
+    bottom: Option<&gtk::Button>,
+) -> (adw::NavigationPage, adw::HeaderBar) {
+    let header = adw::HeaderBar::new();
     let tv = adw::ToolbarView::new();
-    tv.add_top_bar(&adw::HeaderBar::new());
+    tv.add_top_bar(&header);
     tv.set_content(Some(&body(content)));
     if let Some(b) = bottom {
         let bar = gtk::Box::builder()
@@ -73,7 +83,16 @@ pub fn nav_page(title: &str, content: &impl IsA<gtk::Widget>, bottom: Option<&gt
         bar.append(b);
         tv.add_bottom_bar(&bar);
     }
-    adw::NavigationPage::builder().title(title).child(&tv).build()
+    (adw::NavigationPage::builder().title(title).child(&tv).build(), header)
+}
+
+/// A left-aligned wrapping label (form hints, provider descriptions).
+pub fn start_label(text: &str, classes: &[&str]) -> gtk::Label {
+    let l = gtk::Label::builder().label(text).wrap(true).xalign(0.0).build();
+    for c in classes {
+        l.add_css_class(c);
+    }
+    l
 }
 
 /// A row that opens a web page (used for the Google Cloud steps).
@@ -91,6 +110,13 @@ pub fn link_row(title: &str, subtitle: &str, url: &'static str) -> adw::ActionRo
 }
 
 /// "~/CloudDrop" style display of a path.
+/// What the top of the shown folder is called in paths ("CloudDrop › Photos"): CloudDrop for
+/// the first connection, as always; another connection's name for its own folder.
+pub fn root_name() -> String {
+    let c = clouddrop::connections::current();
+    if c.is_default() { "CloudDrop".into() } else { c.name }
+}
+
 pub fn pretty_path(p: &Path) -> String {
     if let Some(home) = dirs_home()
         && let Ok(rest) = p.strip_prefix(&home)
@@ -139,10 +165,32 @@ const CSS: &str = "
 .activity-icon.info { color: alpha(@window_fg_color, 0.75); background-color: alpha(@window_fg_color, 0.08); }
 .activity-icon.warn { color: @error_color; background-color: alpha(@error_color, 0.14); }
 .crumb { padding: 2px 6px; min-height: 24px; }
+.hero { padding: 28px 24px 24px 24px; background-image: linear-gradient(135deg, alpha(#41d9ef, 0.16), alpha(#2f7cf0, 0.10), alpha(#4b3fd8, 0.16)); }
+.hero-badge { border-radius: 999px; padding: 18px; }
+.hero-badge.ok { color: @success_color; background-color: alpha(@success_color, 0.15); }
+.hero-badge.busy { color: @accent_color; background-color: alpha(@accent_bg_color, 0.18); }
+.hero-badge.paused { color: alpha(@window_fg_color, 0.7); background-color: alpha(@window_fg_color, 0.09); }
+.hero-badge.warn { color: @warning_color; background-color: alpha(@warning_color, 0.16); }
+.hero progressbar trough, .hero progressbar progress { min-height: 6px; }
+.welcome-logo { padding: 16px 40px; background-image: radial-gradient(circle closest-side, alpha(#2f7cf0, 0.24), alpha(#2f7cf0, 0)); }
+.feature-icon { border-radius: 999px; padding: 8px; color: @accent_color; background-color: alpha(@accent_bg_color, 0.16); }
+.accent-swatch { min-width: 24px; min-height: 24px; padding: 0; border-radius: 999px; border: 2px solid alpha(@window_fg_color, 0.15); }
+.accent-swatch:checked { border-color: @window_fg_color; }
+.accent-swatch.default { background: linear-gradient(135deg, #3584e4, #2190a4, #3a944a, #c88800, #ed5b00, #e62d42, #d56199, #9141ac); }
+.accent-swatch.blue { background: #2f7cf0; }
+.accent-swatch.teal { background: #0f8b8d; }
+.accent-swatch.green { background: #3a944a; }
+.accent-swatch.purple { background: #7c4dd6; }
+.accent-swatch.pink { background: #d0457f; }
+.accent-swatch.orange { background: #e2620e; }
+.drop-zone { border: 2px dashed alpha(@window_fg_color, 0.18); border-radius: 18px; margin: 24px; }
 columnview.files row { min-height: 40px; }
+.provider-row { padding: 10px 12px; }
+.connection-row { padding: 6px 8px; }
+.own-folder { color: @success_color; }
 ";
 
-/// Loads the app's small stylesheet (status pills, cards, drop highlight).
+/// Loads the app's small stylesheet (status pills, cards, the Home hero, drop zones).
 #[allow(deprecated)]
 pub fn install_css() {
     let Some(display) = gtk::gdk::Display::default() else {
@@ -183,4 +231,61 @@ pub fn file_icon(name: &str, is_dir: bool) -> gtk::gio::Icon {
     }
     let (ctype, _) = gtk::gio::content_type_guess(Some(name), None);
     gtk::gio::content_type_get_icon(&ctype)
+}
+
+/// Accent colours of the `accent` setting (the default keeps the system's accent).
+pub fn accent_hex(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "blue" => "#2f7cf0",
+        "teal" => "#0f8b8d",
+        "green" => "#3a944a",
+        "purple" => "#7c4dd6",
+        "pink" => "#d0457f",
+        "orange" => "#e2620e",
+        _ => return None,
+    })
+}
+
+thread_local! {
+    static ACCENT_CSS: std::cell::RefCell<Option<gtk::CssProvider>> = const { std::cell::RefCell::new(None) };
+    /// The theme, accent and dark style last applied.
+    static APPLIED: std::cell::RefCell<Option<(String, String, bool)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Applies the `theme` and `accent` settings: light, dark or the system's style, and an accent
+/// colour (its text shade lighter or darker, to stay readable on either style). Cheap to call
+/// again with the same settings.
+pub fn apply_appearance(theme: &str, accent: &str) {
+    let style = adw::StyleManager::default();
+    let scheme = match theme {
+        "light" => adw::ColorScheme::ForceLight,
+        "dark" => adw::ColorScheme::ForceDark,
+        _ => adw::ColorScheme::Default,
+    };
+    if style.color_scheme() != scheme {
+        style.set_color_scheme(scheme);
+    }
+    let key = (theme.to_string(), accent.to_string(), style.is_dark());
+    if APPLIED.with(|a| a.borrow().as_ref() == Some(&key)) {
+        return;
+    }
+    APPLIED.with(|a| *a.borrow_mut() = Some(key));
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    ACCENT_CSS.with(|slot| {
+        if let Some(old) = slot.borrow_mut().take() {
+            gtk::style_context_remove_provider_for_display(&display, &old);
+        }
+        let Some(hex) = accent_hex(accent) else {
+            return;
+        };
+        let text = if style.is_dark() { format!("mix({hex}, white, 0.35)") } else { format!("shade({hex}, 0.85)") };
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&format!(
+            "@define-color accent_bg_color {hex};\n@define-color accent_color {text};\n@define-color accent_fg_color white;\n"
+        ));
+        gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+        *slot.borrow_mut() = Some(provider);
+    });
 }

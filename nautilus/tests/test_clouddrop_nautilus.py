@@ -24,6 +24,16 @@ def labels(items):
     return [item.label for item in items]
 
 
+def strings(items):
+    """Every label and tip of a menu, submenus included, in order."""
+    found = []
+    for item in items:
+        found += [item.label, item.tip]
+        if item.submenu:
+            found += strings(item.submenu.items)
+    return found
+
+
 class DataDirTests(unittest.TestCase):
 
     def test_env_override_wins(self):
@@ -107,6 +117,17 @@ class ColumnTests(ExtensionTestCase):
         (column,) = self.new_extension().get_columns()
         self.assertEqual(column.attribute, 'clouddrop_status')
         self.assertEqual(column.label, 'Google Drive')
+
+    def test_column_description_for_google_drive(self):
+        (column,) = self.new_extension().get_columns()
+        self.assertEqual(column.description, 'Upload status in Google Drive')
+
+    def test_column_named_after_provider(self):
+        self.use_config('provider = "dropbox"\n')
+        (column,) = self.new_extension().get_columns()
+        self.assertEqual(
+            (column.name, column.label, column.description),
+            ('CloudDrop::status', 'Dropbox', 'Upload status in Dropbox'))
 
     def test_timer_registered(self):
         support.StubGLib.timeouts.clear()
@@ -354,7 +375,8 @@ class FileMenuTests(MenuTestCase):
                                         'CloudDrop::retry'])
         with mock.patch.object(ext, 'launch') as launch:
             items[1].activate()
-        launch.assert_called_once_with((self.binary, 'open', self.root))
+        launch.assert_called_once_with(
+            (self.binary, '--connection', 'default', 'open', self.root))
 
     def test_no_binary_no_items(self):
         with no_binary_anywhere(self):
@@ -362,14 +384,6 @@ class FileMenuTests(MenuTestCase):
 
 
 class KeepMenuTests(MenuTestCase):
-
-    def write_config(self, text):
-        path = os.path.join(self.tmp, 'config.toml')
-        with open(path, 'w') as f:
-            f.write(text)
-        # Distinct mtimes so the cache notices rewrites within one test.
-        os.utime(path, ns=(time.time_ns(), time.time_ns()))
-        return path
 
     def keep_items(self, config_text):
         path = self.write_config(config_text)
@@ -382,7 +396,8 @@ class KeepMenuTests(MenuTestCase):
         with mock.patch.object(ext, 'launch') as launch:
             items[-1].activate()
         launch.assert_called_once_with(
-            (self.binary, '--notify', 'keep', os.path.join(self.root, 'plain')))
+            (self.binary, '--connection', 'default', '--notify', 'keep',
+             os.path.join(self.root, 'plain')))
 
     def test_unkeep_offered_for_marked_folder(self):
         items = self.keep_items('keep_local = ["plain"]\n')
@@ -410,6 +425,140 @@ class KeepMenuTests(MenuTestCase):
         self.assertEqual(items[-1].name, 'CloudDrop::keep')
 
 
+class ProviderConfigTests(ExtensionTestCase):
+
+    def provider(self, text):
+        self.use_config(text)
+        return ext.configured_provider()
+
+    def test_google_drive_by_default(self):
+        os.environ['CLOUDDROP_CONFIG'] = os.path.join(self.tmp, 'none.toml')
+        self.assertEqual(ext.configured_provider(),
+                         ext.Provider('gdrive', 'Google Drive', True))
+        self.assertIs(self.provider('keep_local = ["a"]\n'), ext.GOOGLE_DRIVE)
+        self.assertIs(self.provider('provider = "gdrive"\n'), ext.GOOGLE_DRIVE)
+
+    def test_onedrive(self):
+        self.assertEqual(self.provider('provider = "onedrive"\n'),
+                         ext.Provider('onedrive', 'OneDrive', True))
+
+    def test_every_known_provider(self):
+        expected = {
+            'gdrive': ('Google Drive', True), 'onedrive': ('OneDrive', True),
+            'dropbox': ('Dropbox', True), 'nextcloud': ('Nextcloud', True),
+            'webdav': ('WebDAV', False), 's3': ('S3', False),
+            'sftp': ('SFTP', False), 'mega': ('MEGA', False),
+        }
+        for id_, (name, web_links) in expected.items():
+            with self.subTest(id_):
+                self.assertEqual(self.provider('provider = "%s"\n' % id_),
+                                 (id_, name, web_links))
+
+    def test_unknown_id_is_its_own_name_without_web_links(self):
+        self.assertEqual(self.provider('provider = "floppy"\n'),
+                         ext.Provider('floppy', 'floppy', False))
+
+    def test_broken_config_means_google_drive(self):
+        for text in ('provider = "onedrive"\nthis is not toml [[[',
+                     'provider = 3\n', 'provider = ""\n',
+                     'provider = ["onedrive"]\n'):
+            with self.subTest(text):
+                self.assertIs(self.provider(text), ext.GOOGLE_DRIVE)
+
+    def test_undecodable_config_means_google_drive(self):
+        path = self.use_config('')
+        with open(path, 'wb') as f:
+            f.write(b'provider = "one\xffdrive"\n')
+        self.assertIs(ext.configured_provider(), ext.GOOGLE_DRIVE)
+
+    def test_unreadable_config_means_google_drive(self):
+        path = os.path.join(self.tmp, 'config.toml')
+        os.makedirs(path)   # stat() works, open() fails
+        os.environ['CLOUDDROP_CONFIG'] = path
+        self.assertIs(ext.configured_provider(), ext.GOOGLE_DRIVE)
+
+    def test_cache_follows_mtime(self):
+        path = self.use_config('provider = "onedrive"\n')
+        mtime = os.stat(path).st_mtime_ns
+        self.assertEqual(ext.configured_provider().id, 'onedrive')
+        with open(path, 'w') as f:
+            f.write('provider = "dropbox"\n')
+        os.utime(path, ns=(mtime, mtime))
+        self.assertEqual(ext.configured_provider().id, 'onedrive')   # cached
+        os.utime(path, ns=(mtime + 10**9, mtime + 10**9))
+        self.assertEqual(ext.configured_provider().id, 'dropbox')
+        os.remove(path)
+        self.assertIs(ext.configured_provider(), ext.GOOGLE_DRIVE)
+
+
+class ProviderMenuTests(MenuTestCase):
+    """Menu wording and the Open items follow the configured provider."""
+
+    def setUp(self):
+        super().setUp()
+        self.put('gone.txt', 'cloud_only')
+
+    def menus(self, provider_id=None):
+        """(file menu for synced.txt, background menu of the root)."""
+        if provider_id:
+            self.use_config('provider = "%s"\n' % provider_id)
+        return (self.file_items('synced.txt'),
+                self.extension.get_background_items(self.file('', True)))
+
+    def test_google_drive_wording_is_unchanged(self):
+        files, background = self.menus()
+        self.assertEqual(strings(files), [
+            'Free Up Space',
+            'Remove local copies that are safely stored in Google Drive',
+            'Open in Google Drive', 'Open this item in Google Drive'])
+        self.assertEqual(strings(background), [
+            'Cloud-only Files (1)',
+            'Files kept in Google Drive but removed from this computer',
+            'Download All', 'Download every cloud-only item in this folder',
+            'gone.txt', 'Download gone.txt from Google Drive',
+            'Open Folder in Google Drive', 'Open this folder in Google Drive'])
+        explicit = self.menus('gdrive')
+        self.assertEqual([strings(m) for m in explicit],
+                         [strings(files), strings(background)])
+
+    def test_onedrive(self):
+        files, background = self.menus('onedrive')
+        self.assertEqual(names(files), ['CloudDrop::free', 'CloudDrop::open'])
+        self.assertEqual(strings(files), [
+            'Free Up Space',
+            'Remove local copies that are safely stored in OneDrive',
+            'Open in OneDrive', 'Open this item in OneDrive'])
+        self.assertEqual(strings(background), [
+            'Cloud-only Files (1)',
+            'Files kept in OneDrive but removed from this computer',
+            'Download All', 'Download every cloud-only item in this folder',
+            'gone.txt', 'Download gone.txt from OneDrive',
+            'Open Folder in OneDrive', 'Open this folder in OneDrive'])
+
+    def test_webdav_has_no_open_items(self):
+        files, background = self.menus('webdav')
+        self.assertEqual(names(files), ['CloudDrop::free'])
+        self.assertEqual(names(background), ['CloudDrop::cloud_only'])
+        self.assertEqual(strings(files), [
+            'Free Up Space',
+            'Remove local copies that are safely stored in WebDAV'])
+        self.assertEqual(strings(background), [
+            'Cloud-only Files (1)',
+            'Files kept in WebDAV but removed from this computer',
+            'Download All', 'Download every cloud-only item in this folder',
+            'gone.txt', 'Download gone.txt from WebDAV'])
+
+    def test_planners_take_the_provider(self):
+        db = self.extension._db
+        webdav = ext.PROVIDERS['webdav']
+        spec = ext.plan_file_menu(
+            db, [(self.abspath('synced.txt'), 'synced.txt', False)],
+            self.binary, webdav)
+        self.assertEqual([s.name for s in spec], ['CloudDrop::free'])
+        spec = ext.plan_background_menu(db, self.root, '', self.binary, webdav)
+        self.assertEqual([s.name for s in spec], ['CloudDrop::cloud_only'])
+
+
 class CommandTests(MenuTestCase):
 
     def run_item(self, item):
@@ -422,7 +571,7 @@ class CommandTests(MenuTestCase):
         (free,) = items
         popen = self.run_item(free)
         popen.assert_called_once_with(
-            [self.binary, '--notify', 'free',
+            [self.binary, '--connection', 'default', '--notify', 'free',
              self.abspath('synced.txt'), self.abspath('plain')],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True)
@@ -430,14 +579,15 @@ class CommandTests(MenuTestCase):
     def test_open_argv(self):
         free, open_ = self.file_items('synced.txt')
         self.assertEqual(self.run_item(open_).call_args.args[0],
-                         [self.binary, 'open', self.abspath('synced.txt')])
+                         [self.binary, '--connection', 'default', 'open',
+                          self.abspath('synced.txt')])
 
     def test_retry_argv(self):
         items = self.file_items('bad.txt', 'broken', 'synced.txt')
         retry = [i for i in items if i.name == 'CloudDrop::retry'][0]
         self.assertEqual(
             self.run_item(retry).call_args.args[0],
-            [self.binary, '--notify', 'retry',
+            [self.binary, '--connection', 'default', '--notify', 'retry',
              self.abspath('bad.txt'), self.abspath('broken')])
 
     def test_popen_failure_is_swallowed(self):
@@ -567,11 +717,12 @@ class BackgroundMenuTests(ExtensionTestCase):
             for item in submenu:
                 item.activate()
         sub = self.abspath('sub')
+        restore = [self.binary, '--connection', 'default', '--notify',
+                   'restore']
         self.assertEqual(
             [call.args[0] for call in popen.call_args_list],
-            [[self.binary, '--notify', 'restore', sub],
-             [self.binary, '--notify', 'restore', sub + '/dir'],
-             [self.binary, '--notify', 'restore', sub + '/a b.txt']])
+            [restore + [sub], restore + [sub + '/dir'],
+             restore + [sub + '/a b.txt']])
 
     def test_open_folder_uses_folder_drive_id(self):
         self.make_db([('sub', 'synced', 'dir', 'ID-SUB'),
@@ -582,7 +733,8 @@ class BackgroundMenuTests(ExtensionTestCase):
         with mock.patch.object(ext, 'launch') as launch:
             item.activate()
         launch.assert_called_once_with(
-            (self.binary, 'open', self.abspath('sub')))
+            (self.binary, '--connection', 'default', 'open',
+             self.abspath('sub')))
         self.assertEqual(self.background('plain', extension), [])
 
     def test_root_uses_meta_root_id(self):

@@ -1,4 +1,4 @@
-/// Settings: space saving, account, folders, uploading, background
+/// Settings: appearance, space saving, account, folders, uploading, background, about
 /// (`gui/src/settings.rs`). Every change is a `clouddrop config set` / service command and
 /// takes effect at once.
 library;
@@ -10,6 +10,7 @@ import 'package:fluent_ui/fluent_ui.dart';
 import '../../data/engine_api.dart';
 import '../../data/fs_ops.dart';
 import '../../data/models.dart';
+import '../../logic/about.dart';
 import '../../logic/settings_logic.dart';
 import '../../state/app_controller.dart';
 import '../scope.dart';
@@ -83,12 +84,16 @@ class _SettingsPageState extends State<SettingsPage> {
           }
           return PageBody(
             children: [
-              const SectionTitle('Space saving', padding: EdgeInsets.only(top: 4, bottom: 8)),
+              const SectionTitle('Appearance', padding: EdgeInsets.only(top: 4, bottom: 8)),
+              _appearance(context, app, cfg),
+              const SectionTitle('Space saving'),
               _autoFree(context, app, cfg),
               const SizedBox(height: 4),
               _keepFolders(context, app, cfg),
-              const SectionTitle('Google account'),
+              SectionTitle(app.provider.isGoogle ? 'Google account' : 'Account'),
               _account(context, app),
+              const SizedBox(height: 4),
+              _switchProvider(context, app),
               const SectionTitle('Folders'),
               _SettingCard(
                 icon: FluentIcons.pc1,
@@ -104,25 +109,108 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
               const SizedBox(height: 4),
               _SettingCard(
-                icon: FluentIcons.cloud,
-                title: 'In Google Drive',
-                subtitle: 'My Drive → ${cfg.driveFolder}',
-                trailing: Tooltip(
-                  message: 'Open in Google Drive',
-                  child: IconButton(
-                    icon: const Icon(FluentIcons.open_in_new_window, size: 14),
-                    onPressed: app.openRootInDrive,
+                icon: providerIcon(app.provider.id),
+                title: 'In ${app.provider.name}',
+                subtitle: '${app.provider.rootLabel} → ${cfg.driveFolder}',
+                // Providers without web pages (WebDAV, S3, SFTP) have nothing to open.
+                trailing: app.provider.webLinks
+                    ? Tooltip(
+                        message: 'Open in ${app.provider.name}',
+                        child: IconButton(
+                          icon: const Icon(FluentIcons.open_in_new_window, size: 14),
+                          onPressed: app.openRootInDrive,
+                        ),
+                      )
+                    : null,
+              ),
+              const SizedBox(height: 4),
+              _SettingCard(
+                icon: FluentIcons.fabric_new_folder,
+                title: 'Upload another folder',
+                subtitle: 'Each folder uploads to a cloud of its own, this one or another',
+                stack: true,
+                trailing: Button(
+                  onPressed: app.beginAddConnection,
+                  child: const Text('Add Another Folder…'),
+                ),
+              ),
+              const SizedBox(height: 4),
+              _SettingCard(
+                icon: FluentIcons.remove_link,
+                title: 'Stop uploading this folder',
+                subtitle: 'The folder and ${app.provider.name} keep everything',
+                stack: true,
+                trailing: Button(
+                  onPressed: () => _removeFolder(context, app, cfg),
+                  style: ButtonStyle(
+                    foregroundColor: WidgetStatePropertyAll(
+                      FluentTheme.of(context).resources.systemFillColorCritical,
+                    ),
                   ),
+                  child: const Text('Remove This Folder…'),
                 ),
               ),
               const SectionTitle('Uploading'),
               _uploading(context, app, cfg),
               const SectionTitle('Background'),
               _background(context, app),
+              const SectionTitle('About'),
+              _About(app: app),
             ],
           );
         },
       ),
+    );
+  }
+
+  // ---------- appearance ----------
+
+  static const _themes = {'system': 'Same as Windows', 'light': 'Light', 'dark': 'Dark'};
+
+  Widget _appearance(BuildContext context, AppController app, AppConfig cfg) {
+    // "blue" (from the Linux app, where the default is the system's accent) is CloudDrop blue.
+    final accent = cfg.accent == 'blue' ? 'default' : cfg.accent;
+    return Column(
+      children: [
+        _SettingCard(
+          icon: FluentIcons.contrast,
+          title: 'Theme',
+          subtitle: 'Light, dark, or the same as Windows',
+          stack: true,
+          trailing: ComboBox<String>(
+            value: _themes.containsKey(cfg.theme) ? cfg.theme : 'system',
+            items: [
+              for (final e in _themes.entries)
+                ComboBoxItem<String>(value: e.key, child: Text(e.value)),
+            ],
+            onChanged: (v) {
+              if (v != null && v != cfg.theme) app.setSetting('theme', v);
+            },
+          ),
+        ),
+        const SizedBox(height: 4),
+        _SettingCard(
+          icon: FluentIcons.color,
+          title: 'Accent color',
+          subtitle: 'Buttons, links and highlights',
+          stack: true,
+          trailing: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final e in accentChoices.entries)
+                _AccentSwatch(
+                  label: accentLabel(e.key),
+                  color: e.value,
+                  selected: e.key == accent,
+                  onPressed: () {
+                    if (e.key != accent) app.setSetting('accent', e.key);
+                  },
+                ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -136,7 +224,8 @@ class _SettingsPageState extends State<SettingsPage> {
       title: 'Free up space automatically',
       stack: true,
       subtitle:
-          'Local copies are removed only after CloudDrop checks Google Drive has an identical copy',
+          'Local copies are removed only after CloudDrop checks ${app.provider.name} has an '
+          'identical copy${app.provider.verifyByDownload ? ', by downloading it once' : ''}',
       trailing: SizedBox(
         width: 190,
         child: ComboBox<int>(
@@ -203,7 +292,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       children: [
                         Text(nameOf(rel)),
                         Text(
-                          parentOf(rel).isEmpty ? 'CloudDrop' : parentOf(rel),
+                          parentOf(rel).isEmpty ? app.rootName : parentOf(rel),
                           style: theme.typography.caption?.copyWith(color: theme.secondaryText),
                         ),
                       ],
@@ -272,10 +361,11 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _account(BuildContext context, AppController app) {
     final signedIn = app.snapshot.signedIn;
     final theme = FluentTheme.of(context);
+    final p = app.provider;
     return _SettingCard(
-      icon: FluentIcons.contact,
-      title: 'Google Drive',
-      subtitle: signedIn ? 'Signed in' : 'Not signed in',
+      icon: p.isGoogle ? FluentIcons.contact : providerIcon(p.id),
+      title: p.name,
+      subtitle: signedIn ? (app.engineStatus?.account ?? 'Signed in') : 'Not signed in',
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -298,8 +388,42 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  Future<void> _removeFolder(BuildContext context, AppController app, AppConfig cfg) async {
+    final ok = await confirmRemoveFolder(
+      context,
+      folder: app.paths.pretty(cfg.syncDir),
+      cloud: app.provider.name,
+      last: !app.several,
+    );
+    if (ok) await app.removeConnection();
+  }
+
   Future<void> _signOut(BuildContext context, AppController app) async {
-    if (await confirmSignOut(context)) await app.signOut();
+    if (await confirmSignOut(context, cloud: app.provider.name)) await app.signOut();
+  }
+
+  Widget _switchProvider(BuildContext context, AppController app) {
+    final cloud = app.provider.name;
+    return _SettingCard(
+      icon: FluentIcons.switch_widget,
+      title: 'Upload somewhere else',
+      subtitle:
+          'Switch to another cloud. Everything is uploaded again; nothing is deleted '
+          'from $cloud.',
+      trailing: Button(
+        onPressed: () async {
+          final ok = await confirmSwitchProvider(
+            context,
+            cloud: cloud,
+            folder: app.several ? '“${app.label}”' : 'your CloudDrop folder',
+          );
+          if (ok) {
+            app.beginSetup(switching: true);
+          }
+        },
+        child: const Text('Switch Provider…'),
+      ),
+    );
   }
 
   // ---------- uploading ----------
@@ -423,7 +547,11 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _background(BuildContext context, AppController app) {
     final svc = app.service;
-    final running = app.snapshot.daemon != null;
+    // With several folders the service runs them all: one that isn't uploading (not signed in,
+    // say) doesn't mean the service is down.
+    final running = app.several
+        ? (svc?.running ?? app.snapshot.daemon != null)
+        : app.snapshot.daemon != null;
     return Column(
       children: [
         _SettingCard(
@@ -445,6 +573,119 @@ class _SettingsPageState extends State<SettingsPage> {
               : Button(onPressed: app.startService, child: const Text('Start')),
         ),
       ],
+    );
+  }
+}
+
+/// The logo, version and the project's links.
+class _About extends StatelessWidget {
+  const _About({required this.app});
+
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FluentTheme.of(context);
+    void open(String url) => app.services.system.openUrl(url);
+    return Surface(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Image.asset(
+                'assets/icon.png',
+                width: 44,
+                height: 44,
+                filterQuality: FilterQuality.medium,
+                errorBuilder: (_, _, _) => const SizedBox(width: 44, height: 44),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('CloudDrop $appVersion', style: theme.typography.bodyStrong),
+                    const SizedBox(height: 2),
+                    Text(
+                      'An upload-only cloud folder. Free and open source (MIT) by Dhiva Labs.',
+                      style: theme.typography.caption?.copyWith(color: theme.secondaryText),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            children: [
+              HyperlinkButton(onPressed: () => open(homepageUrl), child: const Text('Website')),
+              HyperlinkButton(
+                onPressed: () => open(privacyUrl),
+                child: const Text('Privacy Policy'),
+              ),
+              HyperlinkButton(
+                onPressed: () => open(issuesUrl),
+                child: const Text('Report a Problem'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A round accent colour to pick; the chosen one has a ring and a check mark.
+class _AccentSwatch extends StatelessWidget {
+  const _AccentSwatch({
+    required this.label,
+    required this.color,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final String label;
+  final Color color;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FluentTheme.of(context);
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        label: label,
+        selected: selected,
+        button: true,
+        child: HoverButton(
+          onPressed: onPressed,
+          builder: (context, states) => Container(
+            width: 32,
+            height: 32,
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                width: 2,
+                color: selected
+                    ? theme.resources.textFillColorPrimary
+                    : states.isHovered || states.isFocused
+                    ? theme.resources.controlStrokeColorDefault
+                    : Colors.transparent,
+              ),
+            ),
+            child: DecoratedBox(
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              child: selected
+                  ? const Icon(FluentIcons.check_mark, size: 12, color: Colors.white)
+                  : null,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

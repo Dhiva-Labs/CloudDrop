@@ -1,9 +1,46 @@
 # Changelog
 
-## 0.2.1 — 2026-10-16
+## 0.3.0 — 2026-10-21
 
-Linux and Windows on ARM64, and CloudDrop as a snap.
+More clouds, several folders at once, a new look with a dark style, and ARM64.
 
+- **More clouds (preview)**: besides Google Drive, CloudDrop can upload to OneDrive, Dropbox,
+  a WebDAV server, Nextcloud, S3-compatible storage (AWS, Backblaze B2, Wasabi, R2, MinIO…),
+  an SFTP server and MEGA. Choose one in the setup assistant. The same promises hold for every
+  one: upload-only, nothing deleted in the cloud, and space freed only after the cloud copy is
+  proved identical, by the provider's own hash or by downloading it. They are tested against
+  fake servers (SFTP against a real OpenSSH) but not yet with real accounts, and OneDrive and
+  Dropbox need app registrations before release builds can sign in
+  ([docs/PROVIDERS.md](docs/PROVIDERS.md)).
+- **Proton Drive (experimental)**, through Proton's own command-line app (`proton-drive`),
+  which signs in and does the encryption. Only builds from source offer it (`./install.sh`
+  turns it on with `CLOUDDROP_EXPERIMENTAL_PROVIDERS=1`); the PPA, snap and Store builds
+  don't, until Proton opens its SDK to third-party apps. This is a third-party application not
+  officially supported by Proton. Tested against a fake of Proton's CLI, not a real account
+  yet ([docs/PROVIDERS.md](docs/PROVIDERS.md#proton-drive)).
+- Command line: `clouddrop providers`, `setup --provider <id> --set … --secret …`, `check`;
+  `login` signs in to whichever provider is set up.
+- **Several folders, several clouds**: upload another folder to a cloud of its own, e.g.
+  `~/CloudDrop` to Google Drive and `~/Work` to a Nextcloud (*Add Another Folder…* in the app,
+  or `clouddrop connections add`). The window switches between them, the top-bar icon lists
+  them all, each folder is its own cloud folder in File Explorer, and *Remove This Folder…*
+  stops uploading one without deleting anything. Existing installations carry on unchanged.
+- Command line: `clouddrop connections [add|remove]`, `--connection NAME` on every command,
+  `status --all`.
+
+- **Appearance**: Settings opens with a light or dark style (or the system's) and an accent
+  color, in both apps; it applies at once and is the same for every folder (`theme` and
+  `accent` in config.toml).
+- New logo: a cloud on a sky-blue tile with a drop cut through it, on Linux, Windows, the
+  Microsoft Store and the notification-area icons.
+- Home: a status card in the logo's colours that shows overall progress, upload speed and
+  time left while uploading, and the latest activity with *See All*.
+- The status is on every screen: an icon in the header bar on Linux, a line under the logo
+  in the navigation pane on Windows.
+- Activity can show just uploads, freed space, downloads or problems.
+- An empty folder in Files is a drop zone; *Free Up Space* has its own broom icon.
+- About CloudDrop (main menu on Linux, Settings on Windows): version and links.
+- Setup assistant: refreshed welcome page; on Windows, the steps are named.
 - Linux and Windows on ARM64: CI builds and tests CloudDrop natively on arm64 as well as
   x64 (Linux tests, Debian package and snap; Windows engine, Cloud Files test, app and
   packages). Releases carry `CloudDrop-<version>-windows-arm64.zip` next to the x64 zip.

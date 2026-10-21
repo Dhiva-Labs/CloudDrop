@@ -1,7 +1,13 @@
-//! Minimal Google Drive v3 client: just the calls CloudDrop needs.
+//! Minimal Google Drive v3 client: just the calls CloudDrop needs. The engine reaches it
+//! through [`crate::remote::Remote`].
 
 use crate::auth::Auth;
 use crate::config::Endpoints;
+use crate::db::Kind;
+use crate::remote::{
+    Capabilities, ContentHash, HashKind, ProviderInfo, RemoteError, RemoteMeta, RemoteResult, SignIn,
+    StorageQuota, UploadStatus,
+};
 use futures_util::StreamExt;
 use md5::{Digest, Md5};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
@@ -12,52 +18,60 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
 pub const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
+
+pub static INFO: ProviderInfo = ProviderInfo {
+    experimental: false,
+    id: "gdrive",
+    name: "Google Drive",
+    caps: Capabilities {
+        hash: Some(HashKind::Md5),
+        pin_versions: true,
+        stable_ids: true,
+        resumable: true,
+        case_insensitive: false,
+        forbidden_chars: "",
+        chunk_unit: 256 * 1024,
+    },
+    sign_in: SignIn::Google,
+    web_url: |kind, id| {
+        Some(match kind {
+            Kind::Dir => format!("https://drive.google.com/drive/folders/{id}"),
+            Kind::File => format!("https://drive.google.com/file/d/{id}/view"),
+        })
+    },
+};
 const FIELDS: &str = "id,name,mimeType,parents,md5Checksum,size,trashed,headRevisionId";
 
-#[derive(Debug, Clone, thiserror::Error, PartialEq)]
-pub enum DriveError {
-    /// Sign-in is missing, expired or revoked; nothing will work until `clouddrop login`.
-    #[error("Google sign-in needed: {0}")]
-    Auth(String),
-    /// Worth retrying later (network, rate limit, server error).
-    #[error("{0}")]
-    Transient(String),
-    #[error("not found in Google Drive")]
-    NotFound,
-    #[error("{0}")]
-    Permanent(String),
-}
-
-pub type DResult<T> = Result<T, DriveError>;
-
+/// A file's metadata as Drive sends it.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct FileMeta {
-    pub id: String,
+struct FileMeta {
+    id: String,
     #[serde(default)]
-    pub name: String,
+    name: String,
     #[serde(default)]
-    pub mime_type: String,
+    mime_type: String,
     #[serde(default)]
-    pub parents: Vec<String>,
-    pub md5_checksum: Option<String>,
-    pub size: Option<String>,
+    parents: Vec<String>,
+    md5_checksum: Option<String>,
+    size: Option<String>,
     #[serde(default)]
-    pub trashed: bool,
-    pub head_revision_id: Option<String>,
+    trashed: bool,
+    head_revision_id: Option<String>,
 }
 
-impl FileMeta {
-    pub fn size_bytes(&self) -> Option<u64> {
-        self.size.as_deref().and_then(|s| s.parse().ok())
+impl From<FileMeta> for RemoteMeta {
+    fn from(m: FileMeta) -> Self {
+        RemoteMeta {
+            folder: m.mime_type == FOLDER_MIME,
+            size: m.size.as_deref().and_then(|s| s.parse().ok()),
+            hash: m.md5_checksum.map(ContentHash::md5),
+            id: m.id,
+            name: m.name,
+            parents: m.parents,
+            trashed: m.trashed,
+        }
     }
-}
-
-#[derive(Debug, PartialEq)]
-pub enum UploadStatus {
-    Done(FileMeta),
-    /// Upload continues from this byte offset.
-    Next(u64),
 }
 
 pub struct Drive {
@@ -89,7 +103,7 @@ impl Drive {
 
     /// Sends an authorised request, refreshing the token once on 401.
     /// Returns the response for 2xx and 308; other statuses become errors.
-    async fn call(&self, build: impl Fn(&reqwest::Client) -> RequestBuilder) -> DResult<Response> {
+    async fn call(&self, build: impl Fn(&reqwest::Client) -> RequestBuilder) -> RemoteResult<Response> {
         let mut refreshed = false;
         loop {
             let token = if refreshed {
@@ -101,7 +115,7 @@ impl Drive {
                 .bearer_auth(token)
                 .send()
                 .await
-                .map_err(|e| DriveError::Transient(format!("network error: {e}")))?;
+                .map_err(|e| RemoteError::Transient(format!("network error: {e}")))?;
             let st = resp.status();
             if st == StatusCode::UNAUTHORIZED && !refreshed {
                 refreshed = true;
@@ -114,15 +128,15 @@ impl Drive {
         }
     }
 
-    async fn json<T: for<'de> Deserialize<'de>>(resp: Response) -> DResult<T> {
+    async fn json<T: for<'de> Deserialize<'de>>(resp: Response) -> RemoteResult<T> {
         resp.json()
             .await
-            .map_err(|e| DriveError::Transient(format!("bad response from Drive: {e}")))
+            .map_err(|e| RemoteError::Transient(format!("bad response from Drive: {e}")))
     }
 
     /// Storage used and available in the account: (limit, usage, usage in Drive).
     /// A missing limit means unlimited storage.
-    pub async fn storage_quota(&self) -> DResult<(Option<u64>, u64, u64)> {
+    pub async fn storage_quota(&self) -> RemoteResult<StorageQuota> {
         let url = format!("{}/about", self.ep.api_base);
         let resp = self
             .call(|c| c.get(&url).query(&[("fields", "storageQuota")]))
@@ -133,14 +147,23 @@ impl Drive {
         Ok((num("limit"), num("usage").unwrap_or(0), num("usageInDrive").unwrap_or(0)))
     }
 
-    pub async fn get(&self, id: &str) -> DResult<FileMeta> {
+    /// My Drive.
+    pub async fn top_parent(&self) -> RemoteResult<String> {
+        Ok("root".into())
+    }
+
+    pub async fn get(&self, id: &str) -> RemoteResult<RemoteMeta> {
+        Ok(self.file(id).await?.into())
+    }
+
+    async fn file(&self, id: &str) -> RemoteResult<FileMeta> {
         let url = format!("{}/files/{id}", self.ep.api_base);
         let resp = self.call(|c| c.get(&url).query(&[("fields", FIELDS)])).await?;
         Self::json(resp).await
     }
 
     /// Non-trashed items named `name` directly inside `parent` that this app can see.
-    pub async fn find_child(&self, name: &str, parent: &str, folder: bool) -> DResult<Vec<FileMeta>> {
+    pub async fn find_child(&self, name: &str, parent: &str, folder: bool) -> RemoteResult<Vec<RemoteMeta>> {
         let mut q = format!(
             "name = '{}' and '{}' in parents and trashed = false",
             q_escape(name),
@@ -167,25 +190,25 @@ impl Drive {
             files: Vec<FileMeta>,
         }
         let list: List = Self::json(resp).await?;
-        Ok(list.files)
+        Ok(list.files.into_iter().map(Into::into).collect())
     }
 
-    pub async fn create_folder(&self, name: &str, parent: &str) -> DResult<FileMeta> {
+    pub async fn create_folder(&self, name: &str, parent: &str) -> RemoteResult<RemoteMeta> {
         let url = format!("{}/files", self.ep.api_base);
         let body = json!({ "name": name, "mimeType": FOLDER_MIME, "parents": [parent] });
         let resp = self
             .call(|c| c.post(&url).query(&[("fields", FIELDS)]).json(&body))
             .await?;
-        Self::json(resp).await
+        Ok(Self::json::<FileMeta>(resp).await?.into())
     }
 
     /// Renames and/or moves an item. `parents` = (new, old) when moving.
-    pub async fn update_meta(
+    pub async fn move_rename(
         &self,
         id: &str,
         name: Option<&str>,
         parents: Option<(&str, &str)>,
-    ) -> DResult<FileMeta> {
+    ) -> RemoteResult<RemoteMeta> {
         let url = format!("{}/files/{id}", self.ep.api_base);
         let mut query = vec![("fields", FIELDS.to_string())];
         if let Some((add, remove)) = parents {
@@ -199,12 +222,12 @@ impl Drive {
         let resp = self
             .call(|c| c.patch(&url).query(&query).json(&body))
             .await?;
-        Self::json(resp).await
+        Ok(Self::json::<FileMeta>(resp).await?.into())
     }
 
     /// Marks the current head revision "keep forever" so replacing the content never purges it.
-    pub async fn pin_head_revision(&self, id: &str) -> DResult<()> {
-        let meta = self.get(id).await?;
+    pub async fn keep_version(&self, id: &str) -> RemoteResult<()> {
+        let meta = self.file(id).await?;
         let Some(rev) = meta.head_revision_id else {
             return Ok(());
         };
@@ -224,7 +247,7 @@ impl Drive {
         parents: (&str, Option<&str>),
         size: u64,
         mime: &str,
-    ) -> DResult<String> {
+    ) -> RemoteResult<String> {
         let (parent, old_parent) = parents;
         let mut query = vec![
             ("uploadType", "resumable".to_string()),
@@ -261,11 +284,11 @@ impl Drive {
             .get(reqwest::header::LOCATION)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
-            .ok_or_else(|| DriveError::Transient("Drive did not return an upload session".into()))
+            .ok_or_else(|| RemoteError::Transient("Drive did not return an upload session".into()))
     }
 
     /// Asks a session how much it has received. NotFound = the session expired.
-    pub async fn query_upload(&self, session: &str, total: u64) -> DResult<UploadStatus> {
+    pub async fn query_upload(&self, session: &str, total: u64) -> RemoteResult<UploadStatus> {
         let resp = self
             .call(|c| {
                 c.put(session)
@@ -283,7 +306,7 @@ impl Drive {
         data: bytes::Bytes,
         start: u64,
         total: u64,
-    ) -> DResult<UploadStatus> {
+    ) -> RemoteResult<UploadStatus> {
         let range = if data.is_empty() {
             format!("bytes */{total}")
         } else {
@@ -302,7 +325,7 @@ impl Drive {
     }
 
     /// Bytes `start..end` of a file's content (for downloading placeholders on demand).
-    pub async fn download_range(&self, id: &str, start: u64, end: u64) -> DResult<bytes::Bytes> {
+    pub async fn download_range(&self, id: &str, start: u64, end: u64) -> RemoteResult<bytes::Bytes> {
         if end <= start {
             return Ok(bytes::Bytes::new());
         }
@@ -318,11 +341,11 @@ impl Drive {
             .await?;
         resp.bytes()
             .await
-            .map_err(|e| DriveError::Transient(format!("download interrupted: {e}")))
+            .map_err(|e| RemoteError::Transient(format!("download interrupted: {e}")))
     }
 
-    /// Streams a file's content into `out`; returns (md5 hex, bytes written).
-    pub async fn download(&self, id: &str, out: &mut tokio::fs::File) -> DResult<(String, u64)> {
+    /// Streams a file's content into `out`; returns (its MD5, bytes written).
+    pub async fn download(&self, id: &str, out: &mut tokio::fs::File) -> RemoteResult<(ContentHash, u64)> {
         let url = format!("{}/files/{id}", self.ep.api_base);
         let resp = self
             .call(|c| c.get(&url).query(&[("alt", "media")]).timeout(Duration::from_secs(24 * 3600)))
@@ -331,29 +354,29 @@ impl Drive {
         let mut hasher = Md5::new();
         let mut total = 0u64;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| DriveError::Transient(format!("download interrupted: {e}")))?;
+            let chunk = chunk.map_err(|e| RemoteError::Transient(format!("download interrupted: {e}")))?;
             hasher.update(&chunk);
             total += chunk.len() as u64;
             out.write_all(&chunk)
                 .await
-                .map_err(|e| DriveError::Permanent(format!("cannot write download: {e}")))?;
+                .map_err(|e| RemoteError::Permanent(format!("cannot write download: {e}")))?;
         }
         out.flush()
             .await
-            .map_err(|e| DriveError::Permanent(format!("cannot write download: {e}")))?;
-        Ok((hex::encode(hasher.finalize()), total))
+            .map_err(|e| RemoteError::Permanent(format!("cannot write download: {e}")))?;
+        Ok((ContentHash::md5(hex::encode(hasher.finalize())), total))
     }
 }
 
 /// Upload session URLs answer 404/410 once expired.
-fn gone_is_not_found(e: DriveError) -> DriveError {
+fn gone_is_not_found(e: RemoteError) -> RemoteError {
     match e {
-        DriveError::Permanent(m) if m.starts_with("410") => DriveError::NotFound,
+        RemoteError::Permanent(m) if m.starts_with("410") => RemoteError::NotFound,
         other => other,
     }
 }
 
-async fn upload_status(resp: Response) -> DResult<UploadStatus> {
+async fn upload_status(resp: Response) -> RemoteResult<UploadStatus> {
     if resp.status() == StatusCode::PERMANENT_REDIRECT {
         // "Range: bytes=0-N" lists what Drive has; absent means nothing yet.
         let next = resp
@@ -366,26 +389,26 @@ async fn upload_status(resp: Response) -> DResult<UploadStatus> {
             .unwrap_or(0);
         return Ok(UploadStatus::Next(next));
     }
-    Ok(UploadStatus::Done(Drive::json(resp).await?))
+    Ok(UploadStatus::Done(Drive::json::<FileMeta>(resp).await?.into()))
 }
 
-async fn classify(resp: Response) -> DriveError {
+async fn classify(resp: Response) -> RemoteError {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     let (reason, message) = google_error(&body);
     let text = format!("{} {}", status.as_u16(), message.as_deref().unwrap_or(status.canonical_reason().unwrap_or("")));
     match status.as_u16() {
-        401 => DriveError::Auth(text),
-        404 => DriveError::NotFound,
-        408 | 429 | 500..=599 => DriveError::Transient(text),
+        401 => RemoteError::Auth(text),
+        404 => RemoteError::NotFound,
+        408 | 429 | 500..=599 => RemoteError::Transient(text),
         403 if matches!(
             reason.as_deref(),
             Some("rateLimitExceeded" | "userRateLimitExceeded" | "backendError")
         ) =>
         {
-            DriveError::Transient(text)
+            RemoteError::Transient(text)
         }
-        _ => DriveError::Permanent(text),
+        _ => RemoteError::Permanent(text),
     }
 }
 
@@ -407,6 +430,23 @@ mod tests {
     #[test]
     fn query_escaping() {
         assert_eq!(q_escape(r"O'Brien \ co"), r"O\'Brien \\ co");
+    }
+
+    #[test]
+    fn neutral_metadata() {
+        let folder = FileMeta { id: "F".into(), mime_type: FOLDER_MIME.into(), ..Default::default() };
+        assert!(RemoteMeta::from(folder).folder);
+        let file = FileMeta {
+            id: "A".into(),
+            name: "a.txt".into(),
+            parents: vec!["F".into()],
+            md5_checksum: Some("ab".into()),
+            size: Some("3".into()),
+            ..Default::default()
+        };
+        let m = RemoteMeta::from(file);
+        assert!(!m.folder && m.holds("ab", 3));
+        assert_eq!((m.id.as_str(), m.name.as_str(), m.parents.as_slice()), ("A", "a.txt", &["F".to_string()][..]));
     }
 
     #[test]

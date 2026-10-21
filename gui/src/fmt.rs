@@ -1,6 +1,7 @@
-//! Human-readable dates, counts and status labels. Pure functions, unit tested.
+//! Human-readable dates, counts, speeds and status labels. Pure functions, unit tested.
 
 use clouddrop::db::{FolderStats, State};
+use clouddrop::util::human_bytes;
 
 /// A calendar moment in local time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +110,28 @@ pub fn group_by_day<T>(
     groups.into_iter().map(|(h, _, v)| (h, v)).collect()
 }
 
+/// Upload speed: "850.0 KB/s", "2.4 MB/s".
+pub fn speed(bytes_per_second: f64) -> String {
+    format!("{}/s", human_bytes(bytes_per_second.round() as u64))
+}
+
+/// Time left at the current speed: "less than a minute left", "about 5 minutes left",
+/// "about 2 hours left", "more than a day left".
+pub fn time_left(seconds: u64) -> String {
+    if seconds < 60 {
+        return "less than a minute left".into();
+    }
+    let minutes = (seconds as f64 / 60.0).round() as u64;
+    if minutes < 60 {
+        return if minutes == 1 { "about a minute left".into() } else { format!("about {minutes} minutes left") };
+    }
+    let hours = (seconds as f64 / 3600.0).round() as u64;
+    if hours < 24 {
+        return if hours == 1 { "about an hour left".into() } else { format!("about {hours} hours left") };
+    }
+    "more than a day left".into()
+}
+
 pub fn files(n: i64) -> String {
     if n == 1 { "1 file".into() } else { format!("{n} files") }
 }
@@ -204,6 +227,18 @@ pub fn folder_status(s: &FolderStats) -> Option<Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speed_and_time_left() {
+        assert_eq!(speed(2.4 * 1024.0 * 1024.0), "2.4 MB/s");
+        assert_eq!(speed(850.0 * 1024.0), "850.0 KB/s");
+        assert_eq!(time_left(20), "less than a minute left");
+        assert_eq!(time_left(80), "about a minute left");
+        assert_eq!(time_left(5 * 60 + 10), "about 5 minutes left");
+        assert_eq!(time_left(3600 + 600), "about an hour left");
+        assert_eq!(time_left(5 * 3600), "about 5 hours left");
+        assert_eq!(time_left(30 * 3600), "more than a day left");
+    }
 
     /// Test stand-in for the local time zone: UTC.
     pub fn utc(ms: i64) -> Civil {

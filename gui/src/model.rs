@@ -74,13 +74,17 @@ impl Filter {
         }
     }
 
-    pub fn empty_text(self) -> (&'static str, &'static str) {
+    /// Title and text of the empty list; `cloud` names where CloudDrop uploads.
+    pub fn empty_text(self, cloud: &str) -> (&'static str, String) {
         match self {
-            Filter::All => ("Nothing here yet", ""),
-            Filter::OnComputer => ("No files on this computer", "Everything in this folder is kept only in Google Drive."),
-            Filter::CloudOnly => ("No cloud-only files", "Files you free up or remove from this computer stay in Google Drive and show up here."),
-            Filter::Uploading => ("Nothing is uploading", "Everything here has been uploaded."),
-            Filter::Failed => ("No failed uploads", "Every file here was uploaded successfully."),
+            Filter::All => ("Nothing here yet", String::new()),
+            Filter::OnComputer => ("No files on this computer", format!("Everything in this folder is kept only in {cloud}.")),
+            Filter::CloudOnly => (
+                "No cloud-only files",
+                format!("Files you free up or remove from this computer stay in {cloud} and show up here."),
+            ),
+            Filter::Uploading => ("Nothing is uploading", "Everything here has been uploaded.".into()),
+            Filter::Failed => ("No failed uploads", "Every file here was uploaded successfully.".into()),
         }
     }
 }

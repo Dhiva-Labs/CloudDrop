@@ -11,6 +11,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Builds from source offer the experimental providers (Proton Drive, through Proton's CLI);
+# packaged builds (PPA, snap, Store) never do. CLOUDDROP_EXPERIMENTAL_PROVIDERS=0 leaves them out.
+export CLOUDDROP_EXPERIMENTAL_PROVIDERS="${CLOUDDROP_EXPERIMENTAL_PROVIDERS:-1}"
 
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"

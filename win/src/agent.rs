@@ -2,10 +2,11 @@
 //! notification-area icon on the main thread.
 
 use clouddrop::config::{self, Config};
+use clouddrop::connections::Connection;
 use clouddrop::db::{Db, Kind, State};
 use clouddrop::store::{LocalStore, PlainStore};
 use clouddrop::winstore::WinStore;
-use clouddrop::{auth, control, engine};
+use clouddrop::{control, daemon};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -54,7 +55,7 @@ pub fn main() {
 }
 
 fn init_logging() {
-    let dir = config::data_dir();
+    let dir = config::base_data_dir();
     let _ = std::fs::create_dir_all(&dir);
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -71,7 +72,8 @@ fn init_logging() {
     }
 }
 
-/// `clouddrop-agent --unregister`, run by the uninstaller.
+/// `clouddrop-agent --unregister`, run by the uninstaller: every connection's folder stops
+/// being a cloud folder.
 fn unregister() -> anyhow::Result<()> {
     if control::daemon_running() {
         let _ = control::stop_service();
@@ -82,8 +84,7 @@ fn unregister() -> anyhow::Result<()> {
             std::thread::sleep(Duration::from_millis(500));
         }
     }
-    let sync_dir = Config::load().ok().map(|c| c.sync_dir);
-    crate::cloud::unregister(sync_dir.as_deref())
+    crate::cloud::unregister_all()
 }
 
 /// A named mutex makes a second launch exit quietly.
@@ -98,56 +99,54 @@ fn single_instance() -> bool {
     }
 }
 
+/// Every connection's engine (`daemon::supervise`), each with its folder as a File Explorer
+/// cloud folder, until Quit or `clouddrop service stop`.
 fn background(rt: tokio::runtime::Handle, quit: watch::Receiver<bool>) {
-    // The app writes the config and the sign-in; wait for both.
-    while !(control::is_configured() && control::is_signed_in()) {
-        if *quit.borrow() || EXIT.load(Ordering::SeqCst) {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(3));
+    // Cloud folders of connections removed while the agent wasn't running.
+    crate::cloud::forget_removed();
+    let handle = rt.clone();
+    let supervise = daemon::supervise(
+        move |conn, cfg, stop| run_connection(conn, cfg, stop, handle.clone()),
+        quit,
+    );
+    if let Err(e) = rt.block_on(supervise) {
+        tracing::error!("CloudDrop stopped: {e:#}");
     }
-    let cfg = match Config::load() {
-        Ok(c) => c,
-        Err(e) => return tracing::error!("cannot load settings: {e:#}"),
-    };
-    let _ = std::fs::create_dir_all(&cfg.sync_dir);
-    let db = match Db::open_default() {
-        Ok(db) => Arc::new(db),
-        Err(e) => return tracing::error!("cannot open the state database: {e:#}"),
-    };
-    let drive = clouddrop::drive_for(&cfg, auth::token_path());
+}
 
-    let connection = match crate::cloud::connect(&cfg, drive.clone(), rt.clone()) {
-        Ok(c) => Some(c),
+/// One connection: its folder connected as a cloud folder, and its engine until `stop`. When the
+/// connection was removed, its folder stops being a cloud folder.
+async fn run_connection(
+    conn: Connection,
+    cfg: Config,
+    stop: watch::Receiver<bool>,
+    rt: tokio::runtime::Handle,
+) -> anyhow::Result<()> {
+    let _ = std::fs::create_dir_all(&cfg.sync_dir);
+    let remote = clouddrop::remote_in(&cfg, &conn.data, &conn.config);
+    let link = match crate::cloud::Link::open(&conn, &cfg, remote.clone(), rt) {
+        Ok(link) => Some(link),
         Err(e) => {
-            tracing::warn!("File Explorer integration unavailable, using plain files: {e:#}");
+            tracing::warn!("File Explorer integration unavailable for {}, using plain files: {e:#}", cfg.sync_dir.display());
             None
         }
     };
-    let store: Arc<dyn LocalStore> = if connection.is_some() {
+    let store: Arc<dyn LocalStore> = if link.is_some() {
         Arc::new(WinStore)
     } else {
         Arc::new(PlainStore)
     };
-    if connection.is_some() {
+    if link.is_some()
+        && let Ok(db) = conn.open_db()
+    {
         mark_existing(&db, &cfg, store.as_ref());
     }
-
-    let opts = engine::RunOptions {
-        config_file: Some(config::config_path()),
-        store,
-    };
-    if let Err(e) = rt.block_on(engine::run_with_options(
-        cfg,
-        opts,
-        db,
-        drive,
-        config::data_dir(),
-        quit,
-    )) {
-        tracing::error!("engine stopped: {e:#}");
+    let result = daemon::run_engine(conn.clone(), cfg.clone(), stop, remote, store).await;
+    drop(link);
+    if !conn.exists() {
+        crate::cloud::forget(&conn.name, &cfg.sync_dir);
     }
-    drop(connection);
+    result
 }
 
 /// Files uploaded before the folder became a sync root get Explorer's in-sync mark.

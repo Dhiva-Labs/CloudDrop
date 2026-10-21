@@ -62,7 +62,7 @@ void main() {
   tearDownAll(unpinTime);
 
   // 1. Home, uploading a few photos.
-  shot('01-home');
+  shot('01-home', act: (tester, t) => t.measureSpeed(4 * 1024 * 1024));
 
   // 2. Files at the top: folders, and files that are uploaded, only in Google Drive, uploading.
   shot('02-files', pane: AppPane.files);

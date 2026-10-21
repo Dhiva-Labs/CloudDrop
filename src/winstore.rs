@@ -19,13 +19,6 @@ const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
 
 pub struct WinStore;
 
-impl WinStore {
-    /// Available once the sync folder is a registered sync root.
-    pub fn new() -> Option<Self> {
-        let cfg = crate::config::Config::load().ok()?;
-        is_sync_root(&cfg.sync_dir).then_some(WinStore)
-    }
-}
 
 /// `path` is inside a registered Cloud Files sync root.
 pub fn is_sync_root(path: &Path) -> bool {
