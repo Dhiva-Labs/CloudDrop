@@ -9,7 +9,7 @@ use crate::connections::{self, Connection};
 use crate::control::{self, DaemonBeat};
 use crate::db::Db;
 use crate::engine::{self, RunOptions};
-use crate::remote::Provider;
+use crate::remote::{Provider, Remote};
 use crate::store::LocalStore;
 use crate::util::now_ms;
 use anyhow::Result;
@@ -189,13 +189,18 @@ async fn reap(running: &mut HashMap<String, Running>, held: &mut HashMap<String,
     }
 }
 
-/// One connection's engine, with its own database, client, status file and notifications,
-/// until `stop` flips. `store` is how its local copies are kept (Windows: its sync root's
-/// placeholders).
-pub async fn run_engine(conn: Connection, cfg: Config, stop: watch::Receiver<bool>, store: Arc<dyn LocalStore>) -> Result<()> {
+/// One connection's engine, with its own database, status file and notifications, until
+/// `stop` flips. `remote` is its client ([`crate::remote_in`]); `store` is how its local copies
+/// are kept (Windows: its sync root's placeholders).
+pub async fn run_engine(
+    conn: Connection,
+    cfg: Config,
+    stop: watch::Receiver<bool>,
+    remote: Arc<Remote>,
+    store: Arc<dyn LocalStore>,
+) -> Result<()> {
     std::fs::create_dir_all(&conn.data)?;
     let db = Arc::new(Db::open(&conn.db_path())?);
-    let remote = crate::remote_in(&cfg, &conn.data, &conn.config);
     let opts = RunOptions { config_file: Some(conn.config.clone()), store, label: conn.notification_label() };
     engine::run_with_options(cfg, opts, db, remote, conn.data.clone(), stop).await
 }

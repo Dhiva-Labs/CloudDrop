@@ -5,7 +5,8 @@
 //! copy is verified (the provider's hash, or a download where it reports none).
 
 use anyhow::{Result, bail};
-use clouddrop::config::{self, Config};
+use clouddrop::config::Config;
+use clouddrop::connections::Connection as ConnectionInfo;
 use clouddrop::db::{Db, State};
 use clouddrop::jobs::{local_kind, proven};
 use clouddrop::remote::Remote;
@@ -15,7 +16,7 @@ use cloud_filter::error::{CResult, CloudErrorKind};
 use cloud_filter::filter::{Request, SyncFilter, info, ticket};
 use cloud_filter::root::{
     Connection, HydrationType, PopulationType, ProtectionMode, SecurityId, Session, SyncRootId,
-    SyncRootIdBuilder, SyncRootInfo, is_supported,
+    SyncRootIdBuilder, SyncRootInfo, active_roots, is_supported,
 };
 use cloud_filter::utility::WriteAt;
 use std::path::{Path, PathBuf};
@@ -30,18 +31,42 @@ pub struct Filter {
     remote: Arc<Remote>,
     root: PathBuf,
     db_path: PathBuf,
+    /// The connection's data directory, for temporary verify downloads.
+    data_dir: PathBuf,
 }
 
-/// Registers the sync folder with File Explorer (once) and connects to it.
-pub fn connect(cfg: &Config, remote: Arc<Remote>, rt: tokio::runtime::Handle) -> Result<Connection<Filter>> {
+/// The provider name of every CloudDrop sync root: `CloudDrop!<user SID>!<connection name>`.
+const PROVIDER: &str = "CloudDrop";
+
+/// How File Explorer's navigation pane names a connection's folder: "CloudDrop" for the default
+/// connection (as it always did), "CloudDrop - Work" for the others.
+pub fn display_name(conn: &ConnectionInfo) -> String {
+    if conn.is_default() { PROVIDER.to_string() } else { format!("{PROVIDER} - {}", conn.name) }
+}
+
+/// Registers a connection's folder with File Explorer (once) and connects to it.
+fn connect(
+    conn: &ConnectionInfo,
+    cfg: &Config,
+    remote: Arc<Remote>,
+    rt: tokio::runtime::Handle,
+) -> Result<Connection<Filter>> {
     if !is_supported()? {
         bail!("this version of Windows has no cloud files support");
     }
-    let id = sync_root_id()?;
+    let id = sync_root_id(&conn.name)?;
+    if id.is_registered()? && !same_folder(&id.info()?.path(), &cfg.sync_dir) {
+        // The connection's folder changed (removed and added again while the agent wasn't
+        // running): the old folder stops being a cloud folder.
+        let old = id.info()?.path();
+        release(&old);
+        id.unregister()?;
+        tracing::info!("{} is no longer a cloud folder", old.display());
+    }
     if !id.is_registered()? {
         let exe = std::env::current_exe()?;
         let info = SyncRootInfo::default()
-            .with_display_name("CloudDrop")
+            .with_display_name(display_name(conn))
             .with_icon(format!("{},0", exe.display()))
             .with_version(env!("CARGO_PKG_VERSION"))
             .with_hydration_type(HydrationType::Full)
@@ -56,28 +81,128 @@ pub fn connect(cfg: &Config, remote: Arc<Remote>, rt: tokio::runtime::Handle) ->
         rt,
         remote,
         root: cfg.sync_dir.clone(),
-        db_path: config::data_dir().join("state.db"),
+        db_path: conn.db_path(),
+        data_dir: conn.data.clone(),
     };
     Ok(Session::new().connect(&cfg.sync_dir, filter)?)
 }
 
-fn sync_root_id() -> Result<SyncRootId> {
-    Ok(SyncRootIdBuilder::new("CloudDrop")
+/// A connection's folder connected to File Explorer, held on a thread of its own from connect
+/// to disconnect; dropping it disconnects.
+pub struct Link {
+    done: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Link {
+    pub fn open(conn: &ConnectionInfo, cfg: &Config, remote: Arc<Remote>, rt: tokio::runtime::Handle) -> Result<Self> {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
+        let (done, done_rx) = std::sync::mpsc::channel::<()>();
+        let (conn, cfg) = (conn.clone(), cfg.clone());
+        let thread = std::thread::spawn(move || match connect(&conn, &cfg, remote, rt) {
+            Ok(connection) => {
+                let _ = ready_tx.send(Ok(()));
+                let _ = done_rx.recv();
+                drop(connection);
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+            }
+        });
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Self { done, thread: Some(thread) }),
+            Ok(Err(e)) => Err(e),
+            Err(_) => bail!("connecting the folder to File Explorer failed"),
+        }
+    }
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        let _ = self.done.send(());
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+fn sync_root_id(name: &str) -> Result<SyncRootId> {
+    Ok(SyncRootIdBuilder::new(PROVIDER)
         .user_security_id(SecurityId::current_user()?)
-        .account_name("default")
+        .account_name(name)
         .build())
 }
 
-/// Uninstall: the folder stops being a cloud folder in File Explorer. Run with
-/// the agent stopped.
-pub fn unregister(sync_dir: Option<&Path>) -> Result<()> {
-    if let Some(dir) = sync_dir.filter(|d| is_sync_root(d)) {
-        release(dir);
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| p.to_string_lossy().trim_end_matches('\\').to_lowercase();
+    norm(a) == norm(b)
+}
+
+/// This user's CloudDrop sync roots: (connection name, id, folder).
+fn our_sync_roots() -> Result<Vec<(String, SyncRootId, PathBuf)>> {
+    let prefix = sync_root_id("")?.to_os_string().to_string_lossy().into_owned();
+    Ok(active_roots()?
+        .into_iter()
+        .filter_map(|info| {
+            let id = info.id();
+            let text = id.to_os_string().to_string_lossy().into_owned();
+            let name = text.strip_prefix(&prefix)?.to_string();
+            Some((name, id, info.path()))
+        })
+        .collect())
+}
+
+/// A removed connection's folder stops being a cloud folder: files with their data become
+/// ordinary files; placeholders of freed files, which have none, are removed (they stay in the
+/// cloud). Nothing in the cloud is touched.
+pub fn forget(name: &str, sync_dir: &Path) {
+    if is_sync_root(sync_dir) {
+        release(sync_dir);
     }
-    let id = sync_root_id()?;
-    if id.is_registered()? {
+    match sync_root_id(name).and_then(|id| Ok(if id.is_registered()? { Some(id) } else { None })) {
+        Ok(Some(id)) => match id.unregister() {
+            Ok(()) => tracing::info!("{} is no longer a cloud folder", sync_dir.display()),
+            Err(e) => tracing::warn!("cannot remove {} from File Explorer: {e}", sync_dir.display()),
+        },
+        Ok(None) => {}
+        Err(e) => tracing::warn!("cannot look up the cloud folder of \"{name}\": {e:#}"),
+    }
+}
+
+/// At start: the cloud folders of connections that were removed (or moved to another folder)
+/// while the agent wasn't running stop being cloud folders.
+pub fn forget_removed() {
+    let roots = match our_sync_roots() {
+        Ok(r) => r,
+        Err(e) => return tracing::warn!("cannot list the cloud folders: {e:#}"),
+    };
+    for (name, id, path) in roots {
+        let kept = ConnectionInfo::named(&name)
+            .ok()
+            .filter(ConnectionInfo::exists)
+            .and_then(|c| c.load().ok())
+            .is_some_and(|cfg| same_folder(&cfg.sync_dir, &path));
+        if kept {
+            continue;
+        }
+        if is_sync_root(&path) {
+            release(&path);
+        }
+        match id.unregister() {
+            Ok(()) => tracing::info!("{} (\"{name}\") is no longer a cloud folder", path.display()),
+            Err(e) => tracing::warn!("cannot remove {} from File Explorer: {e}", path.display()),
+        }
+    }
+}
+
+/// Uninstall: every connection's folder stops being a cloud folder. Run with the agent stopped.
+pub fn unregister_all() -> Result<()> {
+    for (name, id, path) in our_sync_roots()? {
+        if is_sync_root(&path) {
+            release(&path);
+        }
         id.unregister()?;
-        tracing::info!("removed the CloudDrop folder from File Explorer");
+        tracing::info!("removed {} (\"{name}\") from File Explorer", path.display());
     }
     Ok(())
 }
@@ -138,7 +263,7 @@ impl Filter {
         if e.state != State::Synced || hash.kind != local_kind(caps) {
             return false;
         }
-        let tmp_dir = config::data_dir();
+        let tmp_dir = self.data_dir.clone();
         let remote: &Remote = &self.remote;
         let check = async {
             match remote.get(&id).await {

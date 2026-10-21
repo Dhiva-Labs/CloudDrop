@@ -578,7 +578,11 @@ async fn dispatch(connection: Option<String>, cmd: Cmd) -> Result<String> {
             });
             // One engine per connection, each started once it is set up and signed in.
             daemon::supervise(
-                |conn, cfg, stop| daemon::run_engine(conn, cfg, stop, clouddrop::store::platform()),
+                |conn, cfg, stop| {
+                    let remote = clouddrop::remote_in(&cfg, &conn.data, &conn.config);
+                    let store = clouddrop::store::for_folder(&cfg.sync_dir);
+                    daemon::run_engine(conn, cfg, stop, remote, store)
+                },
                 rx,
             )
             .await?;
