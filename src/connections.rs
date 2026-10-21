@@ -286,9 +286,28 @@ pub fn lexical(p: &Path) -> PathBuf {
     out
 }
 
-/// The folder as compared: resolved where it exists (links), ignoring case on Windows.
+/// The folder as compared: resolved as far as it exists, ignoring case on Windows. A folder that
+/// doesn't exist yet resolves through its nearest existing parent, so it compares like the folders
+/// around it: links, and on Windows 8.3 short names (`C:\Users\RUNNER~1\…`), resolve the same way.
 fn comparable(p: &Path) -> PathBuf {
-    let p = std::fs::canonicalize(p).unwrap_or_else(|_| lexical(p));
+    let p = std::fs::canonicalize(p).unwrap_or_else(|_| {
+        let p = lexical(p);
+        let mut rest = Vec::new();
+        let mut at = p.as_path();
+        loop {
+            if let Ok(mut resolved) = std::fs::canonicalize(at) {
+                resolved.extend(rest.iter().rev());
+                return resolved;
+            }
+            match (at.parent(), at.file_name()) {
+                (Some(parent), Some(name)) => {
+                    rest.push(name.to_os_string());
+                    at = parent;
+                }
+                _ => return p,
+            }
+        }
+    });
     // canonicalize gives \\?\C:\… on Windows; compare plain paths.
     let text = p.to_string_lossy();
     let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
@@ -451,6 +470,11 @@ mod tests {
         {
             std::os::unix::fs::symlink(&a, d.path().join("link")).unwrap();
             assert!(folders_overlap(&d.path().join("link"), &a), "links resolve");
+            // A folder that doesn't exist yet resolves through its parent (as an 8.3 short name
+            // does on Windows).
+            assert!(folders_overlap(&d.path().join("link/new"), &a), "a new folder inside, through a link");
+            assert!(folders_overlap(&a, &d.path().join("link/new")));
+            assert!(!folders_overlap(&d.path().join("link2/new"), &a));
         }
     }
 
