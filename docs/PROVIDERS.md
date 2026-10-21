@@ -2,8 +2,8 @@
 
 Status: **OneDrive, Dropbox, WebDAV, Nextcloud, S3-compatible storage, SFTP and MEGA are built**
 and tested against fake servers (SFTP against a real OpenSSH); none has been tried with a real
-account yet. Proton Drive waits for Proton's SDK. Several clouds at once (phase 5) is designed in
-[Several clouds at once](#several-clouds-at-once). See [The providers](#the-providers) and
+account yet. Proton Drive waits for Proton's SDK. **Several clouds at once** (phase 5) is built:
+see [Several clouds at once](#several-clouds-at-once). See [The providers](#the-providers) and
 [Phases](#phases).
 
 ## What must not change
@@ -765,7 +765,7 @@ The GTK app and the Windows app mirror each other:
 | 2 | **Self-hosted**: Nextcloud (first-class), generic WebDAV, S3-compatible, SFTP. Verify-by-download and keep-aside copy land here. | e2e against real servers in CI containers: Nextcloud, MinIO, OpenSSH. | built; tested on fakes and a real OpenSSH, not yet in CI containers |
 | 3 | **MEGA** (SDK or native, from the spike). | Resume, 2FA and verify-by-download tested; PPA and Windows builds reproducible. | built (native client); live account still to try |
 | 4 | **Proton Drive**, experimental, when third-party sign-in exists in the official SDK. | Proton's third-party terms met; their review if they require one. | waiting for Proton's SDK |
-| 5 | **Several clouds at once**: one engine per connection (own folder, config file and data directory, see [Several clouds at once](#several-clouds-at-once)); the apps get a connection switcher. | Two providers syncing side by side. | in progress |
+| 5 | **Several clouds at once**: one engine per connection (own folder, config file and data directory, see [Several clouds at once](#several-clouds-at-once)); the apps get a connection switcher. | Two providers syncing side by side. | built: tested with Google Drive, WebDAV and S3 fakes side by side (`tests/connections.rs`); the Windows agent not yet compiled on Windows |
 
 ## Testing
 
@@ -776,6 +776,9 @@ The GTK app and the Windows app mirror each other:
   back, against each fake server.
 - **The engine's rules for other providers on the Drive mock**: `tests/e2e.rs` with
   `Harness::with_caps` (verify by download, path ids, forbidden characters, case-only clashes).
+- **Several clouds at once**: `tests/connections.rs` runs the real `clouddrop run` in a sandbox
+  with connections on the fake Google Drive, WebDAV and S3 side by side: pausing one, freeing by
+  path, adding one and removing one while the daemon runs, and the CLI's rules.
 - **Still to do**: live smoke tests with real accounts (`CLOUDDROP_LIVE_<PROVIDER>`), and real
   Nextcloud and MinIO servers in CI.
 
