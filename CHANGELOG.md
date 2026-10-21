@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-10-21
 
-A new look, ARM64, and more clouds.
+More clouds, several folders at once, a new look with a dark style, and ARM64.
 
 - **More clouds (preview)**: besides Google Drive, CloudDrop can upload to OneDrive, Dropbox,
   a WebDAV server, Nextcloud, S3-compatible storage (AWS, Backblaze B2, Wasabi, R2, MinIO…),
@@ -28,6 +28,9 @@ A new look, ARM64, and more clouds.
 - Command line: `clouddrop connections [add|remove]`, `--connection NAME` on every command,
   `status --all`.
 
+- **Appearance**: Settings opens with a light or dark style (or the system's) and an accent
+  color, in both apps; it applies at once and is the same for every folder (`theme` and
+  `accent` in config.toml).
 - New logo: a cloud on a sky-blue tile with a drop cut through it, on Linux, Windows, the
   Microsoft Store and the notification-area icons.
 - Home: a status card in the logo's colours that shows overall progress, upload speed and
@@ -41,7 +44,16 @@ A new look, ARM64, and more clouds.
 - Linux and Windows on ARM64: CI builds and tests CloudDrop natively on arm64 as well as
   x64 (Linux tests, Debian package and snap; Windows engine, Cloud Files test, app and
   packages). Releases carry `CloudDrop-<version>-windows-arm64.zip` next to the x64 zip.
-  `snap/snapcraft.yaml` and `debian/` now build for arm64.
+  `snap/snapcraft.yaml` and `debian/` now build for arm64, and the Microsoft Store
+  package declares the processor architecture it was built for.
+- Snap (strict, amd64 and arm64): the upload engine and the top-bar icon start with the
+  desktop session as autostart apps, since a snap has no systemd user service, and the
+  setup assistant's "start at sign-in" switches them on and off.
+- Only one upload engine runs at a time: a second `clouddrop run` exits with "CloudDrop
+  is already running" instead of uploading in parallel, and only one top-bar icon is
+  shown when more than one CloudDrop process is running.
+- The desktop app needs libadwaita 1.5 instead of 1.6 (GNOME 46), so it also runs on
+  older desktops.
 
 ## 0.2.0 — 2026-10-15
 
