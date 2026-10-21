@@ -131,7 +131,15 @@ class FakeEngine implements EngineApi {
   Future<AppConfig?> configGet() async => config;
 
   @override
-  Future<ActionResult> configSet(String key, String value) async => _do('config set $key $value');
+  Future<ActionResult> configSet(String key, String value) async {
+    final r = _do('config set $key $value');
+    // The look is read back from the config (the other settings stay as the test set them).
+    final c = config;
+    if (r.ok && c != null && (key == 'theme' || key == 'accent')) {
+      config = key == 'theme' ? c.copyWith(theme: value) : c.copyWith(accent: value);
+    }
+    return r;
+  }
 
   @override
   Future<List<CloudProvider>> providers() async => providerList;

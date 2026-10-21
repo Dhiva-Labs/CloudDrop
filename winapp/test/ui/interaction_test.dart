@@ -939,7 +939,7 @@ void main() {
     Future<TestApp> settings(WidgetTester tester, {Size size = wide, TestApp? app}) async {
       final t = app ?? busyApp();
       t.controller.pane.value = AppPane.settings;
-      await pumpApp(tester, t, size: Size(size.width, 1300));
+      await pumpApp(tester, t, size: Size(size.width, 1450));
       return t;
     }
 
@@ -1046,6 +1046,36 @@ void main() {
       await tester.pump(const Duration(milliseconds: 600));
       await tester.settle();
       expect(t.engine.calls, contains('config set parallel_uploads 4'));
+    });
+
+    uiTest('appearance: theme and accent are written and shown at once', (tester) async {
+      final t = busyApp();
+      t.controller.pane.value = AppPane.settings;
+      await pumpApp(tester, t, size: const Size(1100, 1450), brightness: null);
+      FluentThemeData look() => FluentTheme.of(tester.element(find.text('Theme')));
+      expect(find.text('Same as Windows'), findsOneWidget);
+      expect(look().brightness, Brightness.light);
+      expect(look().accentColor.normal, const Color(0xFF2F7CF0));
+
+      await tester.tap(find.byType(ComboBox<String>));
+      await tester.settle();
+      await tester.tap(find.text('Dark').last);
+      await tester.settle();
+      expect(t.engine.calls.last, 'config set theme dark');
+      expect(look().brightness, Brightness.dark);
+
+      await tester.tap(find.byTooltip('Purple'));
+      await tester.settle();
+      expect(t.engine.calls.last, 'config set accent purple');
+      expect(look().accentColor.normal, const Color(0xFF7C4DD6));
+      expect(look().brightness, Brightness.dark, reason: 'still dark');
+
+      // The chosen one again: nothing to save.
+      final before = t.engine.calls.length;
+      await tester.tap(find.byTooltip('Purple'));
+      await tester.settle();
+      expect(t.engine.calls.length, before);
+      await tester.pump(const Duration(seconds: 6));
     });
 
     uiTest('ignored patterns: Apply sends the list', (tester) async {

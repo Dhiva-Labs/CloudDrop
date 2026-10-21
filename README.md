@@ -139,8 +139,8 @@ Copy or move files into `~/CloudDrop` (or drag them onto CloudDrop's Files tab).
   computer*, *Cloud-only*, *Uploading* or *Failed*.
 - **Activity** lists what was uploaded, moved, freed, downloaded back or failed; show just
   uploads, freed space, downloads or problems.
-- **Settings**: automatic space saving, kept folders, Google account, upload speed,
-  notifications, ignored files, top-bar icon.
+- **Settings**: light or dark style and an accent color, automatic space saving, kept
+  folders, Google account, upload speed, notifications, ignored files, top-bar icon.
 
 Closing the window keeps CloudDrop in the top bar.
 
@@ -193,6 +193,8 @@ settle_secs = 2                # wait after the last change before uploading
 notifications = true
 auto_free_days = 30            # absent = never, 0 = right after upload
 keep_local = ["Work"]          # folders never freed automatically
+theme = "dark"                 # absent = follow the system; or "light"
+accent = "teal"                # absent = the system's; blue, teal, green, purple, pink, orange
 ignore = [".goutputstream-*", "*.part", "*.crdownload", "*.tmp", "~$*", ".~lock.*#", "*.swp", "*~", ".Trash-*"]
 ```
 

@@ -89,7 +89,9 @@ Future<void> pumpApp(
   WidgetTester tester,
   TestApp t, {
   Size size = wide,
-  Brightness brightness = Brightness.light,
+
+  /// null follows the `theme` setting.
+  Brightness? brightness = Brightness.light,
   bool settle = true,
   double devicePixelRatio = 1.0,
 }) async {
@@ -100,7 +102,11 @@ Future<void> pumpApp(
       app: t.controller,
       fontFamily: testFont,
       fontFamilyFallback: const [testFallback],
-      themeMode: brightness == Brightness.dark ? ThemeMode.dark : ThemeMode.light,
+      themeMode: switch (brightness) {
+        Brightness.dark => ThemeMode.dark,
+        Brightness.light => ThemeMode.light,
+        null => null,
+      },
       enableDrop: false,
     ),
   );

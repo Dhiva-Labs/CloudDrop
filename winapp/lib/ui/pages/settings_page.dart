@@ -1,4 +1,4 @@
-/// Settings: space saving, account, folders, uploading, background, about
+/// Settings: appearance, space saving, account, folders, uploading, background, about
 /// (`gui/src/settings.rs`). Every change is a `clouddrop config set` / service command and
 /// takes effect at once.
 library;
@@ -84,7 +84,9 @@ class _SettingsPageState extends State<SettingsPage> {
           }
           return PageBody(
             children: [
-              const SectionTitle('Space saving', padding: EdgeInsets.only(top: 4, bottom: 8)),
+              const SectionTitle('Appearance', padding: EdgeInsets.only(top: 4, bottom: 8)),
+              _appearance(context, app, cfg),
+              const SectionTitle('Space saving'),
               _autoFree(context, app, cfg),
               const SizedBox(height: 4),
               _keepFolders(context, app, cfg),
@@ -131,6 +133,57 @@ class _SettingsPageState extends State<SettingsPage> {
           );
         },
       ),
+    );
+  }
+
+  // ---------- appearance ----------
+
+  static const _themes = {'system': 'Same as Windows', 'light': 'Light', 'dark': 'Dark'};
+
+  Widget _appearance(BuildContext context, AppController app, AppConfig cfg) {
+    // "blue" (from the Linux app, where the default is the system's accent) is CloudDrop blue.
+    final accent = cfg.accent == 'blue' ? 'default' : cfg.accent;
+    return Column(
+      children: [
+        _SettingCard(
+          icon: FluentIcons.contrast,
+          title: 'Theme',
+          subtitle: 'Light, dark, or the same as Windows',
+          stack: true,
+          trailing: ComboBox<String>(
+            value: _themes.containsKey(cfg.theme) ? cfg.theme : 'system',
+            items: [
+              for (final e in _themes.entries)
+                ComboBoxItem<String>(value: e.key, child: Text(e.value)),
+            ],
+            onChanged: (v) {
+              if (v != null && v != cfg.theme) app.setSetting('theme', v);
+            },
+          ),
+        ),
+        const SizedBox(height: 4),
+        _SettingCard(
+          icon: FluentIcons.color,
+          title: 'Accent color',
+          subtitle: 'Buttons, links and highlights',
+          stack: true,
+          trailing: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final e in accentChoices.entries)
+                _AccentSwatch(
+                  label: accentLabel(e.key),
+                  color: e.value,
+                  selected: e.key == accent,
+                  onPressed: () {
+                    if (e.key != accent) app.setSetting('accent', e.key);
+                  },
+                ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -533,6 +586,59 @@ class _About extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A round accent colour to pick; the chosen one has a ring and a check mark.
+class _AccentSwatch extends StatelessWidget {
+  const _AccentSwatch({
+    required this.label,
+    required this.color,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final String label;
+  final Color color;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = FluentTheme.of(context);
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        label: label,
+        selected: selected,
+        button: true,
+        child: HoverButton(
+          onPressed: onPressed,
+          builder: (context, states) => Container(
+            width: 32,
+            height: 32,
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                width: 2,
+                color: selected
+                    ? theme.resources.textFillColorPrimary
+                    : states.isHovered || states.isFocused
+                    ? theme.resources.controlStrokeColorDefault
+                    : Colors.transparent,
+              ),
+            ),
+            child: DecoratedBox(
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              child: selected
+                  ? const Icon(FluentIcons.check_mark, size: 12, color: Colors.white)
+                  : null,
+            ),
+          ),
+        ),
       ),
     );
   }
