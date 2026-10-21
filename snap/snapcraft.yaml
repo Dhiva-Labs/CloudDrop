@@ -81,8 +81,8 @@ parts:
       - gcc
       - pkg-config
     override-build: |
-      # The CloudDrop Google client: not in git, written by
-      # packaging/set-oauth-client.sh before a store build.
+      # The CloudDrop OAuth clients (Google's, and the OneDrive and Dropbox client
+      # ids): not in git, written by packaging/set-oauth-client.sh before a store build.
       if [ -f packaging/oauth-client.env ]; then
         set -a; . packaging/oauth-client.env; set +a
       fi

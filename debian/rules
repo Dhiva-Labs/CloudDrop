@@ -13,10 +13,11 @@ VENDOR := $(CURDIR)/packaging/vendor
 RUST_ROOT := $(CURDIR)/debian/.rust
 PKG := $(CURDIR)/debian/clouddrop
 
-# The CloudDrop OAuth client, compiled in so the app works out of the box.
-# Not in git; packaging/set-oauth-client.sh writes it before a PPA upload.
+# The CloudDrop OAuth clients (Google's, and the OneDrive and Dropbox client ids),
+# compiled in so the app works out of the box. Not in git;
+# packaging/set-oauth-client.sh writes them before a PPA upload.
 -include packaging/oauth-client.env
-export CLOUDDROP_CLIENT_ID CLOUDDROP_CLIENT_SECRET
+export CLOUDDROP_CLIENT_ID CLOUDDROP_CLIENT_SECRET CLOUDDROP_OAUTH_CLIENTS
 # Packaged builds never offer experimental providers (Proton Drive): docs/PROVIDERS.md.
 unexport CLOUDDROP_EXPERIMENTAL_PROVIDERS
 

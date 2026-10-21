@@ -35,8 +35,8 @@ Set-Location $root
 $envFile = Join-Path $root 'packaging\oauth-client.env'
 if (Test-Path $envFile) {
     foreach ($line in Get-Content $envFile) {
-        if ($line -match '^\s*(CLOUDDROP_CLIENT_(ID|SECRET))\s*=\s*(.+?)\s*$') {
-            Set-Item "env:$($Matches[1])" $Matches[3]
+        if ($line -match '^\s*(CLOUDDROP_CLIENT_(ID|SECRET)|CLOUDDROP_OAUTH_CLIENTS)\s*=\s*(.+?)\s*$') {
+            Set-Item "env:$($Matches[1])" $Matches[$Matches.Count - 1]
         }
     }
     Write-Host 'Building with the built-in Google client.'
