@@ -375,7 +375,8 @@ class FileMenuTests(MenuTestCase):
                                         'CloudDrop::retry'])
         with mock.patch.object(ext, 'launch') as launch:
             items[1].activate()
-        launch.assert_called_once_with((self.binary, 'open', self.root))
+        launch.assert_called_once_with(
+            (self.binary, '--connection', 'default', 'open', self.root))
 
     def test_no_binary_no_items(self):
         with no_binary_anywhere(self):
@@ -395,7 +396,8 @@ class KeepMenuTests(MenuTestCase):
         with mock.patch.object(ext, 'launch') as launch:
             items[-1].activate()
         launch.assert_called_once_with(
-            (self.binary, '--notify', 'keep', os.path.join(self.root, 'plain')))
+            (self.binary, '--connection', 'default', '--notify', 'keep',
+             os.path.join(self.root, 'plain')))
 
     def test_unkeep_offered_for_marked_folder(self):
         items = self.keep_items('keep_local = ["plain"]\n')
@@ -569,7 +571,7 @@ class CommandTests(MenuTestCase):
         (free,) = items
         popen = self.run_item(free)
         popen.assert_called_once_with(
-            [self.binary, '--notify', 'free',
+            [self.binary, '--connection', 'default', '--notify', 'free',
              self.abspath('synced.txt'), self.abspath('plain')],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True)
@@ -577,14 +579,15 @@ class CommandTests(MenuTestCase):
     def test_open_argv(self):
         free, open_ = self.file_items('synced.txt')
         self.assertEqual(self.run_item(open_).call_args.args[0],
-                         [self.binary, 'open', self.abspath('synced.txt')])
+                         [self.binary, '--connection', 'default', 'open',
+                          self.abspath('synced.txt')])
 
     def test_retry_argv(self):
         items = self.file_items('bad.txt', 'broken', 'synced.txt')
         retry = [i for i in items if i.name == 'CloudDrop::retry'][0]
         self.assertEqual(
             self.run_item(retry).call_args.args[0],
-            [self.binary, '--notify', 'retry',
+            [self.binary, '--connection', 'default', '--notify', 'retry',
              self.abspath('bad.txt'), self.abspath('broken')])
 
     def test_popen_failure_is_swallowed(self):
@@ -714,11 +717,12 @@ class BackgroundMenuTests(ExtensionTestCase):
             for item in submenu:
                 item.activate()
         sub = self.abspath('sub')
+        restore = [self.binary, '--connection', 'default', '--notify',
+                   'restore']
         self.assertEqual(
             [call.args[0] for call in popen.call_args_list],
-            [[self.binary, '--notify', 'restore', sub],
-             [self.binary, '--notify', 'restore', sub + '/dir'],
-             [self.binary, '--notify', 'restore', sub + '/a b.txt']])
+            [restore + [sub], restore + [sub + '/dir'],
+             restore + [sub + '/a b.txt']])
 
     def test_open_folder_uses_folder_drive_id(self):
         self.make_db([('sub', 'synced', 'dir', 'ID-SUB'),
@@ -729,7 +733,8 @@ class BackgroundMenuTests(ExtensionTestCase):
         with mock.patch.object(ext, 'launch') as launch:
             item.activate()
         launch.assert_called_once_with(
-            (self.binary, 'open', self.abspath('sub')))
+            (self.binary, '--connection', 'default', 'open',
+             self.abspath('sub')))
         self.assertEqual(self.background('plain', extension), [])
 
     def test_root_uses_meta_root_id(self):

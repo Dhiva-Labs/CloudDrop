@@ -228,6 +228,8 @@ class ExtensionTestCase(unittest.TestCase):
     def _cleanup_extensions(self):
         for extension in self.extensions:
             extension._db.close()
+            for conn in extension._connections:
+                conn.db.close()
         if self.writer is not None:
             self.writer.close()
 
