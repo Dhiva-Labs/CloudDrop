@@ -1,3 +1,16 @@
+clouddrop (0.3.0~resolute1) resolute; urgency=medium
+
+  * New upstream release 0.3.0 (see CHANGELOG.md).
+  * More clouds besides Google Drive: OneDrive, Dropbox, WebDAV, Nextcloud,
+    S3-compatible storage, SFTP and MEGA, chosen in the setup assistant.
+  * Several folders at once, each uploading to a cloud of its own: a folder
+    switcher in the window, the top-bar icon and the Files integration.
+  * Appearance settings: light or dark style and an accent colour.
+  * New logo and a refreshed window (status card, activity filters, About).
+  * The desktop app needs libadwaita 1.5 (GNOME 46) or later.
+
+ -- Dhiva Labs <dhivakar1010@gmail.com>  Wed, 21 Oct 2026 19:14:25 +0530
+
 clouddrop (0.2.0~resolute1) resolute; urgency=medium
 
   * New upstream release 0.2.0 (adds CloudDrop for Windows; see CHANGELOG.md).
