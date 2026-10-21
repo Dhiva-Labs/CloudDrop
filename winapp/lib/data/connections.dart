@@ -155,31 +155,29 @@ bool _reserved(String name) {
       RegExp(r'[0-9]').hasMatch(stem[3]);
 }
 
-/// The name of a new connection for [folder]: the folder's name made valid ("My+Stuff" →
-/// "My Stuff") and unique ignoring case among [taken] ("Work", then "Work 2").
+/// The name of a new connection for [folder], as the engine suggests it
+/// (`connections::suggest_name`): the folder's name with characters a name can't hold turned
+/// into '-', numbered "Work 2", "Work 3"… when [taken] has it (ignoring case). [taken] may also
+/// hold the labels shown, so no two rows of the switcher read the same.
 String connectionNameFor(String folder, Iterable<String> taken, {p.Context? context}) {
   final ctx = context ?? p.context;
-  var base = ctx.basename(_trimSeparators(folder, ctx));
-  // Characters a name can't hold become spaces; runs of spaces become one.
-  base = base.runes
+  final chars = ctx
+      .basename(_trimSeparators(folder, ctx))
+      .runes
       .map(String.fromCharCode)
-      .map((c) => _nameChar.hasMatch(c) ? c : ' ')
-      .join()
-      .replaceAll(RegExp(r'\s+'), ' ');
-  // Start with a letter or digit; don't end in a space or dot.
-  final chars = base.runes.map(String.fromCharCode).toList();
-  while (chars.isNotEmpty && !_alnum.hasMatch(chars.first)) {
-    chars.removeAt(0);
+      .map((c) => _nameChar.hasMatch(c) ? c : '-')
+      .skipWhile((c) => !_alnum.hasMatch(c))
+      .take(maxNameLength - 3);
+  var base = _tidyEnd(chars.join());
+  if (connectionNameProblem(base) != null) {
+    base = base.isEmpty ? 'Folder' : '$base folder';
+    if (connectionNameProblem(base) != null) base = 'Folder';
   }
-  base = _tidyEnd(_cut(chars.join(), maxNameLength));
-  if (base.isEmpty) base = 'Folder';
   final used = {for (final t in taken) t.toLowerCase()};
-  bool free(String n) => !used.contains(n.toLowerCase()) && connectionNameProblem(n) == null;
-  if (free(base)) return base;
+  if (!used.contains(base.toLowerCase())) return base;
   for (var k = 2; ; k++) {
-    final suffix = ' $k';
-    final candidate = '${_tidyEnd(_cut(base, maxNameLength - suffix.length))}$suffix';
-    if (free(candidate)) return candidate;
+    final candidate = '$base $k';
+    if (!used.contains(candidate.toLowerCase())) return candidate;
   }
 }
 
@@ -189,11 +187,6 @@ String _trimSeparators(String path, p.Context ctx) {
     s = s.substring(0, s.length - 1);
   }
   return s;
-}
-
-String _cut(String s, int max) {
-  final runes = s.runes.toList();
-  return runes.length <= max ? s : String.fromCharCodes(runes.take(max));
 }
 
 String _tidyEnd(String s) {

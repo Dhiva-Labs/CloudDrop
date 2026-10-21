@@ -30,6 +30,7 @@ import 'package:clouddrop_app/logic/snapshot.dart';
 import 'package:clouddrop_app/state/activity_controller.dart';
 import 'package:clouddrop_app/state/app_controller.dart';
 import 'package:clouddrop_app/state/files_controller.dart';
+import 'package:clouddrop_app/state/setup_controller.dart';
 import 'package:clouddrop_app/ui/app.dart';
 import 'package:fluent_ui/fluent_ui.dart' show ThemeMode;
 import 'package:flutter/widgets.dart' show SizedBox;
@@ -39,7 +40,17 @@ import 'package:path/path.dart' as p;
 import '../support/fakes.dart';
 import '../support/harness.dart';
 
-const String mockAddr = '127.0.0.1:8299';
+/// The fake Drive listens on a free port of its own, so one that someone else runs at the same
+/// time (on the usual 8299) is never mixed in.
+late final int mockPort;
+String get mockAddr => '127.0.0.1:$mockPort';
+
+Future<int> _freePort() async {
+  final s = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  final port = s.port;
+  await s.close();
+  return port;
+}
 
 String _find(String envName, String relative) {
   final fromEnv = Platform.environment[envName];
@@ -84,10 +95,25 @@ class Sandbox {
   String get statusPath => p.join(dataDir, 'status.json');
   String get tokenPath => p.join(dataDir, 'token.json');
 
-  void writeConfig({bool withClient = true}) {
+  /// The fake Drive's addresses, for a config file of another connection.
+  static String get endpoints =>
+      '''
+[endpoints]
+auth_url = "http://$mockAddr/auth"
+token_url = "http://$mockAddr/token"
+api_base = "http://$mockAddr/drive/v3"
+upload_base = "http://$mockAddr/upload/drive/v3"
+''';
+
+  /// Connection [name]'s config file and data directory.
+  String connectionConfig(String name) =>
+      p.join(p.dirname(configPath), 'connections', name, 'config.toml');
+  String connectionData(String name) => p.join(dataDir, 'connections', name);
+
+  void writeConfig({bool withClient = true, String driveFolder = 'CloudDrop'}) {
     File(configPath).writeAsStringSync('''
 ${withClient ? '''sync_dir = ${jsonEncode(syncDir)}
-drive_folder = "CloudDrop"
+drive_folder = ${jsonEncode(driveFolder)}
 client_id = "123456-sandboxtest.apps.googleusercontent.com"
 client_secret = "GOCSPX-sandbox-not-real"
 ''' : ''}parallel_uploads = 2
@@ -104,11 +130,12 @@ upload_base = "http://$mockAddr/upload/drive/v3"
 ''');
   }
 
-  void writeToken() {
+  void writeToken([String? path]) {
+    final file = path ?? tokenPath;
     File(
-      tokenPath,
+      file,
     ).writeAsStringSync('{"access_token":"x","refresh_token":"good-refresh","expires_at":0}');
-    Process.runSync('chmod', ['600', tokenPath]);
+    Process.runSync('chmod', ['600', file]);
   }
 
   CliEngineApi api() => CliEngineApi(ProcessCliRunner(cliBin, environment: env));
@@ -200,6 +227,7 @@ void main() {
 
   setUpAll(() async {
     await loadTestFonts();
+    mockPort = await _freePort();
     sb = Sandbox('main');
     sb.writeConfig();
     sb.writeToken();
@@ -211,7 +239,7 @@ void main() {
       try {
         final s = await Socket.connect(
           '127.0.0.1',
-          8299,
+          mockPort,
           timeout: const Duration(milliseconds: 200),
         );
         s.destroy();
@@ -913,6 +941,245 @@ void main() {
         expect(real.setupActive, isTrue);
       },
     );
+  });
+
+  group('two folders (connections) over the real engine', () {
+    late Sandbox multi;
+    late Process engine;
+    late CliEngineApi base;
+    late String workDir;
+    late FakeSystem system;
+
+    // Two engines, uploads in both folders: more time than one test usually gets.
+    void slowTest(String description, Future<void> Function() body) =>
+        test(description, body, timeout: const Timeout.factor(4));
+
+    String workStatus() => p.join(multi.connectionData('Work'), 'status.json');
+
+    setUpAll(() async {
+      multi = Sandbox('multi');
+      // Folder names of their own in the fake Drive, which the main sandbox shares.
+      multi.writeConfig(driveFolder: 'Multi Home');
+      multi.writeToken();
+      Directory(multi.syncDir).createSync(recursive: true);
+      workDir = p.join(multi.home, 'Work');
+      system = FakeSystem();
+      engine = await _spawn(cliBin, ['run'], multi, 'daemon.log');
+      base = multi.api();
+      await eventually<bool>(
+        () async =>
+            (await FileStatusSource(multi.statusPath).read())?.phase == Phase.idle ? true : null,
+        what: 'the default connection to be idle',
+      );
+    });
+
+    tearDownAll(() async {
+      engine.kill();
+      await engine.exitCode.timeout(
+        const Duration(seconds: 10),
+        onTimeout: () {
+          engine.kill(ProcessSignal.sigkill);
+          return -1;
+        },
+      );
+      multi.dispose();
+    });
+
+    slowTest(
+      'connections add, its own settings and sign-in: the daemon starts its engine',
+      () async {
+        var list = (await base.connections())!;
+        expect(list.map((c) => (c.name, c.label)), [('default', 'CloudDrop')]);
+        expect(list.single.dataDir, multi.dataDir);
+        expect(list.single.folder, multi.syncDir);
+
+        final add = await base.addConnection('Work', folder: workDir, driveFolder: 'Multi Work');
+        expect(add.ok, isTrue, reason: add.message);
+        expect(add.message, contains('Added "Work"'));
+        expect(Directory(workDir).existsSync(), isTrue);
+        // The fake Drive's addresses before it signs in, so nothing ever reaches Google.
+        final cfg = File(multi.connectionConfig('Work'));
+        cfg.writeAsStringSync('${cfg.readAsStringSync()}\n${Sandbox.endpoints}');
+        final work = base.forConnection('Work');
+        expect((await work.configSet('notifications', 'false')).ok, isTrue);
+        expect((await work.configSet('settle_secs', '1')).ok, isTrue);
+        expect(
+          cfg.readAsStringSync(),
+          contains('api_base = "http://$mockAddr/drive/v3"'),
+          reason: 'config set keeps the endpoints',
+        );
+        final st = await work.status();
+        expect((st.configured, st.signedIn, st.folder), (true, false, workDir));
+        expect((await work.configGet())!.driveFolder, 'Multi Work');
+        expect((await base.forConnection('default').configGet())!.driveFolder, 'Multi Home');
+
+        // Refused, each with the engine's sentence: a folder in use, one inside another's, a
+        // name in use (ignoring case).
+        var r = await base.addConnection('Again', folder: workDir, driveFolder: 'x');
+        expect(r.ok, isFalse);
+        expect(r.message, contains('each connection needs a folder of its own'));
+        r = await base.addConnection(
+          'Inside',
+          folder: p.join(multi.syncDir, 'sub'),
+          driveFolder: 'x',
+        );
+        expect(r.message, contains('is inside the folder of the connection "default"'));
+        r = await base.addConnection('work', folder: p.join(multi.home, 'Other'), driveFolder: 'x');
+        expect(r.message, contains('already a connection named "Work"'));
+        expect(Directory(p.join(multi.home, 'Other')).existsSync(), isFalse);
+
+        multi.writeToken(p.join(multi.connectionData('Work'), 'token.json'));
+        list = (await base.connections())!;
+        expect(list.map((c) => c.name), ['default', 'Work']);
+        expect(list.last.dataDir, multi.connectionData('Work'));
+        expect(list.last.configured, isTrue);
+        await eventually<bool>(
+          () async =>
+              (await FileStatusSource(workStatus()).read())?.phase == Phase.idle ? true : null,
+          what: "Work's engine to start",
+        );
+        expect((await work.status()).signedIn, isTrue);
+      },
+    );
+
+    slowTest('each folder goes up through its own engine; the app switches between them', () async {
+      File(p.join(multi.syncDir, 'home.txt')).writeAsStringSync('at home\n');
+      File(p.join(workDir, 'plan.txt')).writeAsStringSync('the plan\n');
+      Directory(p.join(workDir, 'Docs')).createSync();
+      File(p.join(workDir, 'Docs', 'memo.txt')).writeAsStringSync('memo\n');
+      final homeDb = SqliteStateReader.file(multi.dbPath);
+      final workDb = SqliteStateReader.file(p.join(multi.connectionData('Work'), 'state.db'));
+      addTearDown(homeDb.close);
+      addTearDown(workDb.close);
+      Future<int> synced(StateReader db) async => (await db.counts())
+          .where((c) => c.kind == 'file' && c.state == 'synced')
+          .fold<int>(0, (s, c) => s + c.count);
+      await eventually<bool>(
+        () async => await synced(homeDb) == 1 && await synced(workDb) == 2 ? true : null,
+        what: 'both folders to upload',
+      );
+      expect(await homeDb.entry('plan.txt'), isNull, reason: 'each folder has its own database');
+
+      final app = AppController(multi.services(system));
+      addTearDown(app.dispose);
+      await app.poll(forceEngine: true);
+      expect(app.connections.map((c) => c.name), ['default', 'Work']);
+      expect(app.connectionName, 'default', reason: 'nothing remembered yet: the first');
+      expect(app.snapshot.counts.synced, 1);
+      await eventually<bool>(() async {
+        await app.poll(forceEngine: true);
+        return app.switcher.every((e) => e.icon == SummaryIcon.idle) ? true : null;
+      }, what: 'both folders to be up to date in the switcher');
+      expect(app.switcher.map((e) => (e.label, e.selected)), [
+        ('CloudDrop', true),
+        ('Work', false),
+      ]);
+
+      await app.selectConnection('Work');
+      expect(app.connectionName, 'Work');
+      expect(app.syncDir, workDir);
+      expect(app.snapshot.counts.synced, 2);
+      expect(app.rootName, 'Work');
+      expect(jsonDecode(File(p.join(multi.dataDir, 'app.json')).readAsStringSync()), {
+        'connection': 'Work',
+      });
+      final files = FilesController(app)..visible = true;
+      addTearDown(files.dispose);
+      await files.reload();
+      expect(files.items.map((i) => i.name), ['Docs', 'plan.txt']);
+
+      // Its actions go to Work: free and download back, pause and resume.
+      var r = await app.free(['plan.txt']);
+      expect(r.ok, isTrue, reason: r.message);
+      expect(File(p.join(workDir, 'plan.txt')).existsSync(), isFalse);
+      expect((await workDb.entry('plan.txt'))!.state, EntryState.cloudOnly);
+      expect((await homeDb.entry('home.txt'))!.state, EntryState.synced);
+      r = await app.restore(['plan.txt'], 'plan.txt');
+      expect(r.ok, isTrue, reason: r.message);
+      expect(File(p.join(workDir, 'plan.txt')).readAsStringSync(), 'the plan\n');
+      await app.setPaused(true);
+      expect(await workDb.meta('paused'), '1');
+      expect(await homeDb.meta('paused'), isNot('1'));
+      await app.setPaused(false);
+      expect(await workDb.meta('paused'), '0');
+
+      // The next start shows the folder remembered.
+      final again = AppController(multi.services(FakeSystem()));
+      addTearDown(again.dispose);
+      await again.poll(forceEngine: true);
+      expect(again.connectionName, 'Work');
+      expect(again.snapshot.counts.synced, 2);
+    });
+
+    slowTest(
+      'Remove This Folder: its settings and state go; the folder and the cloud keep everything',
+      () async {
+        final app = AppController(multi.services(system));
+        addTearDown(app.dispose);
+        await app.poll(forceEngine: true);
+        expect(app.connectionName, 'Work');
+        final r = await app.removeConnection();
+        expect(r.ok, isTrue, reason: r.message);
+        expect(Directory(p.dirname(multi.connectionConfig('Work'))).existsSync(), isFalse);
+        expect(Directory(multi.connectionData('Work')).existsSync(), isFalse);
+        expect(File(p.join(workDir, 'plan.txt')).readAsStringSync(), 'the plan\n');
+        expect(File(p.join(workDir, 'Docs', 'memo.txt')).existsSync(), isTrue);
+        expect(app.connectionName, 'default');
+        expect(app.several, isFalse);
+        expect(app.snapshot.counts.synced, 1);
+        expect(jsonDecode(File(p.join(multi.dataDir, 'app.json')).readAsStringSync()), {
+          'connection': 'default',
+        });
+        // The default folder keeps uploading.
+        File(p.join(multi.syncDir, 'after.txt')).writeAsStringSync('still here');
+        final homeDb = SqliteStateReader.file(multi.dbPath);
+        addTearDown(homeDb.close);
+        await eventually<bool>(
+          () async => (await homeDb.entry('after.txt'))?.state == EntryState.synced ? true : null,
+          what: 'the default folder to keep uploading',
+        );
+      },
+    );
+
+    slowTest('adding a folder with a form, then Cancel: connections add, check, remove', () async {
+      final app = AppController(multi.services(system));
+      addTearDown(app.dispose);
+      await app.poll(forceEngine: true);
+      final webdav = app.providers.firstWhere((x) => x.id == 'webdav');
+      app.beginAddConnection();
+      final c = SetupController(app, adding: true);
+      addTearDown(c.dispose);
+      c.choose(webdav);
+      c.next();
+      system.directory = p.join(multi.home, 'NAS share');
+      await c.chooseFolder();
+      expect(c.newConnectionName, 'NAS share');
+      c.next();
+      expect(c.step, SetupStep.signIn);
+      c.setField('url', 'http://127.0.0.1:1/dav'); // nothing listens there
+      c.setField('user', 'me');
+      c.setField('password', 'sesame-4711');
+      await c.testConnection();
+      expect(c.createdName, 'NAS share');
+      expect(c.test, ConnectionTest.failed);
+      expect(c.testMessage, contains('cannot connect to WebDAV'));
+      expect(
+        File(multi.connectionConfig('NAS share')).readAsStringSync(),
+        contains('http://127.0.0.1:1/dav'),
+      );
+      expect(
+        File(multi.connectionConfig('NAS share')).readAsStringSync(),
+        isNot(contains('sesame-4711')),
+        reason: 'the password is kept apart from the settings',
+      );
+      await c.cancel();
+      expect(c.setupError, isNull);
+      expect(Directory(p.dirname(multi.connectionConfig('NAS share'))).existsSync(), isFalse);
+      expect(Directory(multi.connectionData('NAS share')).existsSync(), isFalse);
+      expect(Directory(p.join(multi.home, 'NAS share')).existsSync(), isTrue);
+      expect((await base.connections())!.map((x) => x.name), ['default']);
+      expect(app.setupActive, isFalse);
+    });
   });
 
   test('the CLI that is not there is reported cleanly', () async {

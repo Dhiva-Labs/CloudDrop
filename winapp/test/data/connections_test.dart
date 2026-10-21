@@ -132,19 +132,29 @@ void main() {
       expect(connectionNameFor('/mnt/d/CloudDrop', ['default', 'CloudDrop']), 'CloudDrop 2');
     });
 
-    test('made valid', () {
-      expect(connectionNameFor('/x/My+Stuff (old)', const []), 'My Stuff old');
-      expect(connectionNameFor('/x/.config', const []), 'config');
-      expect(connectionNameFor('/x/Notes.', const []), 'Notes');
+    test('made valid exactly as the engine suggests (connections::suggest_name)', () {
+      // The engine's own cases (src/connections.rs › suggested_names_are_valid).
+      for (final (folder, want) in [
+        ('/home/me/Work', 'Work'),
+        ('/home/me/My Photos!', 'My Photos-'),
+        ('/home/me/.hidden', 'hidden'),
+        ('/home/me/con', 'con folder'),
+        ('/home/me/default', 'default folder'),
+        ('/', 'Folder'),
+        ('/home/me/trailing. ', 'trailing'),
+      ]) {
+        final got = connectionNameFor(folder, const []);
+        expect(got, want, reason: folder);
+        expect(connectionNameProblem(got), isNull, reason: got);
+      }
+      expect(connectionNameFor('/x/My+Stuff (old)', const []), 'My-Stuff -old-');
       expect(connectionNameFor('/x/!!!', const []), 'Folder');
-      expect(connectionNameFor('/x/default', const []), 'default 2');
-      expect(connectionNameFor('/x/con', const []), 'con 2');
+      expect(connectionNameFor('/x/Default', ['default folder']), 'Default folder 2');
       final long = connectionNameFor('/x/${'Quarterly reports ' * 3}', const []);
+      expect(long, 'Quarterly reports Quarterly r');
       expect(long.length, lessThanOrEqualTo(32));
-      expect(connectionNameProblem(long), isNull);
       final again = connectionNameFor('/x/${'Quarterly reports ' * 3}', [long]);
-      expect(again, endsWith(' 2'));
-      expect(again.length, lessThanOrEqualTo(32));
+      expect(again, '$long 2');
       expect(connectionNameProblem(again), isNull);
     });
   });
