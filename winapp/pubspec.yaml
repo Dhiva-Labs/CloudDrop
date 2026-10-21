@@ -3,7 +3,7 @@ description: "CloudDrop - the desktop app (Fluent design) for the upload-only Go
 publish_to: 'none'
 
 # Windows: the first three numbers are the product version, the last one the build suffix.
-version: 0.3.0+3
+version: 0.3.1+4
 
 environment:
   sdk: ^3.12.2

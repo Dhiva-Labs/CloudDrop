@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "clouddrop"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes",
  "anyhow",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "clouddrop-agent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "cloud-filter",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "clouddrop-gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -768,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "clouddrop-tray"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "futures-util",

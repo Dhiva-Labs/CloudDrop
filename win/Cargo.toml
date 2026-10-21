@@ -1,6 +1,6 @@
 [package]
 name = "clouddrop-agent"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "CloudDrop background agent for Windows: upload engine, File Explorer cloud folder and notification-area icon"
 license = "MIT"
