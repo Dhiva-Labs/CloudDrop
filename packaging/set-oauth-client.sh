@@ -6,13 +6,24 @@
 #
 #   ./packaging/set-oauth-client.sh ~/Downloads/client_secret_….json
 #   ./packaging/set-oauth-client.sh --onedrive CLIENT_ID --dropbox APP_KEY
+#   ./packaging/set-oauth-client.sh --google CLIENT_ID   (asks for the secret, hidden)
 #
-# Each run updates what it is given and keeps the rest of the file.
+# Each run updates what it is given and keeps the rest of the file. --google is for
+# Google consoles that show a new client secret once instead of offering the JSON.
 set -euo pipefail
 out="$(dirname "$0")/oauth-client.env"
-[ $# -gt 0 ] || { sed -n '7,8s/^#  //p' "$0"; exit 2; }
+[ $# -gt 0 ] || { sed -n '7,9s/^#  //p' "$0"; exit 2; }
 umask 077
-python3 - "$out" "$@" <<'PY'
+# --google's secret: asked here, from the terminal (the Python below reads its program
+# from stdin), and handed over in the environment, never on the command line.
+secret=
+for a in "$@"; do
+    if [ "$a" = --google ]; then
+        read -rsp "Google client secret (not shown): " secret < /dev/tty
+        echo
+    fi
+done
+GOOGLE_SECRET=$secret python3 - "$out" "$@" <<'PY'
 import json, os, sys
 out, args = sys.argv[1], sys.argv[2:]
 env = {}
@@ -25,7 +36,16 @@ clients = dict(kv.split("=", 1) for kv in env.get("CLOUDDROP_OAUTH_CLIENTS", "")
 said = []
 while args:
     a = args.pop(0)
-    if a in ("--onedrive", "--dropbox"):
+    if a == "--google":
+        if not args or not args[0].strip().endswith(".apps.googleusercontent.com"):
+            sys.exit("--google needs the client id (….apps.googleusercontent.com)")
+        cid = args.pop(0).strip()
+        secret = os.environ.get("GOOGLE_SECRET", "").strip()
+        if not secret:
+            sys.exit("no secret given; nothing saved")
+        env["CLOUDDROP_CLIENT_ID"], env["CLOUDDROP_CLIENT_SECRET"] = cid, secret
+        said.append(f"Google client {cid.split('-')[0]}…")
+    elif a in ("--onedrive", "--dropbox"):
         if not args or not args[0].strip() or args[0].startswith("--"):
             sys.exit(f"{a} needs a value")
         clients[a[2:]] = args.pop(0).strip()
