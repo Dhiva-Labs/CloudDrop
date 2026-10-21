@@ -168,8 +168,9 @@ enum ConnectionsCmd {
     Add {
         /// Its name: letters, digits, spaces, '-', '_' or '.'.
         name: String,
+        // Boxed: on Windows the setup options make this variant much bigger than the others.
         #[command(flatten)]
-        args: SetupArgs,
+        args: Box<SetupArgs>,
     },
     /// Stop uploading a folder and forget its settings and what was uploaded. Nothing in the
     /// folder or in the cloud is deleted.
@@ -455,7 +456,7 @@ async fn dispatch(connection: Option<String>, cmd: Cmd) -> Result<String> {
             connections::select(&conn);
             let folder = connections::lexical(args.folder.as_deref().expect("checked"));
             connections::check_folder(&folder, &conn.name)?;
-            let result = setup(args, true).await;
+            let result = setup(*args, true).await;
             if result.is_err() && !conn.exists() {
                 // Nothing usable was written: leave no half-made connection behind.
                 let _ = std::fs::remove_dir_all(&conn.data);
