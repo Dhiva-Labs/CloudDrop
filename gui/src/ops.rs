@@ -347,12 +347,10 @@ impl Ops {
 
     /// Saves a setting only the apps read (theme, accent): no service restart. The look is the
     /// installation's, so every connection's config gets it.
-    pub fn edit_appearance(&self, theme: &str, accent: &str) {
-        let result = clouddrop::connections::set_appearance("theme", theme)
-            .and_then(|()| clouddrop::connections::set_appearance("accent", accent));
-        if let Err(e) = result {
-            self.toast(&format!("Couldn't save: {e:#}"));
-        }
+    /// Returns the shown connection's config as saved.
+    pub fn edit_appearance(&self, key: &str, value: &str) -> Option<Config> {
+        let result = clouddrop::connections::set_appearance(key, value).and_then(|()| Config::load());
+        result.map_err(|e| self.toast(&format!("Couldn't save: {e:#}"))).ok()
     }
 
     pub fn restart_now(self: &Rc<Self>, message: &str) {

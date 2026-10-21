@@ -322,7 +322,7 @@ impl SettingsPage {
                 if let Some(me) = me2.upgrade()
                     && let Some(name) = config::THEMES.get(row.selected() as usize)
                 {
-                    me.save_appearance(|c| c.set_key("theme", name));
+                    me.save_appearance("theme", name);
                 }
             });
         }
@@ -332,7 +332,7 @@ impl SettingsPage {
                 if let Some(me) = me2.upgrade()
                     && b.is_active()
                 {
-                    me.save_appearance(|c| c.set_key("accent", name));
+                    me.save_appearance("accent", name);
                 }
             });
         }
@@ -561,18 +561,17 @@ impl SettingsPage {
     }
 
     /// Saves the theme or accent and shows it right away; the upload service doesn't need it.
-    fn save_appearance(&self, edit: impl FnOnce(&mut clouddrop::config::Config) -> anyhow::Result<()>) {
+    /// Saves the theme or the accent and shows it right away; the upload service doesn't need it.
+    fn save_appearance(&self, key: &str, value: &str) {
         if self.filling.get() {
             return;
         }
-        let Some(mut cfg) = self.ops.cfg() else {
-            return;
-        };
-        if edit(&mut cfg).is_err() {
-            return;
+        // Only the key that changed is written, and the look is shown from the file just saved:
+        // the window's copy of the settings is up to a second old, and may not have the other key's
+        // latest value yet.
+        if let Some(cfg) = self.ops.edit_appearance(key, value) {
+            ui::apply_appearance(cfg.theme_name(), cfg.accent_name());
         }
-        ui::apply_appearance(cfg.theme_name(), cfg.accent_name());
-        self.ops.edit_appearance(cfg.theme_name(), cfg.accent_name());
     }
 
     fn restart_now(self: &Rc<Self>) {
