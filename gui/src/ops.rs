@@ -345,6 +345,19 @@ impl Ops {
         true
     }
 
+    /// Saves a setting only the apps read (theme, accent): no service restart.
+    pub fn edit_appearance(&self, edit: impl FnOnce(&mut Config)) {
+        let path = config::config_path();
+        let result = Config::load_from(&path).and_then(|mut c| {
+            edit(&mut c);
+            c.validate()?;
+            c.save_to(&path)
+        });
+        if let Err(e) = result {
+            self.toast(&format!("Couldn't save: {e:#}"));
+        }
+    }
+
     pub fn restart_now(self: &Rc<Self>, message: &str) {
         *self.restart_msg.borrow_mut() = message.to_string();
         self.restart_service();

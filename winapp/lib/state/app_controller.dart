@@ -468,6 +468,10 @@ class AppController extends ChangeNotifier {
               if (p.trim().isNotEmpty) p.trim(),
           ],
         );
+      case 'theme':
+        return c.copyWith(theme: value);
+      case 'accent':
+        return c.copyWith(accent: value);
       case 'auto_free_days':
         return c.copyWith(
           autoFreeDays: value == 'never' ? null : (value == 'now' ? 0 : int.tryParse(value)),

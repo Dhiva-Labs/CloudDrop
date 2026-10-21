@@ -167,6 +167,15 @@ const CSS: &str = "
 .hero progressbar trough, .hero progressbar progress { min-height: 6px; }
 .welcome-logo { padding: 16px 40px; background-image: radial-gradient(circle closest-side, alpha(#2f7cf0, 0.24), alpha(#2f7cf0, 0)); }
 .feature-icon { border-radius: 999px; padding: 8px; color: @accent_color; background-color: alpha(@accent_bg_color, 0.16); }
+.accent-swatch { min-width: 24px; min-height: 24px; padding: 0; border-radius: 999px; border: 2px solid alpha(@window_fg_color, 0.15); }
+.accent-swatch:checked { border-color: @window_fg_color; }
+.accent-swatch.default { background: linear-gradient(135deg, #3584e4, #2190a4, #3a944a, #c88800, #ed5b00, #e62d42, #d56199, #9141ac); }
+.accent-swatch.blue { background: #2f7cf0; }
+.accent-swatch.teal { background: #0f8b8d; }
+.accent-swatch.green { background: #3a944a; }
+.accent-swatch.purple { background: #7c4dd6; }
+.accent-swatch.pink { background: #d0457f; }
+.accent-swatch.orange { background: #e2620e; }
 .drop-zone { border: 2px dashed alpha(@window_fg_color, 0.18); border-radius: 18px; margin: 24px; }
 columnview.files row { min-height: 40px; }
 .provider-row { padding: 10px 12px; }
@@ -214,4 +223,61 @@ pub fn file_icon(name: &str, is_dir: bool) -> gtk::gio::Icon {
     }
     let (ctype, _) = gtk::gio::content_type_guess(Some(name), None);
     gtk::gio::content_type_get_icon(&ctype)
+}
+
+/// Accent colours of the `accent` setting (the default keeps the system's accent).
+pub fn accent_hex(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "blue" => "#2f7cf0",
+        "teal" => "#0f8b8d",
+        "green" => "#3a944a",
+        "purple" => "#7c4dd6",
+        "pink" => "#d0457f",
+        "orange" => "#e2620e",
+        _ => return None,
+    })
+}
+
+thread_local! {
+    static ACCENT_CSS: std::cell::RefCell<Option<gtk::CssProvider>> = const { std::cell::RefCell::new(None) };
+    /// The theme, accent and dark style last applied.
+    static APPLIED: std::cell::RefCell<Option<(String, String, bool)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Applies the `theme` and `accent` settings: light, dark or the system's style, and an accent
+/// colour (its text shade lighter or darker, to stay readable on either style). Cheap to call
+/// again with the same settings.
+pub fn apply_appearance(theme: &str, accent: &str) {
+    let style = adw::StyleManager::default();
+    let scheme = match theme {
+        "light" => adw::ColorScheme::ForceLight,
+        "dark" => adw::ColorScheme::ForceDark,
+        _ => adw::ColorScheme::Default,
+    };
+    if style.color_scheme() != scheme {
+        style.set_color_scheme(scheme);
+    }
+    let key = (theme.to_string(), accent.to_string(), style.is_dark());
+    if APPLIED.with(|a| a.borrow().as_ref() == Some(&key)) {
+        return;
+    }
+    APPLIED.with(|a| *a.borrow_mut() = Some(key));
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    ACCENT_CSS.with(|slot| {
+        if let Some(old) = slot.borrow_mut().take() {
+            gtk::style_context_remove_provider_for_display(&display, &old);
+        }
+        let Some(hex) = accent_hex(accent) else {
+            return;
+        };
+        let text = if style.is_dark() { format!("mix({hex}, white, 0.35)") } else { format!("shade({hex}, 0.85)") };
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&format!(
+            "@define-color accent_bg_color {hex};\n@define-color accent_color {text};\n@define-color accent_fg_color white;\n"
+        ));
+        gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+        *slot.borrow_mut() = Some(provider);
+    });
 }

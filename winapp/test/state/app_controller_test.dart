@@ -392,6 +392,9 @@ void main() {
       expect(app.config!.notifications, isFalse);
       await app.setSetting('ignore', '*.a, *.b');
       expect(app.config!.ignore, ['*.a', '*.b']);
+      await app.setSetting('theme', 'dark');
+      await app.setSetting('accent', 'pink');
+      expect((app.config!.theme, app.config!.accent), ('dark', 'pink'));
     });
 
     test('a rejected setting says why', () async {

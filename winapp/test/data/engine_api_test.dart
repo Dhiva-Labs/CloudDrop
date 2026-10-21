@@ -32,6 +32,7 @@ const configJson = '''
   "sync_dir": "/home/me/CloudDrop", "drive_folder": "Backup", "client_id": "1.apps.googleusercontent.com",
   "client_secret": true, "parallel_uploads": 3, "settle_secs": 5, "rescan_secs": 600, "notifications": false,
   "ignore": ["*.tmp", "*.part"], "auto_free_days": 30, "keep_local": ["Work", "Photos/2026"],
+  "theme": "dark", "accent": "teal",
   "config_path": "/home/me/.config/clouddrop/config.toml", "data_dir": "/home/me/.local/share/clouddrop"
 }''';
 
@@ -186,6 +187,7 @@ void main() {
       expect(c.driveFolder, 'Backup');
       expect(c.hasClient, isTrue);
       expect(c.hasClientSecret, isTrue);
+      expect((c.theme, c.accent), ('dark', 'teal'));
     });
 
     test('config get without auto_free_days means never', () async {
@@ -202,6 +204,8 @@ void main() {
       final c = (await api.configGet())!;
       expect(c.autoFreeDays, isNull);
       expect(c.hasClient, isFalse, reason: 'no secret stored');
+      // An older engine doesn't send the look: the system's, in CloudDrop blue.
+      expect((c.theme, c.accent), ('system', 'default'));
     });
 
     test('config get fails quietly when there is no config', () async {

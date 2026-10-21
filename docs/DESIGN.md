@@ -43,6 +43,8 @@ client_secret = "...."
 parallel_uploads = 2
 settle_secs = 2                      # a file must be quiet this long before upload
 notifications = true
+theme = "dark"                       # the apps' look only (absent = follow the system); never read by the daemon
+accent = "teal"                      # absent = the system's accent (CloudDrop blue on Windows)
 ignore = [".clouddrop-*", ".goutputstream-*", "*.part", "*.crdownload", "*.tmp", "~$*", ".~lock.*#", "*.swp", ".Trash-*"]
 
 [webdav]                             # a provider's own section, written by `setup --provider webdav --set …`
