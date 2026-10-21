@@ -636,7 +636,7 @@ impl FilesPage {
         while let Some(c) = self.crumbs.first_child() {
             self.crumbs.remove(&c);
         }
-        let mut segments: Vec<(String, String)> = vec![("CloudDrop".into(), String::new())];
+        let mut segments: Vec<(String, String)> = vec![(ui::root_name(), String::new())];
         let mut acc = String::new();
         if search.is_empty() {
             for part in dir.split('/').filter(|p| !p.is_empty()) {

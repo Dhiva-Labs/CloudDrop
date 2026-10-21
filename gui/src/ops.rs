@@ -292,7 +292,7 @@ impl Ops {
         if sources.is_empty() {
             return;
         }
-        let dest_name = if dest_rel.is_empty() { "CloudDrop".to_string() } else { util::name_of(&dest_rel).to_string() };
+        let dest_name = if dest_rel.is_empty() { ui::root_name() } else { util::name_of(&dest_rel).to_string() };
         let dest_dir = root.join(&dest_rel);
         let me = self.clone();
         rt::blocking(

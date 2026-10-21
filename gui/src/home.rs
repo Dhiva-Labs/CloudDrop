@@ -457,7 +457,7 @@ impl HomePage {
                 let parent = util::parent_of(&u.path);
                 let row = adw::ActionRow::builder()
                     .title(util::name_of(&u.path))
-                    .subtitle(if parent.is_empty() { "CloudDrop".to_string() } else { parent.to_string() })
+                    .subtitle(if parent.is_empty() { ui::root_name() } else { parent.to_string() })
                     .use_markup(false)
                     .build();
                 let bar = gtk::ProgressBar::builder()

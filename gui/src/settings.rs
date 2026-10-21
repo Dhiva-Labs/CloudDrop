@@ -547,7 +547,7 @@ impl SettingsPage {
             let parent = util::parent_of(rel);
             let row = adw::ActionRow::builder()
                 .title(util::name_of(rel))
-                .subtitle(if parent.is_empty() { "CloudDrop".to_string() } else { parent.to_string() })
+                .subtitle(if parent.is_empty() { ui::root_name() } else { parent.to_string() })
                 .use_markup(false)
                 .build();
             row.add_prefix(&gtk::Image::from_icon_name("folder-symbolic"));

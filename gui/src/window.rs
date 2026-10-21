@@ -49,10 +49,9 @@ struct Switcher {
     button: gtk::MenuButton,
     icon: gtk::Image,
     label: gtk::Label,
-    popover: gtk::Popover,
     list: gtk::ListBox,
     /// The rows shown, as (name, label, provider), and each row's status icon, subtitle and check.
-    shown: RefCell<Vec<(String, String, String)>>,
+    shown: Rc<RefCell<Vec<(String, String, String)>>>,
     rows: RefCell<Vec<(gtk::Image, gtk::Label, gtk::Image)>>,
 }
 
@@ -86,10 +85,21 @@ impl Switcher {
                 (hooks.setup)(crate::setup::Start::AddFolder);
             });
         }
-        Switcher { button, icon, label, popover, list, shown: RefCell::default(), rows: RefCell::default() }
+        let shown: Rc<RefCell<Vec<(String, String, String)>>> = Rc::default();
+        {
+            let (hooks, popover, shown) = (hooks.clone(), popover.clone(), shown.clone());
+            list.connect_row_activated(move |_, row| {
+                let name = usize::try_from(row.index()).ok().and_then(|i| shown.borrow().get(i).map(|k| k.0.clone()));
+                if let Some(name) = name {
+                    popover.popdown();
+                    (hooks.switch)(name);
+                }
+            });
+        }
+        Switcher { button, icon, label, list, shown, rows: RefCell::default() }
     }
 
-    fn update(&self, hooks: &Rc<Hooks>, current: &str, icon: &str, conns: &[ConnRow]) {
+    fn update(&self, current: &str, icon: &str, conns: &[ConnRow]) {
         self.button.set_visible(conns.len() > 1);
         if conns.len() <= 1 {
             return;
@@ -119,13 +129,6 @@ impl Switcher {
                 row_box.append(&check);
                 let row = gtk::ListBoxRow::builder().child(&row_box).activatable(true).build();
                 row.update_property(&[gtk::accessible::Property::Label(&c.label)]);
-                let (hooks, popover, name) = (hooks.clone(), self.popover.clone(), c.name.clone());
-                let gesture = gtk::GestureClick::new();
-                gesture.connect_released(move |_, _, _, _| {
-                    popover.popdown();
-                    (hooks.switch)(name.clone());
-                });
-                row.add_controller(gesture);
                 self.list.append(&row);
                 rows.push((status, sub, check));
             }
@@ -153,7 +156,6 @@ pub struct MainWindow {
     status: gtk::Button,
     /// With several connections, in place of `status`.
     switcher: Switcher,
-    hooks: Rc<Hooks>,
     last: RefCell<Option<Snapshot>>,
     last_conns: RefCell<Vec<ConnRow>>,
 }
@@ -235,7 +237,6 @@ impl MainWindow {
             settings,
             status,
             switcher: conn_switcher,
-            hooks,
             last: RefCell::default(),
             last_conns: RefCell::default(),
         });
@@ -297,7 +298,7 @@ impl MainWindow {
         let sum = summarize(s);
         let several = conns.len() > 1;
         self.status.set_visible(!several);
-        self.switcher.update(&self.hooks, &s.connection, sum.icon, conns);
+        self.switcher.update(&s.connection, sum.icon, conns);
         self.win.set_title(Some(&if several { format!("{} — CloudDrop", s.label) } else { "CloudDrop".to_string() }));
         self.status.set_icon_name(sum.icon);
         self.status.set_tooltip_text(Some(&sum.line));
