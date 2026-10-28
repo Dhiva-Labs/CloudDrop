@@ -2,25 +2,29 @@ name: clouddrop
 title: CloudDrop
 base: core24
 version: '0.3.1'
-summary: Upload a folder to Google Drive and free up space without losing anything
+summary: Upload a folder to Google Drive, OneDrive, Dropbox and more; free up space
 description: |
-  Anything you put in ~/CloudDrop is uploaded to Google Drive with the same
-  folder structure, under a CloudDrop folder in My Drive. Deleting a file
-  locally never deletes it from Drive: it becomes cloud-only, stays listed in
+  Anything you put in ~/CloudDrop is uploaded to your cloud with the same
+  folder structure: Google Drive, OneDrive, Dropbox, Nextcloud or another
+  WebDAV server, S3-compatible storage, SFTP or MEGA. Deleting a file locally
+  never deletes it in the cloud: it becomes cloud-only, stays listed in
   CloudDrop, and can be downloaded back at any time. So you can free up space
   on your computer without losing anything, by hand or automatically.
 
-  - Uploads new and edited files; edits become new versions of the same file.
-  - Keeps your folders; renames and moves are applied in Drive without
-    uploading again.
+  - Uploads new and edited files, keeping your folders; renames and moves are
+    applied in the cloud without uploading again.
   - Free Up Space by hand or automatically, after 7, 30 or 90 days; local
-    copies are removed only after checking Google Drive holds an identical copy.
+    copies are removed only after checking the cloud holds an identical copy.
   - Resumable uploads that survive network drops, restarts and crashes.
-  - Desktop app (setup assistant, Home, Files, Activity, Settings) and a
-    top-bar status icon. The background service starts when you log in.
+  - Several folders, each uploading to a cloud of its own.
+  - Desktop app (setup assistant, Home, Files, Activity, Settings) with a
+    light or dark style, and a top-bar status icon. The background service
+    starts when you log in.
 
-  CloudDrop asks Google only for access to the files it creates itself
-  (drive.file), and files go straight between your computer and Google.
+  Google Drive, OneDrive and Dropbox sign in out of the box. CloudDrop asks
+  each cloud for as little access as it allows (on Google Drive only the files
+  it creates, on OneDrive and Dropbox only its own app folder), and files go
+  straight between your computer and your cloud.
 
   The Ubuntu PPA (ppa:dhiva-labs/apps) also adds status icons and actions to
   the Files app, which a snap can't do.
