@@ -1,11 +1,13 @@
-# Plan: more clouds than Google Drive
+# More clouds than Google Drive
 
-Status: **OneDrive, Dropbox, WebDAV, Nextcloud, S3-compatible storage, SFTP and MEGA are built**
-and tested against fake servers (SFTP against a real OpenSSH); none has been tried with a real
-account yet. **Proton Drive is built as experimental**, through Proton's own CLI, and only builds
-from source offer it. **Several clouds at once** (phase 5) is built: see
-[Several clouds at once](#several-clouds-at-once). See [The providers](#the-providers) and
-[Phases](#phases).
+Status (0.3.1): **OneDrive, Dropbox, WebDAV, Nextcloud, S3-compatible storage, SFTP and MEGA are
+built** and tested against fake servers (SFTP against a real OpenSSH). **OneDrive and Dropbox** have
+also been tried with real accounts (a personal OneDrive), and the snap and PPA (and the Microsoft
+Store, from its next update) carry CloudDrop's own app registrations for both, so they sign in out
+of the box. The others have not been tried with a real account yet. **Proton Drive is built as
+experimental**, through Proton's own CLI, and only builds from source offer it. **Several clouds at
+once** (phase 5) is built: see [Several clouds at once](#several-clouds-at-once). See [The
+providers](#the-providers) and [Phases](#phases).
 
 ## What must not change
 
@@ -76,7 +78,8 @@ change it to "trust a completed upload" (size check only), with a clear warning.
 ## The providers
 
 What each client does, how it was tested, and what a release still needs. All of them are
-tested against fake servers (and SFTP against a real OpenSSH), not yet against real accounts.
+tested against fake servers (and SFTP against a real OpenSSH); OneDrive and Dropbox also with
+real accounts, by hand, for 0.3.1.
 
 ### OneDrive
 
@@ -92,11 +95,13 @@ without a client id in the build or the config, every call asks to sign in.
   path (`items/{parent}:/{name}`), so `find_child` returns at most one item. A recycled item
   answers 404, so `get` reports NotFound, never `trashed`.
 - **Uploads**: `createUploadSession` (`replace` for an existing file, after a PATCH that names and
-  places it; `fail` for a new one; `fileSize` so a file that won't fit is refused before any of
-  it is sent). The session is JSON with the upload URL and the target. Fragments go to the
-  upload URL without the token, at most 191 × 320 KiB (Graph wants less than 60 MiB). An
-  expired or finished session is NotFound; 416 asks where to go on from. Empty files skip the
-  session (one `PUT …/content`). An item without `quickXorHash` is fetched once more.
+  places it; `fail` for a new one). No `fileSize`: the Graph docs list it, but a real personal
+  OneDrive answers it with 400 `invalidRequest`, so a file that won't fit is refused (507) when
+  its first fragment arrives instead. The session is JSON with the upload URL and the target.
+  Fragments go to the upload URL without the token, at most 191 × 320 KiB (Graph wants less
+  than 60 MiB). An expired or finished session is NotFound; 416 asks where to go on from. Empty
+  files skip the session (one `PUT …/content`). An item without `quickXorHash` is fetched once
+  more.
 - **Keep version**: a server-side copy `<stem> (replaced YYYY-MM-DD).<ext>` (UTC date, ` (2)` and
   up when taken). The monitor URL is polled without the token until `completed`.
 - **Downloads** go through `/content`, which redirects to a pre-authenticated URL that is
@@ -107,7 +112,9 @@ without a client id in the build or the config, every call asks to sign in.
   (`https://onedrive.live.com/?cid=…&id=…`). Work and school ids don't name the SharePoint site,
   so they get none. Check the links in the live smoke test.
 
-**A release needs**:
+**Released in 0.3.1** with CloudDrop's app registration in the packaged builds; uploads and the
+QuickXorHash check were tried on a real personal OneDrive. What the registration is, and what is
+still to do:
 
 - An app registration in Microsoft Entra ID for "personal Microsoft accounts and accounts in any
   organizational directory", as a **public client** (no secret, "Allow public client flows"),
@@ -115,16 +122,18 @@ without a client id in the build or the config, every call asks to sign in.
   (the host the sign-in actually uses; Entra ignores the port for loopback but not the host, so
   `http://localhost` alone fails), and
   delegated Graph permissions `Files.ReadWrite.AppFolder` and `offline_access`. Its client id
-  goes into the build.
-- **Publisher verification** (a verified Microsoft partner account on the registration), so work
-  and school accounts see a verified publisher and can consent where their organisation only
-  allows verified apps. Some organisations still need an admin to consent.
-- A live smoke test with a personal and a work account: the app folder's name in other
-  languages, hashes right after upload on work accounts, the copy monitor, web links.
+  goes into the build (`packaging/set-oauth-client.sh --onedrive CLIENT_ID`). **Done.**
+- **Still to do: publisher verification** (a verified Microsoft partner account on the
+  registration), so work and school accounts see a verified publisher and can consent where their
+  organisation only allows verified apps. Some organisations still need an admin to consent.
+- **Still to do:** a live smoke test with a work account, and on both kinds: the app folder's
+  name in other languages, hashes right after upload on work accounts, the copy monitor, web
+  links.
 
 ### Dropbox
 
-**Built** (phase 1), tested against the mock only; no real account has been used yet.
+**Released in 0.3.1** with CloudDrop's app key in the packaged builds; the live test that found
+OneDrive's upload bug passed on a real Dropbox account unchanged.
 
 - **`src/dropbox.rs`** is an API v2 client for an *App folder* app. The app folder is
   `top_parent` (id `"root"`), and every other id is Dropbox's `id:…`, which survives renames and
@@ -164,7 +173,8 @@ without a client id in the build or the config, every call asks to sign in.
   an app key, every call asks to sign in. The engine hashes in `DropboxContent` and rounds upload
   chunks to 4 MiB.
 
-**What a release needs:**
+**What the app is, and what is still to do** (1 and 2 are done; the app key goes into the build
+with `packaging/set-oauth-client.sh --dropbox APP_KEY`):
 
 1. An app in the Dropbox App Console: *Scoped access*, *App folder* (named `CloudDrop`, so the
    folder is `Apps/CloudDrop`), with the permissions `files.metadata.read`, `files.content.read`,
@@ -910,11 +920,11 @@ The GTK app and the Windows app mirror each other:
 | Phase | What | Done when | Status |
 | --- | --- | --- | --- |
 | 0 | `Remote` seam, `ContentHash`, DB v3, provider-neutral strings, `provider` in status. Google Drive only. | All current tests pass unchanged; Drive behaviour identical. | done |
-| 1 | **OneDrive** and **Dropbox**. Mock servers for both in `tests/common`, like the Drive one. Setup provider picker. | e2e suite green against all three mocks; live smoke test with real accounts. | built; live accounts still to try |
+| 1 | **OneDrive** and **Dropbox**. Mock servers for both in `tests/common`, like the Drive one. Setup provider picker. | e2e suite green against all three mocks; live smoke test with real accounts. | released in 0.3.1; tried by hand with real accounts, no automated live test yet |
 | 2 | **Self-hosted**: Nextcloud (first-class), generic WebDAV, S3-compatible, SFTP. Verify-by-download and keep-aside copy land here. | e2e against real servers in CI containers: Nextcloud, MinIO, OpenSSH. | built; tested on fakes and a real OpenSSH, not yet in CI containers |
 | 3 | **MEGA** (SDK or native, from the spike). | Resume, 2FA and verify-by-download tested; PPA and Windows builds reproducible. | built (native client); live account still to try |
 | 4 | **Proton Drive**, experimental, through Proton's official CLI; builds from source only. | Proton's third-party terms met; their review if they require one. | built (experimental, off in store builds); real account still to try |
-| 5 | **Several clouds at once**: one engine per connection (own folder, config file and data directory, see [Several clouds at once](#several-clouds-at-once)); the apps get a connection switcher. | Two providers syncing side by side. | built: tested with Google Drive, WebDAV and S3 fakes side by side (`tests/connections.rs`); the Windows agent not yet compiled on Windows |
+| 5 | **Several clouds at once**: one engine per connection (own folder, config file and data directory, see [Several clouds at once](#several-clouds-at-once)); the apps get a connection switcher. | Two providers syncing side by side. | built: tested with Google Drive, WebDAV and S3 fakes side by side (`tests/connections.rs`) on Linux and Windows CI |
 
 ## Testing
 
@@ -933,8 +943,6 @@ The GTK app and the Windows app mirror each other:
 
 ## Open questions
 
-- Phase 1 order: OneDrive first (more users; File Explorer shows it natively, which may confuse,
-  so test that) or Dropbox first (simplest API)?
 - Is "verify by download" acceptable as the default for MEGA, WebDAV and SFTP, or is a size-only
   "trust upload" preferable for very large files?
 

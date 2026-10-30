@@ -22,12 +22,14 @@ Depends: ${shlibs:Depends},
          xdg-utils
 Recommends: python3-nautilus,
             gnome-shell-extension-appindicator
-Description: Upload-only Google Drive folder
- CloudDrop uploads everything you put in ~/CloudDrop to Google Drive, with the
- same folder structure. Deleting a file on your computer never deletes it in
- Drive: it becomes cloud-only and can be downloaded back at any time, so you
- can free up space without losing anything. Space can also be freed
- automatically some days after upload.
+Description: Upload-only cloud folder (Google Drive, OneDrive, Dropbox, ...)
+ CloudDrop uploads everything you put in ~/CloudDrop to your cloud, with the
+ same folder structure: Google Drive, OneDrive, Dropbox, Nextcloud or another
+ WebDAV server, S3-compatible storage, SFTP or MEGA. Deleting a file on your
+ computer never deletes it in the cloud: it becomes cloud-only and can be
+ downloaded back at any time, so you can free up space without losing
+ anything. Space can also be freed automatically some days after upload, and
+ several folders can each upload to a cloud of their own.
  .
  It includes a desktop app with a setup assistant, a file browser and an
  activity history, a top-bar status icon, status icons and actions in GNOME
