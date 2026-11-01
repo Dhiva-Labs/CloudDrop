@@ -5,6 +5,7 @@
 [![CI](https://github.com/Dhiva-Labs/CloudDrop/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dhiva-Labs/CloudDrop/actions/workflows/ci.yml)
 ![Linux x64 | arm64](https://img.shields.io/badge/Linux-x64%20%7C%20arm64-informational?logo=linux&logoColor=white)
 ![Windows x64 | arm64](https://img.shields.io/badge/Windows-x64%20%7C%20arm64-informational?logo=windows&logoColor=white)
+![Linux: deb | rpm | Arch | Snap](https://img.shields.io/badge/Linux-deb%20%7C%20rpm%20%7C%20Arch%20%7C%20Snap-informational?logo=linux&logoColor=white)
 
 An upload-only cloud folder for Linux and Windows, on Intel/AMD (x64) and ARM (arm64)
 computers: Google Drive, OneDrive, Dropbox, Nextcloud and other WebDAV servers,
@@ -116,6 +117,45 @@ sudo snap install clouddrop
 CI builds the snap and the PPA's Debian package for both amd64 and arm64. The arm64
 ones reach the Snap Store and the PPA once they are uploaded there; until then, an
 arm64 computer can build from source.
+
+Fedora, RHEL, openSUSE and Arch (x86-64 and arm64), from
+[Releases](https://github.com/Dhiva-Labs/CloudDrop/releases) from the next release on,
+repackaged from the same build as the Debian package (which is attached there too, as
+`clouddrop_<version>_<amd64|arm64>.deb`):
+
+| | x86-64 | arm64 (aarch64) |
+| --- | --- | --- |
+| Fedora / RHEL / openSUSE | `clouddrop-<version>-1.x86_64.rpm` | `clouddrop-<version>-1.aarch64.rpm` |
+| Arch / Manjaro / EndeavourOS | `clouddrop-<version>-1-x86_64.pkg.tar.zst` | `clouddrop-<version>-1-aarch64.pkg.tar.zst` |
+| AUR recipe (`clouddrop-bin`) | `clouddrop-bin-<version>-aur.tar.gz` | (same file) |
+
+```bash
+sudo dnf install ./clouddrop-<version>-1.x86_64.rpm                              # Fedora, RHEL
+sudo zypper install --allow-unsigned-rpm ./clouddrop-<version>-1.x86_64.rpm      # openSUSE
+sudo pacman -U ./clouddrop-<version>-1-x86_64.pkg.tar.zst                         # Arch
+```
+
+They install what the Debian package does: the background service as a systemd user
+unit, the desktop app, and the Files extension (which needs `nautilus-python` on
+Fedora, `python3-nautilus` on openSUSE or `python-nautilus` on Arch; the packages
+recommend it, and the top-bar icon on GNOME needs the AppIndicator extension). They
+need glibc 2.39, GTK 4.12 and libadwaita 1.6 or newer: Fedora 41+, openSUSE
+Tumbleweed and current Arch, not RHEL 9 or openSUSE Leap 15. The `.rpm` is not
+signed (hence `--allow-unsigned-rpm`). `clouddrop-bin` on the AUR needs publishing
+first; until then, `makepkg -si` in the unpacked `clouddrop-bin-<version>-aur.tar.gz`.
+CI installs the `.rpm` on Fedora and openSUSE Tumbleweed and the Arch package on Arch
+Linux (x86-64; Arch has no official arm64 image, so the arm64 package gets a static
+check), and starts the command line and the desktop app there.
+
+Like the Windows zips, these are built in CI without CloudDrop's own Google, OneDrive
+and Dropbox clients: for those clouds, set up a client of your own as described in
+[From source](#from-source) and [docs/PROVIDERS.md](docs/PROVIDERS.md). Nextcloud,
+WebDAV, S3, SFTP and MEGA need nothing extra.
+
+There is no AppImage or Flatpak: the background service is a systemd user unit that
+the desktop app turns on with `systemctl --user`. Neither format can install that unit
+(or the Files extension), and the app has no other way to start the service outside the
+snap, so nothing would upload. On a distribution without a package here, use the snap.
 
 Open **CloudDrop** from your app grid, choose your cloud and sign in, and you're
 done: the assistant creates `~/CloudDrop`, starts the background service, adds the
