@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Fedora, RHEL, openSUSE and Arch packages** for x86-64 and arm64, repackaged from the
+  Debian package CI builds: `.rpm`, `.pkg.tar.zst` and an AUR `clouddrop-bin` recipe. Each
+  is installed on its distribution in CI, where the command line answers and the desktop
+  app starts. Releases also carry the Debian packages themselves.
+
 ## 0.3.1 — 2026-10-21
 
 OneDrive and Dropbox, ready to use.
