@@ -30,7 +30,7 @@ pbkdf2 = "0.13.0"
 rand = "0.10.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream", "http2", "query", "form"] }
 # SFTP: pure-Rust SSH on the aws-lc-rs backend reqwest already builds (no compression, so no flate2).
-russh = { version = "0.64.1", default-features = false, features = ["aws-lc-rs", "rsa"] }
+russh = { version = "0.65", default-features = false, features = ["aws-lc-rs", "rsa"] }
 russh-sftp = "3.0.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
