@@ -11,6 +11,8 @@ An upload-only cloud folder for Linux and Windows, on Intel/AMD (x64) and ARM (a
 computers: Google Drive, OneDrive, Dropbox, Nextcloud and other WebDAV servers,
 S3-compatible storage, SFTP and MEGA.
 
+**Documentation:** step-by-step guides at [learn.dhivalabs.com](https://learn.dhivalabs.com/apps/clouddrop/): [install](https://learn.dhivalabs.com/apps/clouddrop/install) · [beginner guide](https://learn.dhivalabs.com/apps/clouddrop/getting-started) · [troubleshooting](https://learn.dhivalabs.com/apps/clouddrop/faq). New to the topic? Try the [Files, backups and recovery](https://learn.dhivalabs.com/tracks/files/) learning track.
+
 Anything you put in your CloudDrop folder (`~/CloudDrop`, or `%USERPROFILE%\CloudDrop`
 on Windows) is uploaded to your cloud with the same folder structure, under a
 `CloudDrop` folder (in My Drive on Google Drive, in `Apps/CloudDrop` on OneDrive and
