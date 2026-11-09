@@ -32,7 +32,9 @@ license: MIT
 grade: stable
 confinement: strict
 icon: data/icons/hicolor/scalable/apps/com.dhivalabs.CloudDrop.svg
-website: https://github.com/Dhiva-Labs/CloudDrop
+website:
+  - https://github.com/Dhiva-Labs/CloudDrop
+  - https://learn.dhivalabs.com/apps/clouddrop/
 source-code: https://github.com/Dhiva-Labs/CloudDrop
 issues: https://github.com/Dhiva-Labs/CloudDrop/issues
 contact: reachout@dhivalabs.com
