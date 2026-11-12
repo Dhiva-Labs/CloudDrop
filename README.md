@@ -9,7 +9,10 @@
 
 An upload-only cloud folder for Linux and Windows, on Intel/AMD (x64) and ARM (arm64)
 computers: Google Drive, OneDrive, Dropbox, Nextcloud and other WebDAV servers,
-S3-compatible storage, SFTP and MEGA.
+S3-compatible storage, SFTP and MEGA (plus experimental Proton Drive in source builds).
+It is for people who want a folder that backs up what they drop into it and lets them
+reclaim disk space safely. The engine is a Rust daemon with a command line, a GTK4/libadwaita
+desktop app, a Nautilus extension and a Windows app.
 
 **Documentation:** step-by-step guides at [learn.dhivalabs.com](https://learn.dhivalabs.com/apps/clouddrop/): [install](https://learn.dhivalabs.com/apps/clouddrop/install) · [beginner guide](https://learn.dhivalabs.com/apps/clouddrop/getting-started) · [troubleshooting](https://learn.dhivalabs.com/apps/clouddrop/faq). New to the topic? Try the [Files, backups and recovery](https://learn.dhivalabs.com/tracks/files/) learning track.
 
@@ -52,6 +55,51 @@ CloudDrop asks each cloud for as little access as it allows: on Google Drive onl
 files it creates itself (`drive.file`), on OneDrive and Dropbox only its own app folder.
 Files go straight between your computer and your cloud; Dhiva Labs runs no server for
 CloudDrop. See the [privacy policy](PRIVACY.md).
+
+## Engineering highlights
+
+- **A provider-neutral upload engine.** One async (tokio) state machine in
+  [`src/engine.rs`](src/engine.rs) drives every cloud through the `Remote` enum and each
+  provider's `Capabilities` in [`src/remote.rs`](src/remote.rs): hash kind, whether ids are
+  stable or paths, forbidden characters, case sensitivity. Eight clients plug in
+  ([Google Drive](src/drive.rs), [OneDrive](src/onedrive.rs), [Dropbox](src/dropbox.rs),
+  [WebDAV/Nextcloud](src/webdav.rs), [S3](src/s3.rs), [SFTP](src/sftp.rs),
+  [MEGA](src/mega.rs), [Proton Drive](src/proton.rs)).
+- **State in SQLite, crash-safe.** Every file's state (`pending`, `uploading`, `synced`,
+  `cloud_only`, `error`), the resumable upload session, retry time and activity history live in
+  one WAL-mode database with schema migrations ([`src/db.rs`](src/db.rs)); the schema and the
+  rules are written down in [docs/DESIGN.md](docs/DESIGN.md). Renames and moves are detected
+  by inode, including ones made while the daemon was stopped.
+- **Resumable uploads and retry with backoff.** Chunked uploads keep their session in the
+  database, so a failure, a restart or a reboot continues the same session. Failures retry
+  with exponential backoff from 5 s up to 15 min, and never sooner than a provider's
+  `Retry-After` (`backoff_ms` and `retry_delay_ms` in [`src/engine.rs`](src/engine.rs)).
+  [`multi_chunk_upload_survives_errors_and_restart`](tests/e2e.rs) fails a chunk, stops the
+  daemon and checks that one session carries the whole file.
+- **It never deletes in the cloud, and checks before it frees space.** The `Remote`
+  interface has no delete-a-file call. The one deletion in the code is S3's rename, and only
+  in a bucket that keeps versions. Freeing local space re-hashes the file and compares it with the
+  cloud's checksum, or downloads the cloud copy and compares SHA-256 where there is none
+  ([`src/actions.rs`](src/actions.rs)); [`free_refuses_unverified_copies`](tests/e2e.rs) and
+  `without_hashes_freeing_downloads_and_compares_first` cover it.
+- **Tested against fake clouds.** [`tests/e2e.rs`](tests/e2e.rs) runs 44 end-to-end
+  scenarios (rename during upload, expired and revoked tokens, lost database, pause and
+  resume) against a mock Google Drive, and the other clouds have their own mock servers in
+  [`tests/common`](tests/common) (S3, Dropbox, OneDrive, WebDAV, MEGA, Proton) and an
+  OpenSSH-backed SFTP test that skips where `sshd` is not installed.
+- **Packaged for several platforms.** CI builds and tests on x64 and arm64, Linux and
+  Windows, and builds the Debian package, snap, rpm and Arch packages
+  ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+
+## Status and limits
+
+CloudDrop is young: the first release was 0.1.0, the latest is 0.3.1, and there is no
+security audit. Only Google Drive, OneDrive and Dropbox have been tried against real
+accounts. WebDAV/Nextcloud, S3, SFTP and MEGA are labelled preview below and are tested
+against fake servers (SFTP against a real OpenSSH server), not real services. Proton Drive is
+experimental and builds from source only. It is upload-only: there is no download-sync of
+changes made elsewhere in the cloud, and no AppImage or Flatpak (see
+[Install on Linux](#install-on-linux)).
 
 ## Clouds
 

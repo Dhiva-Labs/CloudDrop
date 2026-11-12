@@ -1,10 +1,17 @@
 # CloudDrop design
 
-CloudDrop keeps a local folder (default `~/CloudDrop`) uploaded to Google Drive.
-It is **upload-only**: anything added or edited locally is uploaded, with the
-same folder structure, under a `CloudDrop` folder in My Drive. Deleting a file
-locally never deletes it in Drive. The local copy is then "cloud-only" and can be
+CloudDrop keeps a local folder (default `~/CloudDrop`) uploaded to a cloud: Google Drive,
+OneDrive, Dropbox, WebDAV/Nextcloud, S3-compatible storage, SFTP or MEGA (and Proton Drive,
+experimental, in source builds). It is **upload-only**: anything added or edited locally is
+uploaded, with the same folder structure, under a `CloudDrop` folder in the cloud. Deleting a
+file locally never deletes it in the cloud. The local copy is then "cloud-only" and can be
 downloaded back at any time.
+
+This document started as the Google Drive design, and Google Drive is still the reference
+implementation. Where the text below says "Drive", it describes what happens on Google Drive;
+the provider-neutral rules are in [Providers](#providers) and [PROVIDERS.md](PROVIDERS.md),
+which has each cloud's details. Names such as the `drive_id` column and `drive_folder` setting
+are historical and hold the provider's id and the cloud folder's name for every provider.
 
 ## Components
 
@@ -19,7 +26,8 @@ downloaded back at any time.
 
 The engine reaches the cloud only through `src/remote.rs`: `Remote` (one variant per provider)
 and provider-neutral metadata, errors and content hashes. Google Drive's client is
-`src/drive.rs`; [PROVIDERS.md](PROVIDERS.md) is the plan for the others. Where providers
+`src/drive.rs`; the others are `onedrive.rs`, `dropbox.rs`, `webdav.rs`, `s3.rs`, `sftp.rs`,
+`mega.rs` and `proton.rs` (see [PROVIDERS.md](PROVIDERS.md)). Where providers
 differ, the engine follows the provider's `Capabilities` (see "Providers" below).
 
 ## Files on disk
@@ -42,7 +50,7 @@ data directory. The data directory also holds what belongs to the whole installa
 ### config.toml
 
 ```toml
-provider = "gdrive"                  # the cloud; absent = Google Drive, the only one so far
+provider = "gdrive"                  # the cloud (an id from `clouddrop providers`); absent = Google Drive
 sync_dir = "/home/me/CloudDrop"     # absolute path
 drive_folder = "CloudDrop"           # name of the top folder created in My Drive (`remote_folder` is read too)
 client_id = "....apps.googleusercontent.com"
